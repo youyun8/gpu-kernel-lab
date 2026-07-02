@@ -34,6 +34,7 @@ import F29 from './f29-low-precision-quantization-layouts.mdx';
 import F30 from './f30-autotuning-specialization-codegen.mdx';
 import F31 from './f31-correctness-determinism-debugging.mdx';
 import F32 from './f32-optimization-checklist.mdx';
+import G33 from './g33-nccl-rccl-collectives.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
   'a0-parallelization-and-data-races': A0,
@@ -69,4 +70,5 @@ export const chapterComponents: Record<string, ComponentType> = {
   'f30-autotuning-specialization-codegen': F30,
   'f31-correctness-determinism-debugging': F31,
   'f32-optimization-checklist': F32,
+  'g33-nccl-rccl-collectives': G33,
 };

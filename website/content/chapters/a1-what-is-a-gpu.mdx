@@ -77,7 +77,7 @@ HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多
 - **Make work uniform**: 讓同一 warp/wavefront 內的 lanes 做相似工作。 遇到 data-dependent branch 時, 先排序、分桶或拆成多個 kernel, 不要讓一個 warp 裡一半 lanes 空等。
 - **Move less data**: GPU 算術很強, HBM/PCIe 才常是瓶頸。 coalescing、tiling、fusion、quantization、prepack 都是在減少昂貴資料搬移。
 - **Reuse on chip**: 被多次使用的資料應該盡量留在 register、shared memory/LDS 或 L2。 GEMM、stencil、attention 都是把 reuse 顯式化的問題。
-- **Pick the right engine**: scalar CUDA core、Tensor Core/MFMA、copy engine、NCCL/RCCL communication engine 各有用途。 高效系統會讓它們重疊, 而不是只盯著一個 kernel。
+- **Pick the right engine**: scalar CUDA core、Tensor Core/MFMA、copy engine、NCCL/RCCL communication engine ([第 33 章](/chapters/g33-nccl-rccl-collectives)) 各有用途。 高效系統會讓它們重疊, 而不是只盯著一個 kernel。
 
 一個實務例子: 如果你要把 100 個小 tensor 各做一次 bias + activation, 直接 launch 100 個小 kernel 通常不划算。 更好的路線可能是先把 tensor batch 起來、用一個 fused kernel 處理, 或讓 framework 用 CUDA Graph/HIP Graph replay 固定 DAG。 這不是語法問題, 而是「GPU 喜歡大量同質工作」這個設計哲學的直接推論。
 

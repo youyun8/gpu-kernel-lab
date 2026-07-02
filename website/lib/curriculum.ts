@@ -315,6 +315,24 @@ export const tracks: TrackMeta[] = [
       },
     ],
   },
+  {
+    id: 'g-multi-gpu',
+    label: 'Track G — Multi-GPU / Collectives',
+    level: 'Production',
+    color: '#2f81f7',
+    description:
+      '單卡塞不下就得跨卡: collective primitives、ring/tree 演算法、algbw vs busbw、NVLink/xGMI 拓撲與 compute-communication overlap。',
+    chapters: [
+      {
+        slug: 'g33-nccl-rccl-collectives',
+        num: 33,
+        title: 'NCCL / RCCL 與 Multi-GPU Collectives',
+        summary:
+          'All-reduce = reduce-scatter + all-gather、ring vs tree、busbw 推導、NVLink/NVSwitch vs xGMI、NCCL↔RCCL 可攜性與 overlap。',
+        lab: 'kernels/07-multi-gpu-collectives',
+      },
+    ],
+  },
 ];
 
 export interface FlatChapter extends ChapterMeta {

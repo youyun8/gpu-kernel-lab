@@ -1,4 +1,6 @@
 import type { MDXComponents } from 'mdx/types';
+import type { AnchorHTMLAttributes } from 'react';
+import Link from 'next/link';
 import { MemoryCoalescingVisualizer } from '@/components/widgets/MemoryCoalescingVisualizer';
 import { OccupancyCalculator } from '@/components/widgets/OccupancyCalculator';
 import { TilingAnimator } from '@/components/widgets/TilingAnimator';
@@ -16,8 +18,27 @@ import { GatherScatterVisualizer } from '@/components/widgets/GatherScatterVisua
 import { CollectiveAnimator } from '@/components/widgets/CollectiveAnimator';
 import { DataRaceTimeline } from '@/components/widgets/DataRaceTimeline';
 
+// Route internal markdown links through next/link so the static-export
+// basePath is applied; external links open in a new tab.
+function MdxAnchor({ href = '', children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  if (href.startsWith('/')) {
+    return (
+      <Link href={href} {...rest}>
+        {children}
+      </Link>
+    );
+  }
+  const isExternal = href.startsWith('http');
+  return (
+    <a href={href} {...(isExternal ? { target: '_blank', rel: 'noreferrer' } : {})} {...rest}>
+      {children}
+    </a>
+  );
+}
+
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
+    a: MdxAnchor,
     MemoryCoalescingVisualizer,
     OccupancyCalculator,
     TilingAnimator,

@@ -95,7 +95,7 @@ Fusion 可以省掉 launch 和 global memory round trip, 但也可能:
 
 - 使用 pinned memory、Peer-to-Peer、NVLink / xGMI 路徑, 避免多餘 host bounce。
 - 將 gradient bucket、activation shard 或 KV cache page 切成能 overlap 的粒度。
-- 讓 NCCL/RCCL communication stream 與 compute stream 用 event 建依賴。
+- 讓 NCCL/RCCL communication stream 與 compute stream 用 event 建依賴 (collective 演算法與 busbw 見 [第 33 章](/chapters/g33-nccl-rccl-collectives))。
 - 量測 exposed communication time, 不是只看 bandwidth 峰值。
 
 <Callout variant="warn" title="同步點比你想像多">
