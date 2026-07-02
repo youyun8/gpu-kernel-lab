@@ -28,6 +28,25 @@ for each block of Q (outer):
 
 關鍵收益: 中間的 $S_{ij}$ 只有 block 大小、全程留在 shared memory/register, 從不寫 HBM。 HBM traffic 從 $O (N^2)$ 降到 $O (N)$ — 這是把「IO-awareness」帶進 kernel 設計的教科書範例, 也讓 attention 從 memory-bound 翻身接近 compute-bound。 Backward 用同樣的 tiling, 靠重算 (recompute) $S$ 避免存下整個矩陣。
 
+虛擬碼落到真的 kernel 裡, online 更新的核心就這幾行 (取自 lab 的 `attention_naive`, 一個 block 處理一個 query row):
+
+```cpp
+float m_old = m_shared;
+if (e == 0) {
+  float s = score_parts[0] * scale;      // this key's score
+  float m_new = fmaxf(m_old, s);
+  p_shared = expf(s - m_new);
+  d_shared = d_shared * expf(m_old - m_new) + p_shared;  // rescale old denom
+  m_shared = m_new;
+}
+__syncthreads();
+
+// Every thread rescales its output accumulator the same way, then adds p * v.
+acc = acc * expf(m_old - m_shared) + p_shared * v[key * kHeadDim + e];
+```
+
+整個 $N \times N$ 的分數矩陣自始至終只存在於這幾個 running 變數裡。
+
 <Callout variant="insight" title="這章其實沒有新東西">
 FlashAttention 不引入任何你沒學過的原語: 它就是 online softmax (第 10 章) + tiling (第 7、12 章) + 對 memory 階層的執著 (第 3、5 章)。 這正是本站的論點 — 頂尖 kernel 是基礎技巧的深度組合, 不是魔法。
 </Callout>
@@ -67,7 +86,7 @@ Decode 階段特別值得注意: batch=1、query 只有一個 token, 這是純 m
 因此 attention backend 不是單選題。 Prefill、decode、長上下文、短上下文、量化、不同 mask 可能各自對應不同 kernel。 Production 引擎通常維護一個 dispatch table, 而不是「FlashAttention 永遠最快」。
 
 <LabBox path="kernels/04-reductions-softmax">
-本章沒有獨立的 attention lab (完整 FlashAttention 太長), 但 `softmax` target 的 online 版本就是 FlashAttention 的 softmax 核心。 動手: 把 online softmax 擴展成「一個 block 處理 Q 的一 row、內迴圈掃 K/V tile、維護 (m, l, acc)」的簡化 single-head attention, 對 PyTorch 的 `sdpa` 做 correctness 比對。 你會親手重現上面的虛擬碼。
+`attention_naive` 是上面虛擬碼的完整可跑實作: 一個 block 處理 Q 的一 row、內迴圈掃 K/V、維護 (m, d, acc), 並和 two-pass 的 host reference 比對正確性。 動手挑戰: (1) 把內迴圈改成一次處理一個 K/V tile 而非單一 key (真正的 FlashAttention 分塊); (2) 加上 causal mask 並跳過未來的 key; (3) 對 PyTorch 的 `sdpa` 做 correctness 與速度比對。 `kv_page_gather` 則示範 serving 場景 (第 25 章) 的 paged KV 讀取。
 </LabBox>
 
 <Quiz

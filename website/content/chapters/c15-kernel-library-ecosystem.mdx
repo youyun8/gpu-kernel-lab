@@ -8,7 +8,21 @@
 
 **Triton** 是一個 Python DSL: 你用類似 NumPy 的 block-level 語法寫 kernel, compiler 幫你處理 shared memory 配置、coalescing、pipelining。 生產力極高, 可攜性好 (同一份 Triton 可跑 NVIDIA 與 AMD), 峰值效能通常略低於手調 CUTLASS 但常常「夠好」。 它也是 `torch.compile` 的 codegen backend (第 20 章)。
 
-**cuBLAS / hipBLASLt** 是黑盒 BLAS: 最省事、對標準 GEMM 通常最快, 但無法客製 fusion (cuBLASLt 的 epilogue 選單除外)、也看不到內部。 第 13 章講過它們內部的 kernel zoo 與 heuristic。
+**cuBLAS / hipBLASLt** 是黑盒 BLAS: 最省事、對標準 GEMM 通常最快, 但無法客製 fusion (cuBLASLt 的 epilogue 選單除外)、也看不到內部。 第 13 章講過它們內部的 kernel zoo 與 heuristic。 呼叫端長這樣 — 注意 BLAS 有自己的 handle 與 status code, 錯誤檢查和 runtime API 是兩套:
+
+```cpp
+// cuBLAS: one call replaces the whole sgemm_step0..step4 journey.
+cublasHandle_t handle;
+BLAS_CHECK(cublasCreate(&handle));
+const float alpha = 1.0f, beta = 0.0f;
+BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k,
+                       &alpha, dev_a, m, dev_b, k, &beta, dev_c, m));
+
+// hipBLAS mirrors the API one-to-one:
+// hipblasSgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N, m, n, k, ...)
+```
+
+兩個容易踩的細節: BLAS 介面是 **column-major** (Fortran 傳統, 所以 row-major 的 C 陣列常用「交換 A/B 順序」的技巧), 而且 `cublasSgemm` 是非同步的 — 計時要用 event 或先 synchronize (第 4 章)。
 
 | 需求 | 建議 |
 | --- | --- |
@@ -55,7 +69,7 @@ Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次
 例子: 一個固定 shape 的 fp8 GEMM + custom dequant + activation, NVIDIA 上可用 CUTLASS epilogue visitor; ROCm 上先試 AITER/CK; 若兩邊都要快速交付, Triton prototype 先建立 correctness 和收益上限, 再決定是否下探。
 
 <LabBox path="kernels/03-gemm">
-`sgemm_cublas` (CUDA)/ `sgemm_hipblaslt` (HIP) 把你手寫的最佳版本和 library 並排 benchmark, 印出兩者的 GFLOP/s 與比值。 跑一遍, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
+`blas_baseline` 用 cuBLAS (CUDA) 或 hipBLAS (HIP) 跑同一個 2048³ SGEMM (CMake 找不到 BLAS library 時會自動略過這個 target)。 把它的 GFLOP/s 和你手寫的 `sgemm_step4_double_buffer` 並排比較, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
 </LabBox>
 
 <Quiz

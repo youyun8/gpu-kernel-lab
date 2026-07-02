@@ -59,6 +59,24 @@ $$
 3. AI = FLOP / bytes, 量到的 GFLOP/s 當縱座標, 點上去。
 4. 看點離哪一段屋頂近, 決定優化方向。
 
+親手畫出這條屋頂最有感。 Lab 的 `roofline_probe` 用一個 AI 可調的 micro-kernel 掃過整條曲線:
+
+```cpp
+// fmaIters controls arithmetic intensity: 2 FLOP per iteration on the
+// same loaded element, so AI = 2 * fmaIters / 8 bytes (one read + one write).
+__global__ void variableIntensity(const float* in, float* out, int n, int fmaIters) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float acc = in[i];
+  for (int t = 0; t < fmaIters; ++t) {
+    acc = acc * 1.0000001f + 0.5f;  // one FMA
+  }
+  out[i] = acc;
+}
+```
+
+對 `fmaIters = 1, 4, 16, 64, 256` 各量一次 (AI 從 0.25 到 64 FLOP/byte): 低 AI 的點 GB/s 幾乎不變 (貼著斜線)、GFLOP/s 線性上升; 跨過 ridge point 之後 GFLOP/s 停住 (頂到水平線)、GB/s 開始下降。 一個 kernel 就把整張 roofline 掃出來了。
+
 ## Optimizations Move The Point
 
 Roofline 的好處是能把技巧翻譯成座標變化:

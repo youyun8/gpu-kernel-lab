@@ -37,6 +37,23 @@ $$
 - **搬一次, 用很久**: 盡量讓資料留在 device 上跨多個 kernel 使用, 不要每個 kernel 前後都 host↔device 搬運。
 - **Pinned memory**: 用 `cudaMallocHost` / `hipHostMalloc` 配置不可分頁的 host memory, 傳輸更快且可與計算重疊 (async copy + stream)。
 
+差多少? 自己量一次:
+
+```cpp
+// Pageable: an ordinary heap allocation. The driver must stage each
+// copy through an internal pinned buffer.
+std::vector<float> pageable(kBytes / sizeof(float), 1.0f);
+
+// Pinned: page-locked, DMA-able, and a prerequisite for async copy.
+float* pinned = nullptr;
+GPU_CHECK(gpuMallocHost(reinterpret_cast<void**>(&pinned), kBytes));
+
+std::printf("  pageable: %6.1f GB/s\n", copyGbPerSec(dev, pageable.data(), kBytes));
+std::printf("  pinned:   %6.1f GB/s\n", copyGbPerSec(dev, pinned, kBytes));
+```
+
+Lab 的 `pinned_vs_pageable` 用 256 MiB 的 H2D copy 實測兩者。 Pinned 通常快 1.5–3 倍, 而且只有它能真正非同步 — pageable copy 即使呼叫 `cudaMemcpyAsync` 也會退化成同步行為 (第 28 章)。
+
 另外還有 **unified memory** (`cudaMallocManaged`): 讓 host/device 共用一個指標, 由驅動自動搬頁。 原型開發方便, 但效能敏感的程式仍偏好顯式管理 — 你比 page-fault 機制更清楚資料何時在哪。
 
 ## 把階層讀成一張優化地圖
@@ -62,8 +79,27 @@ $$
 
 這個 placement 問題比「哪種記憶體最快」更重要。 最快的 register 若造成 spill 就會變最慢; shared memory 若沒有 reuse 或有 32-way bank conflict, 也只是昂貴的中轉站。
 
+一個 kernel 裡通常三層並用。 用第 6 章 lab 的 box filter 當例子, 逐行標出每筆資料住哪裡:
+
+```cpp
+__global__ void boxFilterShared(const float* in, float* out, int n) {
+  __shared__ float tile[kBlockSize + 2 * kRadius];  // shared memory: block-reused tile
+  int i = blockIdx.x * blockDim.x + threadIdx.x;    // register: thread-local scalar
+
+  tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;  // global -> shared, coalesced
+  __syncthreads();
+
+  float sum = 0.0f;                                 // register: accumulator
+  for (int r = -kRadius; r <= kRadius; ++r)
+    sum += tile[kRadius + threadIdx.x + r];         // 17 reads, all from shared memory
+  out[i] = sum / (2 * kRadius + 1);                 // one write back to global
+}
+```
+
+每個 input 元素從 global memory 只被搬一次, 之後的 17 次讀取全部發生在便宜的 shared memory — 這就是「把熱資料往上搬」的最小完整範例 (完整程式在 `kernels/02-memory/access-patterns/cooperative_tile_load.cpp`)。
+
 <LabBox path="kernels/02-memory">
-執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。 小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬。 這個實驗讓你「看見」cache 與 global memory 的分界。
+執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。 小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬 — 這個實驗讓你「看見」cache 與 global memory 的分界。 接著跑 `pinned_vs_pageable`, 量出 host↔device 這一層的 pinned/pageable 差距。
 </LabBox>
 
 <Quiz

@@ -52,7 +52,17 @@ AITER 的定位是「生態加速器」: vLLM 與 SGLang 的 ROCm backend 大量
 
 在 AMD 上壓 kernel 效能時, 多看這些:
 
-- **Wavefront width**: 所有 warp-level code 用 `warpSize`, ballot mask 型別要能容納 64 lanes。
+- **Wavefront width**: 所有 warp-level code 用 `warpSize`, ballot mask 型別要能容納 64 lanes:
+
+```cpp
+// Wavefront-width portability: never hardcode 32.
+uint64_t voted = __ballot(pred);   // 64 meaningful bits on CDNA, 32 on NVIDIA
+for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+  v += __shfl_down(v, offset);     // 6 steps on a 64-lane wavefront, 5 on a warp
+}
+```
+
+  第 9 章的 `warp_reduce` lab 有完整的可攜版本。
 - **LDS layout**: bank conflict 和 NVIDIA 類似但不是完全相同, transpose/GEMM swizzle 要重測。
 - **MFMA shape**: 選 tile 時配合 CDNA 支援的 MFMA 指令形狀, 不要照抄 Tensor Core fragment。
 - **Direct-to-LDS path**: 大型 pipeline 盡量使用 CK/AITER 已封裝好的 LDS copy 機制。
@@ -62,7 +72,7 @@ AITER 的定位是「生態加速器」: vLLM 與 SGLang 的 ROCm backend 大量
 ROCm 的性能工程更依賴「用對 library 版本 + tune cache」。 升級 ROCm 後, 舊 tuning 結果應視為可疑並重新抽樣驗證。
 
 <LabBox path="kernels/03-gemm">
-在 ROCm 環境下: (1) 跑 `sgemm_hipblaslt` 記下數字; (2) 用 `hipblaslt-bench --algo_method all` 對同形狀枚舉, 看 heuristic 選的和實測最佳差多少; (3) 若裝了 PyTorch, 開 `PYTORCH_TUNABLEOP_ENABLED=1` 跑一個 matmul script, 觀察 tuning 前後與 CSV 內容。 這條流程就是 MI300X 上壓 GEMM 效能的標準作業。
+在 ROCm 環境下: (1) 用 `cmake -DGKLAB_FORCE_HIP=ON` 建置後跑 `blas_baseline` (走 hipBLAS) 記下數字; (2) 用 `hipblaslt-bench --algo_method all` 對同形狀枚舉, 看 heuristic 選的和實測最佳差多少; (3) 若裝了 PyTorch, 開 `PYTORCH_TUNABLEOP_ENABLED=1` 跑一個 matmul script, 觀察 tuning 前後與 CSV 內容。 這條流程就是 MI300X 上壓 GEMM 效能的標準作業。
 </LabBox>
 
 <Quiz

@@ -42,6 +42,21 @@ CUDA_CHECK(cudaStreamSynchronize(stream));
 
 Sanitizer 很慢, 但應該跑小 shape CI。 很多 tail bug 用大型 benchmark 反而不容易觸發。
 
+具體指令 (以第 0 章的 histogram race demo 當靶):
+
+```bash
+# NVIDIA: three tools, one binary. racecheck flags the racy kernel's
+# unsynchronized read-modify-write on shared/global memory.
+compute-sanitizer --tool memcheck  ./gpu_histogram_race
+compute-sanitizer --tool racecheck ./gpu_histogram_race
+compute-sanitizer --tool initcheck ./gpu_histogram_race
+
+# CPU-side races (host threading bugs): ThreadSanitizer.
+g++ -fsanitize=thread -g -O1 race_demo.cpp -o race_demo && ./race_demo
+```
+
+第 0 章有這兩個工具抓到 race 的實際輸出範例。
+
 ## Synchronization Bug 清單
 
 最常見錯誤包括:
@@ -65,6 +80,21 @@ GPU 結果不一定 bit-exact:
 - Library autotuner 可能選到不同 algorithm。
 
 若產品需要 reproducible result, 要固定 algorithm、關閉非決定性路徑、避免 atomic reduction, 並用固定 reduction tree。 若只需要 numerical equivalence, 測試應使用合理 tolerance, 並記錄 dtype 和 math mode。
+
+兩種 reduction 收尾的差異就是 determinism 的分水嶺:
+
+```cpp
+// Non-deterministic: blocks finish in arbitrary order, so the float
+// additions happen in a different order every run. Fast, low bits vary.
+if (threadIdx.x == 0) atomicAdd(result, block_sum);
+
+// Deterministic: write per-block partials, then reduce them in a fixed
+// tree order in a second kernel. Same bits every run.
+if (threadIdx.x == 0) partials[blockIdx.x] = block_sum;
+// ... launch reducePartials<<<1, kBlockSize>>>(partials, num_blocks, result)
+```
+
+`kernels/00-parallel-foundations` 的 `gpu_block_reduce` 與 `gpu_threadfence` 分別實作兩種收尾, 可以直接比對多次執行的 bit pattern。
 
 ## Tolerance 設計
 

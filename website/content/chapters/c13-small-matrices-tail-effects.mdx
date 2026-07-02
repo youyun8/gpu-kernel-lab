@@ -12,6 +12,19 @@ $$
 
 130 個 CTA 的效率只有 $130 / 256 \approx 51\%$。 這就是 wave quantization。
 
+這個數字可以在 launch 前算出來, 有些 library 就用它決定要不要換 tile size 或開 Split-K:
+
+```cpp
+// Predict wave quantization before launching (see chapters 1 and 8 for
+// where sm_count and blocks_per_sm come from).
+int sm_count = 0;
+GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));
+int blocks_per_sm = 0;  // from cudaOccupancyMaxActiveBlocksPerMultiprocessor
+int ctas_per_wave = sm_count * blocks_per_sm;
+int waves = (cta_count + ctas_per_wave - 1) / ctas_per_wave;  // ceil-div
+double efficiency = static_cast<double>(cta_count) / (static_cast<double>(waves) * ctas_per_wave);
+```
+
 推廣一下, 這也解釋了一個常見的觀察: 把 N 從 2048 加到 2064, 時間卻跳了一大截 — 多出的那一小條 tile 剛好多開了一個 wave。 Deep learning 的 layer 尺寸若能配合 tile 與 wave 的整數倍 (例如 batch 或 hidden dim 選 tile size 的倍數), 常常白拿幾成效能, NVIDIA 的 DL performance 文件對此有專門建議。
 
 ## Tail effect

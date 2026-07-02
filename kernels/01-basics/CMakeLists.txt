@@ -1,2 +1,4 @@
 gklab_add_kernel(vector_add vector_add.cpp)
 gklab_add_kernel(occupancy_experiment occupancy_experiment.cpp)
+gklab_add_kernel(device_query device_query.cpp)
+gklab_add_kernel(branch_divergence branch_divergence.cpp)

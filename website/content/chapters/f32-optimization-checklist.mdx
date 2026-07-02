@@ -97,6 +97,23 @@
 7. Keep the change only if the metric and wall time both improve.
 ```
 
+用這個 repo 的工具把迴圈落地, 一輪大約長這樣:
+
+```bash
+# 1-2. Correctness + baseline numbers come from the built-in harness.
+cmake -B build -S kernels && cmake --build build -j
+./build/03-gemm/sgemm_step2_register_tiling        # verifyClose + GB/s + GFLOP/s
+
+# 3. Classify the bottleneck (chapter 16).
+ncu --section SpeedOfLight -k regex:sgemm ./build/03-gemm/sgemm_step2_register_tiling
+
+# 5. Tail shapes before you trust anything (chapter 31).
+./build/exercises/ex_c_tail_correctness
+
+# 6. Re-profile and diff against the previous best.
+ncu --import baseline.ncu-rep --import current.ncu-rep
+```
+
 <LabBox path="kernels">
 挑任一 lab kernel, 寫一份 optimization log: baseline 數字、profiler bottleneck、採用技巧、修改後 metric、correctness/tail shape 結果。 最後把最快版本和最清楚版本都保留, 註明何時該用哪一個。
 </LabBox>
