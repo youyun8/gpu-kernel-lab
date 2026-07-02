@@ -4,7 +4,7 @@
 
 ## 三種抽象層次
 
-**CUTLASS(NVIDIA)** 是一套 C++ template library,把 GEMM/conv 拆成分層的可組合元件:device → kernel → threadblock → warp → instruction (MMA)。你可以在任一層插入自訂 epilogue、fusion、data type,同時複用底層高度優化的 pipeline。它是「我要 library 級效能,但需要客製」的答案。AMD 的對應是 **Composable Kernel (CK)**,同樣走 template 分層、可組合的路線。
+**CUTLASS (NVIDIA)** 是一套 C++ template library,把 GEMM/conv 拆成分層的可組合元件:device → kernel → threadblock → warp → instruction (MMA)。你可以在任一層插入自訂 epilogue、fusion、data type,同時複用底層高度優化的 pipeline。它是「我要 library 級效能,但需要客製」的答案。AMD 的對應是 **Composable Kernel (CK)**,同樣走 template 分層、可組合的路線。
 
 **Triton** 是一個 Python DSL:你用類似 NumPy 的 block-level 語法寫 kernel,compiler 幫你處理 shared memory 配置、coalescing、pipelining。生產力極高,可攜性好(同一份 Triton 可跑 NVIDIA 與 AMD),峰值效能通常略低於手調 CUTLASS 但常常「夠好」。
 
@@ -25,7 +25,7 @@
 
 ## autotune 的角色
 
-同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。library(cuBLASLt、CK、Triton 的 autotuner)會在候選 config 中搜尋最佳解。你自己寫的 kernel 若要對多種 shape 都快,也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工,也是 library 真正的價值所在。
+同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。library (cuBLASLt、CK、Triton 的 autotuner)會在候選 config 中搜尋最佳解。你自己寫的 kernel 若要對多種 shape 都快,也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工,也是 library 真正的價值所在。
 
 <LabBox path="kernels/03-gemm">
 `sgemm_cublas`(CUDA)/ `sgemm_hipblaslt`(HIP)把你手寫的最佳版本和 library 並排 benchmark,印出兩者的 GFLOP/s 與比值。跑一遍,誠實面對差距 — 然後想想:剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?

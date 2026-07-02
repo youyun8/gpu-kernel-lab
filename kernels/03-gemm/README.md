@@ -10,14 +10,14 @@
 - `sgemm_step3_vectorized` — 在 step 2 基礎上對 B 做 float4 vectorized load。
 - `sgemm_step4_double_buffer` — double buffering / software pipelining。
 
-全部使用 portability header,同一份 `.cpp` 在 CUDA(nvcc)與 HIP(hipcc)皆可編譯。
+全部使用 portability header,同一份 `.cpp` 在 CUDA (nvcc)與 HIP (hipcc)皆可編譯。
 
 ## Step 5 與 library 比較(平台特定,不在預設 build)
 
-Step 5(Tensor Core WMMA / AMD MFMA)與 Step 6(cuBLAS / hipBLASLt 比較)高度依賴各平台的 arch 與 library,故不放進跨平台的預設 build,以免在缺對應 SDK 的機器上 configure 失敗。實作指引:
+Step 5 (Tensor Core WMMA / AMD MFMA)與 Step 6 (cuBLAS / hipBLASLt 比較)高度依賴各平台的 arch 與 library,故不放進跨平台的預設 build,以免在缺對應 SDK 的機器上 configure 失敗。實作指引:
 
 - **CUDA WMMA**:使用 `#include <mma.h>` 與 `nvcuda::wmma` API,以 `half` 輸入、`float` accumulator,tile 為 16×16×16。需 `-arch=sm_70` 以上。
-- **AMD MFMA**:使用 `__builtin_amdgcn_mfma_f32_16x16x4f32` 等 intrinsics(或透過 rocWMMA),需 CDNA 架構(gfx908/gfx90a/gfx942)。
+- **AMD MFMA**:使用 `__builtin_amdgcn_mfma_f32_16x16x4f32` 等 intrinsics (或透過 rocWMMA),需 CDNA 架構(gfx908/gfx90a/gfx942)。
 - **Library 參考**:CUDA 連結 `-lcublas` 呼叫 `cublasSgemm`;ROCm 連結 hipBLASLt 呼叫對應 API。把回報的 GFLOP/s 當成 100% 基準。
 
 若要啟用,於對應平台安裝 SDK 後,參考 `bench_all.py` 的 `--with-library` 說明擴充。

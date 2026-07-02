@@ -4,21 +4,21 @@
 
 ## Arithmetic intensity 是關鍵座標
 
-roofline 的橫軸是 arithmetic intensity(AI):每從 memory 搬一個 byte,做了多少 FLOP。
+roofline 的橫軸是 arithmetic intensity (AI):每從 memory 搬一個 byte,做了多少 FLOP。
 
 $$
 \text{AI} = \frac{\text{FLOP count}}{\text{bytes moved}} \quad (\text{FLOP/byte})
 $$
 
-縱軸是可達到的 throughput(GFLOP/s)。屋頂由兩段組成:一條斜線(受 memory bandwidth 限制,$\text{perf} = \text{BW} \times \text{AI}$)和一條水平線(受 compute peak 限制)。兩者的交點叫 ridge point。
+縱軸是可達到的 throughput (GFLOP/s)。屋頂由兩段組成:一條斜線(受 memory bandwidth 限制,$\text{perf} = \text{BW} \times \text{AI}$)和一條水平線(受 compute peak 限制)。兩者的交點叫 ridge point。
 
 $$
-\text{attainable perf} = \min(\text{peak compute},\; \text{peak bandwidth} \times \text{AI})
+\text{attainable perf} = \min (\text{peak compute},\; \text{peak bandwidth} \times \text{AI})
 $$
 
 ## Bandwidth-bound vs. compute-bound
 
-- AI 落在 ridge point **左邊** → 你在斜線下,是 **bandwidth-bound**:瓶頸是搬資料。優化方向是提高 coalescing、減少冗餘搬移、提高 reuse(拉高 AI)。
+- AI 落在 ridge point **左邊** → 你在斜線下,是 **bandwidth-bound**:瓶頸是搬資料。優化方向是提高 coalescing、減少冗餘搬移、提高 reuse (拉高 AI)。
 - AI 落在 ridge point **右邊** → 你在水平線下,是 **compute-bound**:瓶頸是算術單元。優化方向是提高 ILP、用 FMA、用 Tensor Core/MFMA。
 
 <RooflineChart />
@@ -31,13 +31,13 @@ $$
 
 ## 怎麼把你的 kernel 標上去
 
-1. 數出 FLOP count(演算法決定,通常固定)。
-2. 估 bytes moved(理想值可從演算法算,實際值可從 profiler 的 memory throughput 讀)。
+1. 數出 FLOP count (演算法決定,通常固定)。
+2. 估 bytes moved (理想值可從演算法算,實際值可從 profiler 的 memory throughput 讀)。
 3. AI = FLOP / bytes,量到的 GFLOP/s 當縱座標,點上去。
 4. 看點離哪一段屋頂近,決定優化方向。
 
 <LabBox path="kernels/02-memory">
-跑 `roofline_probe`:它對幾個不同 AI 的 micro-kernel(從純 copy 到每 byte 做很多 FMA)各量一次,印出 (AI, GFLOP/s)。把這些點對照上面的互動 roofline,你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。
+跑 `roofline_probe`:它對幾個不同 AI 的 micro-kernel (從純 copy 到每 byte 做很多 FMA)各量一次,印出 (AI, GFLOP/s)。把這些點對照上面的互動 roofline,你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。
 </LabBox>
 
 <Quiz

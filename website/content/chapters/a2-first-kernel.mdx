@@ -4,7 +4,7 @@
 
 ## thread / block / grid hierarchy
 
-GPU 的並行度用三層結構描述。最小單位是 thread;threads 組成 block(同一 block 的 threads 能共用 shared memory、能 `__syncthreads()`);blocks 組成 grid。你在 launch kernel 時指定 grid 與 block 的維度,硬體再把它們排到 SM/CU 上。
+GPU 的並行度用三層結構描述。最小單位是 thread;threads 組成 block (同一 block 的 threads 能共用 shared memory、能 `__syncthreads ()`);blocks 組成 grid。你在 launch kernel 時指定 grid 與 block 的維度,硬體再把它們排到 SM/CU 上。
 
 每個 thread 用內建變數算出「我負責哪一筆資料」:
 
@@ -74,7 +74,7 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 本站的 kernels 用 CMake 包起來,自動偵測平台並帶入正確的 arch flag,你不必手記這些參數。
 
 <LabBox path="kernels/01-basics">
-編譯並執行 `vector_add`。它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對(correctness check),再用 benchmark harness 報告 achieved bandwidth(GB/s)與 % of peak。vector add 是純 memory-bound,你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的,第 5 章的 roofline 會解釋為什麼。
+編譯並執行 `vector_add`。它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對(correctness check),再用 benchmark harness 報告 achieved bandwidth (GB/s)與 % of peak。vector add 是純 memory-bound,你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的,第 5 章的 roofline 會解釋為什麼。
 </LabBox>
 
 <Quiz

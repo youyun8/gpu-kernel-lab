@@ -9,7 +9,7 @@
 
 ## 命名規範
 
-全 repo 的 C++ 遵守:PascalCase 用於 class/struct(如 `BenchResult`)、camelCase 用於函式(如 `benchmarkKernel`)、`kCamelCase` 用於 constexpr/const(如 `kDefaultIters`)、snake_case 用於一般變數與參數。所有註解為英文。
+全 repo 的 C++ 遵守:PascalCase 用於 class/struct (如 `BenchResult`)、camelCase 用於函式(如 `benchmarkKernel`)、`kCamelCase` 用於 constexpr/const (如 `kDefaultIters`)、snake_case 用於一般變數與參數。所有註解為英文。
 
 ## 驗證層級
 

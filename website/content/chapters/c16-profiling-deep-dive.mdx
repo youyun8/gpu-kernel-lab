@@ -16,11 +16,11 @@ profiler 吐出上百個 metric,新手看了只會更焦慮。但其實你不需
 
 **Scheduler Statistics / Warp State:** 看每個 issue slot 的 stall 原因。常見的 `Stall Long Scoreboard` = 在等 global memory,代表 latency hiding 不足(加 warp 或做 prefetch)。`Stall MIO Throttle` = shared memory/特殊功能單元壅塞。
 
-**Occupancy Section:** 顯示 achieved vs. theoretical occupancy,以及 limiter。achieved 遠低於 theoretical 通常是 load imbalance 或 tail effect(第 13 章)。
+**Occupancy Section:** 顯示 achieved vs. theoretical occupancy,以及 limiter。achieved 遠低於 theoretical 通常是 load imbalance 或 tail effect (第 13 章)。
 
 ## omniperf 的對應
 
-AMD 的 omniperf 提供類似的分層視圖:speed-of-light、memory chart(LDS、L1/L2/vL1D、HBM)、以及 wavefront / VALU / MFMA 使用率。概念一一對應:
+AMD 的 omniperf 提供類似的分層視圖:speed-of-light、memory chart (LDS、L1/L2/vL1D、HBM)、以及 wavefront / VALU / MFMA 使用率。概念一一對應:
 
 | 診斷目標 | Nsight Compute | omniperf |
 | --- | --- | --- |

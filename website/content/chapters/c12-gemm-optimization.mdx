@@ -3,7 +3,7 @@
 為什麼一個「照著數學公式寫」的 SGEMM,只跑出 cuBLAS 的 2%?矩陣乘法的 FLOP 數是固定的($2MNK$),但 naive kernel 把時間全花在等 global memory。這一章是本站的主軸:我們用同一個 $C = A \times B$,一步一步把它從不到 5% 推到接近 library 水準,每一步只解決一個明確的 bottleneck。
 
 <Callout variant="insight" title="貫穿全章的一句話">
-GEMM 優化的核心不是「算得更快」,而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。arithmetic intensity 從 naive 的 O(1) 拉到 O(tile size),roofline 上的點才會從 bandwidth roof 爬到 compute roof。
+GEMM 優化的核心不是「算得更快」,而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size),roofline 上的點才會從 bandwidth roof 爬到 compute roof。
 </Callout>
 
 ## Step 0:naive — 每個 output 一個 thread
@@ -115,7 +115,7 @@ for (int p = 0; p < kTile; ++p) {
 接下來的三步分別攻擊不同的殘餘 bottleneck,細節在後續小節與 lab 展開:
 
 - Step 3 **vectorized loads**:用 `float4` 一次搬 128 bits,減少 load 指令數與 address 計算 overhead。
-- Step 4 **double buffering**:預先載入下一個 k-tile 到另一組 shared memory buffer,讓 compute 與 global load 重疊,隱藏 latency(software pipelining)。
+- Step 4 **double buffering**:預先載入下一個 k-tile 到另一組 shared memory buffer,讓 compute 與 global load 重疊,隱藏 latency (software pipelining)。
 - Step 5 **Tensor Core (WMMA) / AMD MFMA**:改用矩陣乘加硬體單元,對 half/bf16 提供數量級的吞吐提升。
 
 ## 每一步的效果(示意數據)
@@ -151,7 +151,7 @@ for (int p = 0; p < kTile; ++p) {
       explanation: 'tile 載入 shared memory 後被 block 內多個 thread 共用,global traffic 下降、intensity 上升。',
     },
     {
-      question: 'register tiling(每 thread 算 TM×TN)相對純 shared memory tiling 的主要好處?',
+      question: 'register tiling (每 thread 算 TM×TN)相對純 shared memory tiling 的主要好處?',
       options: ['降低 shared memory 存取次數,提高 compute 使用率', '完全不需要 __syncthreads', '自動啟用 Tensor Core', '減少 global memory 容量需求'],
       answer: 0,
       explanation: '把 operand 放進 register 反覆使用,攤薄 shared memory bandwidth,讓 FMA pipe 更飽和。',

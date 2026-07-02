@@ -4,7 +4,7 @@
 
 ## 為什麼要 warp specialization
 
-double buffering(第 12 章 Step 4)已經讓 load 與 compute 重疊,但所有 warp 還是既搬又算,受限於同一組資源與同步點。warp specialization 更徹底:
+double buffering (第 12 章 Step 4)已經讓 load 與 compute 重疊,但所有 warp 還是既搬又算,受限於同一組資源與同步點。warp specialization 更徹底:
 
 - **producer warps** 只負責把下一批 tile 從 global memory 非同步搬進 shared memory。
 - **consumer warps** 只負責從 shared memory 讀資料餵給 Tensor Core / MFMA。
@@ -38,7 +38,7 @@ double buffering(第 12 章 Step 4)已經讓 load 與 compute 重疊,但所有 w
 這些 pipeline 手寫極其容易出錯(相依、buffer 管理、corner case),因此實務上多半交給 CUTLASS / Composable Kernel — 但理解結構讓你讀得懂它們、也 debug 得動。
 
 <LabBox path="kernels/05-advanced-scheduling">
-`async_pipeline` 用一個簡化的兩階段 producer–consumer copy pipeline(CUDA 用 cp.async,HIP 用對應的非同步路徑或 fallback)示範 prefetch/compute 重疊,並和單純的同步 copy 比較 latency。程式碼刻意保持精簡,重點在 pipeline 的節奏而非完整 GEMM。
+`async_pipeline` 用一個簡化的兩階段 producer–consumer copy pipeline (CUDA 用 cp.async,HIP 用對應的非同步路徑或 fallback)示範 prefetch/compute 重疊,並和單純的同步 copy 比較 latency。程式碼刻意保持精簡,重點在 pipeline 的節奏而非完整 GEMM。
 </LabBox>
 
 <Quiz
@@ -50,7 +50,7 @@ double buffering(第 12 章 Step 4)已經讓 load 與 compute 重疊,但所有 w
       explanation: '分工讓 memory pipeline 與 compute pipeline 近乎獨立運轉,latency hiding 更徹底。',
     },
     {
-      question: 'cp.async(Ampere)提供什麼能力?',
+      question: 'cp.async (Ampere)提供什麼能力?',
       options: ['同步的 register copy', 'global → shared 的非同步拷貝,warp 發出後可繼續工作', '自動 tiling', 'fp64 加速'],
       answer: 1,
       explanation: 'cp.async 讓拷貝不阻塞 warp,是 software pipelining 的硬體基礎。',

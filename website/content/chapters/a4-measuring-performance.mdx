@@ -61,7 +61,7 @@ $$
 接著算 **% of peak** — 這就是 speed-of-light 分析:你的 kernel 相對硬體上限跑到幾成?一個 memory-bound kernel 若已達 peak bandwidth 的 85%,再怎麼改 compute 也沒用;該做的是換演算法或減少資料搬移。
 
 <Callout variant="warn" title="別把 overhead 當 kernel 時間">
-對極小的 workload,kernel launch overhead(數 μs)可能比 kernel 本身還久。若你的 op 很小又被呼叫很多次,launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
+對極小的 workload,kernel launch overhead (數 μs)可能比 kernel 本身還久。若你的 op 很小又被呼叫很多次,launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
 </Callout>
 
 ## 第一次使用 profiler
@@ -93,7 +93,7 @@ omniperf profile -n vadd -- ./vector_add
     },
     {
       question: '量 kernel 執行時間應優先用哪種計時?',
-      options: ['CPU 的 std::chrono 包住 launch', 'GPU event(cudaEvent/hipEvent)', 'nvidia-smi 的功耗', '編譯時間'],
+      options: ['CPU 的 std::chrono 包住 launch', 'GPU event (cudaEvent/hipEvent)', 'nvidia-smi 的功耗', '編譯時間'],
       answer: 1,
       explanation: 'launch 非同步,CPU 計時會量到錯誤區間;GPU event 記錄 device 上的實際起訖。',
     },

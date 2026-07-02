@@ -24,13 +24,13 @@ def _(x):
 
 ## 與 torch.compile 共存
 
-註冊為 custom op 後,`torch.compile` 會把它當成一個不可分割的節點:它不會嘗試 fuse 進去(那是你的 kernel 內部的事),但會正確地在它前後 fuse 其他 op、追蹤相依、規劃記憶體。避免用會導致 graph break 的寫法(例如 op 內部呼叫 `.item()` 或依 data-dependent 的 Python 控制流),否則 compile 的效益會被打斷。
+註冊為 custom op 後,`torch.compile` 會把它當成一個不可分割的節點:它不會嘗試 fuse 進去(那是你的 kernel 內部的事),但會正確地在它前後 fuse 其他 op、追蹤相依、規劃記憶體。避免用會導致 graph break 的寫法(例如 op 內部呼叫 `.item ()` 或依 data-dependent 的 Python 控制流),否則 compile 的效益會被打斷。
 
 ## 多 GPU 注意事項
 
 <Callout variant="warn" title="多 GPU 三個地雷">
-1. **device guard**:kernel 內務必用 `CUDAGuard(x.device())`,否則在非 default device 的 tensor 上會 launch 到錯的 GPU。
-2. **current stream**:用 `getCurrentCUDAStream()`,尤其和 DDP/NCCL 的 communication stream 並存時,錯誤的 stream 會造成 race 或死結。
+1. **device guard**:kernel 內務必用 `CUDAGuard (x.device ())`,否則在非 default device 的 tensor 上會 launch 到錯的 GPU。
+2. **current stream**:用 `getCurrentCUDAStream ()`,尤其和 DDP/NCCL 的 communication stream 並存時,錯誤的 stream 會造成 race 或死結。
 3. **同步邊界**:custom op 若內部有跨 device 或 host 同步,會拖垮整個 data-parallel 的 pipeline;盡量保持純 device、非同步。
 </Callout>
 
@@ -49,7 +49,7 @@ def test_gelu_perf_regression():
 關鍵:baseline 綁定硬體(不同 GPU 數字不同)、用穩健的計時(warmup + events + 多次取中位數)、留合理容忍度避免 flaky。
 
 <LabBox path="kernels/06-pytorch-integration/custom_op_autograd">
-`custom_op_autograd/` 有完整範例:用 `torch.library.custom_op` 註冊 GELU(含 fake/meta 與 backward)、一個 `torch.compile` 相容性測試,以及一個 regression benchmark 樣板(記錄 baseline JSON、比對容忍度)。跑 `python test_custom_op.py`,確認 op 能被 compile、gradcheck 通過、且效能在預算內。
+`custom_op_autograd/` 有完整範例:用 `torch.library.custom_op` 註冊 GELU (含 fake/meta 與 backward)、一個 `torch.compile` 相容性測試,以及一個 regression benchmark 樣板(記錄 baseline JSON、比對容忍度)。跑 `python test_custom_op.py`,確認 op 能被 compile、gradcheck 通過、且效能在預算內。
 </LabBox>
 
 <Quiz
@@ -61,7 +61,7 @@ def test_gelu_perf_regression():
       explanation: '正式註冊(含 fake 實作)讓 compiler 在不執行下推理,並把它整合進 graph。',
     },
     {
-      question: 'custom op 內呼叫 .item() 或 data-dependent Python 控制流會?',
+      question: 'custom op 內呼叫 .item () 或 data-dependent Python 控制流會?',
       options: ['提高精度', '造成 torch.compile 的 graph break,打斷 fusion 效益', '增加 occupancy', '沒有影響'],
       answer: 1,
       explanation: 'data-dependent 行為使 compiler 無法保持單一 graph,導致 graph break。',

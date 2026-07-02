@@ -20,11 +20,11 @@
 
 **Registers** 最快但最稀缺。每個 SM/CU 的 register file 固定,用得越兇,能同時在飛的 warp 越少(occupancy 下降,第 8 章詳談)。
 
-**Shared memory / LDS** 由你手動管理,是 block 內 threads 交換資料的地方。它被切成多個 bank,存取模式不當會產生 bank conflict(第 7 章)。
+**Shared memory / LDS** 由你手動管理,是 block 內 threads 交換資料的地方。它被切成多個 bank,存取模式不當會產生 bank conflict (第 7 章)。
 
 **L1 / L2 cache** 由硬體自動管理。L2 是全晶片共用,對於有 locality 的存取(例如 GEMM 的 tile、CTA swizzling 帶來的 reuse)特別重要。
 
-**Global memory (HBM)** 容量最大、latency 最高。它的有效頻寬高度依賴 memory coalescing(第 6 章)。理論頻寬算法:
+**Global memory (HBM)** 容量最大、latency 最高。它的有效頻寬高度依賴 memory coalescing (第 6 章)。理論頻寬算法:
 
 $$
 \text{peak BW} = \text{memory clock} \times \text{bus width} \times \text{data rate factor}

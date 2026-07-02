@@ -4,7 +4,7 @@
 
 ## wave quantization
 
-GPU 一次能同時跑的 CTA(block)數量有限(取決於 SM/CU 數與每 SM 可容納的 block 數)。所有 CTA 分成一批批「wave」執行。如果你的 grid 產生 130 個 CTA,而硬體一 wave 能跑 128 個,那你需要 2 個 wave:第一 wave 滿載 128,第二 wave 只有 2 個 CTA 在跑,其餘執行單元閒置。
+GPU 一次能同時跑的 CTA (block)數量有限(取決於 SM/CU 數與每 SM 可容納的 block 數)。所有 CTA 分成一批批「wave」執行。如果你的 grid 產生 130 個 CTA,而硬體一 wave 能跑 128 個,那你需要 2 個 wave:第一 wave 滿載 128,第二 wave 只有 2 個 CTA 在跑,其餘執行單元閒置。
 
 $$
 \text{efficiency} = \frac{\text{CTA count}}{\lceil \text{CTA count} / \text{CTAs per wave} \rceil \times \text{CTAs per wave}}
@@ -22,9 +22,9 @@ $$
 
 ## Split-K 與 Stream-K
 
-當 M、N 很小但 K 很大時,能產生的 CTA(由 M×N tile 決定)太少,填不滿 GPU。**Split-K** 把 K 維切成多段,讓多個 CTA 各算一段 partial sum,最後再 reduce — 用更多 CTA 換取填滿硬體,代價是一次額外的 reduction。
+當 M、N 很小但 K 很大時,能產生的 CTA (由 M×N tile 決定)太少,填不滿 GPU。**Split-K** 把 K 維切成多段,讓多個 CTA 各算一段 partial sum,最後再 reduce — 用更多 CTA 換取填滿硬體,代價是一次額外的 reduction。
 
-**Stream-K** 更進一步:把所有 output tile 的 MAC 工作攤平成一條連續的 work stream,均勻分給固定數量的 CTA,天生解決 quantization 與負載不均。它讓每個 CTA 的工作量幾乎相等,最後只需少量 fixup。現代 library(CUTLASS)用它處理任意形狀。
+**Stream-K** 更進一步:把所有 output tile 的 MAC 工作攤平成一條連續的 work stream,均勻分給固定數量的 CTA,天生解決 quantization 與負載不均。它讓每個 CTA 的工作量幾乎相等,最後只需少量 fixup。現代 library (CUTLASS)用它處理任意形狀。
 
 ## CTA swizzling 與 L2 locality
 

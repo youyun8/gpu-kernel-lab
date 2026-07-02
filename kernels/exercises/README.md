@@ -4,7 +4,7 @@
 
 ## Targets
 
-- `ex_a_saxpy` — 練習 A7:SAXPY(`y = a*x + y`),memory-bound,報告 achieved bandwidth。
+- `ex_a_saxpy` — 練習 A7:SAXPY (`y = a*x + y`),memory-bound,報告 achieved bandwidth。
 - `ex_b_block_reduce` — 練習 B9:block sum reduction 兩種收尾(shared-memory tree vs. tree + warp shuffle),對照正確性與時間。
 
 ## 建置與執行

@@ -54,13 +54,13 @@ compiled = torch.compile(baseline)
 常見結果:`torch.compile` 幾乎追平手寫、且零維護成本。這正是本案例的誠實結論 — 手寫值得的時機,是當 `torch.compile` 沒 fuse 好(例如跨 op 的複雜相依、特殊 reduction 模式),或你需要 online 演算法時。
 
 <LabBox path="kernels/06-pytorch-integration/load_inline">
-`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel,對 baseline(三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時(warmup + CUDA events),印出各自時間與相對 speedup。跑一次,看看在你的硬體上手寫贏 torch.compile 多少(或輸多少)。
+`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel,對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時(warmup + CUDA events),印出各自時間與相對 speedup。跑一次,看看在你的硬體上手寫贏 torch.compile 多少(或輸多少)。
 </LabBox>
 
 <Quiz
   questions={[
     {
-      question: 'baseline(add → gelu → sum)慢的主因?',
+      question: 'baseline (add → gelu → sum)慢的主因?',
       options: ['gelu 的 exp 太貴', '整個 tensor 在 global memory 進出多趟,memory-bound', 'register 不足', 'divergence'],
       answer: 1,
       explanation: '每個 op 各讀寫一次 global memory,中間結果的往返主宰了時間。',
