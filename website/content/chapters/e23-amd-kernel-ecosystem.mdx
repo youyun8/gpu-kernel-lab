@@ -95,7 +95,7 @@ ROCm 的性能工程更依賴「用對 library 版本 + tune cache」。 升級 
       question: '在 ROCm 上為固定形狀的 GEMM 壓出最後一段效能, 標準流程是?',
       options: ['調高時脈', '用 hipblaslt-bench / TunableOp 對實際形狀枚舉實測 algo, 讓之後的執行直接命中最佳 kernel', '改用 fp64', '增加 batch'],
       answer: 1,
-      explanation: 'heuristic 對冷門形狀可能次優; 離線搜索 + 落盤重用是 AMD 側 (也是 NVIDIA 側) 的標準解法。',
+      explanation: 'Heuristic 對冷門形狀可能次優; 離線搜索 + 落盤重用是 AMD 側 (也是 NVIDIA 側) 的標準解法。',
     },
   ]}
 />

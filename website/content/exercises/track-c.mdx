@@ -3,26 +3,26 @@
 對應第 12–16 章。 GEMM 尺寸以 row-major、`C = A(M×K) · B(K×N)` 為準。
 
 <Exercise id="C1" title="Naive GEMM 的 arithmetic intensity" kind="paper" level="進階">
-naive SGEMM 每個 output element 跑長度 K 的迴圈, 每次迭代讀 A、B 各一個 float、做一次 FMA。 忽略 output 寫回。 (a) 每個 output 的 FLOP 與 bytes; (b) arithmetic intensity; (c) 為什麼它必然 bandwidth-bound?
+Naive SGEMM 每個 output element 跑長度 K 的迴圈, 每次迭代讀 A、B 各一個 float、做一次 FMA。 忽略 output 寫回。 (a) 每個 output 的 FLOP 與 bytes; (b) arithmetic intensity; (c) 為什麼它必然 bandwidth-bound?
 
 <Solution>
 (a) 每個 output: FLOP = `2K` (K 次 FMA), bytes = `2K * 4 = 8K` (每次讀 2 個 float)。
 
 (b) AI = `2K / 8K = 0.25 FLOP/byte`, 與 K 無關。
 
-(c) 0.25 遠低於典型 ridge point (~10 FLOP/byte), 永遠落在 bandwidth roof 下。 根因是零 reuse: 每個從 global memory 讀進的值只用一次。 tiling 的目的就是提高這個 reuse (見 C2)。
+(c) 0.25 遠低於典型 ridge point (~10 FLOP/byte), 永遠落在 bandwidth roof 下。 根因是零 reuse: 每個從 global memory 讀進的值只用一次。 Tiling 的目的就是提高這個 reuse (見 C2)。
 </Solution>
 </Exercise>
 
 <Exercise id="C2" title="Tile reuse factor" kind="paper" level="進階">
-shared-memory tiling 用 `BM×BK` 的 A tile 與 `BK×BN` 的 B tile 算 `BM×BN` 的 C tile。 (a) 載入一個 A tile 花多少次 global load? (b) 這個 A tile 被 C tile 內多少個 output 重複使用? (c) 直覺說明為何 tile 越大 AI 越高。
+Shared-memory tiling 用 `BM×BK` 的 A tile 與 `BK×BN` 的 B tile 算 `BM×BN` 的 C tile。 (a) 載入一個 A tile 花多少次 global load? (b) 這個 A tile 被 C tile 內多少個 output 重複使用? (c) 直覺說明為何 tile 越大 AI 越高。
 
 <Solution>
 (a) A tile 有 `BM*BK` 個元素, 各載入一次 → `BM*BK` 次 global load。
 
 (b) A tile 的每一列參與該 tile row 的所有 `BN` 個 output 計算 → 每個 A 元素被 reuse `BN` 次 (對稱地, 每個 B 元素被 reuse `BM` 次)。
 
-(c) reuse 次數正比於 tile 的另一維 (`BN` / `BM`)。 tile 越大, 每筆 global load 被攤到越多次 FMA, AI ≈ O (tile 邊長) 上升, 把 roofline 上的點往右推向 compute roof。 代價是更多 shared memory / register 壓力。
+(c) reuse 次數正比於 tile 的另一維 (`BN` / `BM`)。 Tile 越大, 每筆 global load 被攤到越多次 FMA, AI ≈ O (tile 邊長) 上升, 把 roofline 上的點往右推向 compute roof。 代價是更多 shared memory / register 壓力。
 </Solution>
 </Exercise>
 
@@ -32,9 +32,9 @@ GPU 一 wave 可同時跑 108 個 CTA。 某 GEMM 產生 120 個 CTA、每個工
 <Solution>
 (a) `ceil(120 / 108) = 2` waves。
 
-(b) 第一 wave 滿載 108, 第二 wave 只有 12 個 CTA 在跑。 efficiency = `120 / (2 * 108) = 120/216 ≈ 55.6%`。 近半的第二 wave 時間浪費在空轉的執行單元上。
+(b) 第一 wave 滿載 108, 第二 wave 只有 12 個 CTA 在跑。 Efficiency = `120 / (2 * 108) = 120/216 ≈ 55.6%`。 近半的第二 wave 時間浪費在空轉的執行單元上。
 
-(c) 大矩陣產生成千上萬個 CTA, 最後一個未填滿的 wave 佔比極小, quantization 損失被稀釋到可忽略。 tail effect 是小矩陣 / 少 wave 的特有痛點 (見第 13 章)。
+(c) 大矩陣產生成千上萬個 CTA, 最後一個未填滿的 wave 佔比極小, quantization 損失被稀釋到可忽略。 Tail effect 是小矩陣 / 少 wave 的特有痛點 (見第 13 章)。
 </Solution>
 </Exercise>
 
@@ -61,7 +61,7 @@ GEMM 主迴圈每個 k-tile: load 花 `L` cycles、compute 花 `C` cycles。 (a)
 </Exercise>
 
 <Exercise id="C6" title="從 metrics 回推 bottleneck" kind="paper" level="挑戰">
-profiler 顯示某 kernel: Memory throughput 92%、Compute (SM) 28%、主要 stall 是 `Long Scoreboard`。 (a) 這是哪一類 bound? (b) 下一步優化方向? (c) 若改完後 Memory 降到 40%、Compute 升到 85%, bound 類型如何轉變?
+Profiler 顯示某 kernel: Memory throughput 92%、Compute (SM) 28%、主要 stall 是 `Long Scoreboard`。 (a) 這是哪一類 bound? (b) 下一步優化方向? (c) 若改完後 Memory 降到 40%、Compute 升到 85%, bound 類型如何轉變?
 
 <Solution>
 (a) Memory 高、Compute 低、stall 在等 global memory → **memory-bound**。

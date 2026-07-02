@@ -72,8 +72,8 @@ GPU 結果不一定 bit-exact:
 
 - dtype: fp32、tf32、fp16、bf16、fp8、int8。
 - operation: elementwise、reduction、GEMM、softmax。
-- problem size: reduction 長度越長, 誤差界越大。
-- reference math mode: CPU fp64 reference 和 library fp32 reference 不同。
+- Problem size: reduction 長度越長, 誤差界越大。
+- Reference math mode: CPU fp64 reference 和 library fp32 reference 不同。
 
 常用組合是 max absolute error、relative error、以及少量元素的詳細 dump。 Softmax 還要檢查 row sum 接近 1, 且沒有 NaN/Inf。
 
@@ -110,13 +110,13 @@ Performance CI 要避免太敏感。 記錄中位數、p90、環境資訊、driv
     },
     {
       question: 'Atomic floating-point reduction 為什麼可能不 deterministic?',
-      options: ['atomic 不保證完成順序, 浮點加法又不具結合律', 'atomic 會改變 exponent', '只有 CPU 有這問題', '因為 L2 cache 關閉'],
+      options: ['Atomic 不保證完成順序, 浮點加法又不具結合律', 'Atomic 會改變 exponent', '只有 CPU 有這問題', '因為 L2 cache 關閉'],
       answer: 0,
       explanation: '不同執行順序會產生低位不同的浮點結果, run-to-run 也可能改變。',
     },
     {
       question: 'Tolerance 設計應考慮什麼?',
-      options: ['dtype、operation、problem size 和 reference math mode', '檔名長度', 'GPU 風扇速度', '註解行數'],
+      options: ['Dtype、operation、problem size 和 reference math mode', '檔名長度', 'GPU 風扇速度', '註解行數'],
       answer: 0,
       explanation: '不同精度和運算的誤差界不同, 單一固定 tolerance 會太鬆或太嚴。',
     },

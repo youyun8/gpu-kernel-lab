@@ -9,7 +9,7 @@
 GPU 的解法不是把 latency 變短 (做不到), 而是**把等待藏起來 (latency hiding)**: SM 上同時駐留很多 warps, 一個 warp 卡在等資料時, warp scheduler **零成本**切到另一個 ready 的 warp 繼續發指令。 只要「正在等的 warp」背後永遠排著「準備好的 warp」, 執行單元就不會閒著。
 
 <Callout variant="insight" title="先給直覺">
-把 SM 想成一個只有一位廚師的廚房 (execution units), 每道菜都有「進烤箱等 8 分鐘」的步驟 (memory latency)。 一次只做一張訂單, 廚師大部分時間在等烤箱; 同時掛 20 張訂單 (warps), 等 A 的烤箱時就去切 B 的菜, 廚師就忙個不停。 occupancy 大致上就是「掛了幾張訂單」。
+把 SM 想成一個只有一位廚師的廚房 (execution units), 每道菜都有「進烤箱等 8 分鐘」的步驟 (memory latency)。 一次只做一張訂單, 廚師大部分時間在等烤箱; 同時掛 20 張訂單 (warps), 等 A 的烤箱時就去切 B 的菜, 廚師就忙個不停。 Occupancy 大致上就是「掛了幾張訂單」。
 </Callout>
 
 ## Occupancy 是什麼: 一個算給你看的例子
@@ -139,7 +139,7 @@ __global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
 Volkov 在 GTC 2010 的經典結果就是這個: **occupancy 只有 25% 但單 warp ILP 拉滿的 kernel, 勝過 100% occupancy 的 naive 版**。
 
 <Callout variant="insight" title="該記住的一句話">
-occupancy 是手段不是目的, 目的是「讓執行單元不閒著」。 當 ILP 已經把 pipeline 餵飽, 再加 occupancy 只是浪費 register、逼你縮 tile。 決策依據是 profiler 的 stall 原因, 不是 occupancy 數字本身。
+Occupancy 是手段不是目的, 目的是「讓執行單元不閒著」。 當 ILP 已經把 pipeline 餵飽, 再加 occupancy 只是浪費 register、逼你縮 tile。 決策依據是 profiler 的 stall 原因, 不是 occupancy 數字本身。
 </Callout>
 
 ## Theoretical vs. Achieved: 兩個數字說不同的事
@@ -201,16 +201,16 @@ Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3
 <Quiz
   questions={[
     {
-      question: 'occupancy 衡量的是?',
-      options: ['kernel 的 FLOP 數', 'SM 上活躍 warp 數 / 最大可支援 warp 數', 'memory bandwidth 使用率', 'L2 命中率'],
+      question: 'Occupancy 衡量的是?',
+      options: ['Kernel 的 FLOP 數', 'SM 上活躍 warp 數 / 最大可支援 warp 數', 'Memory bandwidth 使用率', 'L2 命中率'],
       answer: 1,
-      explanation: 'occupancy 反映可用來做 latency hiding 的 warp 密度, 不是效能本身。',
+      explanation: 'Occupancy 反映可用來做 latency hiding 的 warp 密度, 不是效能本身。',
     },
     {
-      question: '每 SM 有 65,536 registers、上限 64 warps。 block = 256 threads、每 thread 64 registers 時, occupancy 是?',
+      question: '每 SM 有 65,536 registers、上限 64 warps。 Block = 256 threads、每 thread 64 registers 時, occupancy 是?',
       options: ['100%', '75%', '50%', '25%'],
       answer: 2,
-      explanation: '每 block 要 256×64 = 16,384 registers, 塞得下 ⌊65,536/16,384⌋ = 4 blocks = 32 warps, 32/64 = 50%。 occupancy 就是這樣的整數除法算出來的。',
+      explanation: '每 block 要 256×64 = 16,384 registers, 塞得下 ⌊65,536/16,384⌋ = 4 blocks = 32 warps, 32/64 = 50%。 Occupancy 就是這樣的整數除法算出來的。',
     },
     {
       question: '把一條 reduction 迴圈從 1 個 accumulator 改成 4 個獨立 accumulators, 主要效果是?',
@@ -220,27 +220,27 @@ Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3
     },
     {
       question: '為什麼某些 GEMM kernel 在低 occupancy 下反而更快?',
-      options: ['低 occupancy 省電', '大 tile + 高 ILP 提供足夠的 latency hiding, 同時帶來更高 reuse', 'occupancy 越低 memory 越快', '這不可能發生'],
+      options: ['低 occupancy 省電', '大 tile + 高 ILP 提供足夠的 latency hiding, 同時帶來更高 reuse', 'Occupancy 越低 memory 越快', '這不可能發生'],
       answer: 1,
       explanation: '64 個 accumulators = 64 條獨立依賴鏈 + 每筆資料重用 8 次; latency hiding 靠 ILP 補足, reuse 的收益超過多幾個 warps。',
     },
     {
       question: '編譯輸出出現 "48 bytes spill stores" 代表?',
-      options: ['shared memory 不足', 'register 壓力超過上限, 變數被放到 local memory, 每次存取可能打到 global memory', '編譯失敗', 'occupancy 達到 100%'],
+      options: ['Shared memory 不足', 'Register 壓力超過上限, 變數被放到 local memory, 每次存取可能打到 global memory', '編譯失敗', 'Occupancy 達到 100%'],
       answer: 1,
-      explanation: 'spill 常是 __launch_bounds__ 壓太狠或 kernel 太複雜的副作用, 通常比降一點 occupancy 更傷 — 看到 spill 先處理 spill。',
+      explanation: 'Spill 常是 __launch_bounds__ 壓太狠或 kernel 太複雜的副作用, 通常比降一點 occupancy 更傷 — 看到 spill 先處理 spill。',
     },
     {
-      question: 'profiler 顯示主要 stall 是 "not selected", 你該?',
+      question: 'Profiler 顯示主要 stall 是 "not selected", 你該?',
       options: ['提高 occupancy', '認知到 occupancy 已經足夠, 轉而檢查 instruction mix 或用大 tile 換 ILP/reuse', '增加 blocks 數', '加大 shared memory'],
       answer: 1,
-      explanation: 'not selected 代表 warp ready 但 scheduler 選了別人 — 隊伍已經夠長, 再加 occupancy 沒有幫助, 瓶頸在 issue 端。',
+      explanation: 'Not selected 代表 warp ready 但 scheduler 選了別人 — 隊伍已經夠長, 再加 occupancy 沒有幫助, 瓶頸在 issue 端。',
     },
     {
-      question: 'achieved occupancy 遠低於 theoretical occupancy, 最可能的原因是?',
-      options: ['register 太多', 'grid 太小、block 工作量不均或尾端效應, 執行期填不滿 SM', 'L2 太小', '編譯器 bug'],
+      question: 'Achieved occupancy 遠低於 theoretical occupancy, 最可能的原因是?',
+      options: ['Register 太多', 'Grid 太小、block 工作量不均或尾端效應, 執行期填不滿 SM', 'L2 太小', '編譯器 bug'],
       answer: 1,
-      explanation: 'theoretical 只看資源; achieved 反映執行動態。 8 個 blocks 餵 108 個 SM, 資源再怎麼調都沒用 — 先用 Split-K/batching/persistent scheduler 製造夠多的 blocks。',
+      explanation: 'Theoretical 只看資源; achieved 反映執行動態。 8 個 blocks 餵 108 個 SM, 資源再怎麼調都沒用 — 先用 Split-K/batching/persistent scheduler 製造夠多的 blocks。',
     },
   ]}
 />

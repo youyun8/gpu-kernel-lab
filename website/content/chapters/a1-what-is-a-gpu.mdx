@@ -54,7 +54,7 @@ A100 有 108 個 SM, 每個 SM 可駐留 64 個 warp = 2048 threads; MI300X 有 
 | kernel template library | CUTLASS | Composable Kernel (CK) |
 
 <Callout variant="warn" title="可攜性陷阱先劇透">
-warp = 32 vs. wavefront = 64 是最常見的可攜性地雷。 任何寫死 `32` 的 warp-level 程式碼 (shuffle、mask、reduction 步數) 搬到 AMD 都可能出錯。 第 9 章會專門處理這件事; 現在先記住這個差異。
+Warp = 32 vs. wavefront = 64 是最常見的可攜性地雷。 任何寫死 `32` 的 warp-level 程式碼 (shuffle、mask、reduction 步數) 搬到 AMD 都可能出錯。 第 9 章會專門處理這件事; 現在先記住這個差異。
 </Callout>
 
 HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多數 CUDA 程式可用 `hipify` 半自動轉換。 本站的 kernels 盡量用一層 portability header 讓同一份程式碼在兩個平台編譯。
@@ -75,7 +75,7 @@ HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多
 
 - **Expose parallelism**: 用更多 independent elements、tiles、rows、heads 或 requests 餵飽 SM/CU。 資料太小時, batch、fuse 或用 persistent kernel 攤平 launch overhead。
 - **Make work uniform**: 讓同一 warp/wavefront 內的 lanes 做相似工作。 遇到 data-dependent branch 時, 先排序、分桶或拆成多個 kernel, 不要讓一個 warp 裡一半 lanes 空等。
-- **Move less data**: GPU 算術很強, HBM/PCIe 才常是瓶頸。 coalescing、tiling、fusion、quantization、prepack 都是在減少昂貴資料搬移。
+- **Move less data**: GPU 算術很強, HBM/PCIe 才常是瓶頸。 Coalescing、tiling、fusion、quantization、prepack 都是在減少昂貴資料搬移。
 - **Reuse on chip**: 被多次使用的資料應該盡量留在 register、shared memory/LDS 或 L2。 GEMM、stencil、attention 都是把 reuse 顯式化的問題。
 - **Pick the right engine**: scalar CUDA core、Tensor Core/MFMA、copy engine、NCCL/RCCL communication engine ([第 33 章](/chapters/g33-nccl-rccl-collectives)) 各有用途。 高效系統會讓它們重疊, 而不是只盯著一個 kernel。
 
@@ -94,14 +94,14 @@ HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多
       explanation: 'GPU 靠大量並行的 warp 做 latency hiding: 一個 warp 等記憶體時, scheduler 立刻換上另一個, 執行單元保持忙碌。',
     },
     {
-      question: 'branch divergence 為什麼傷效能?',
+      question: 'Branch divergence 為什麼傷效能?',
       options: ['會增加 register 使用', '同一 warp 內不同分支必須被輪流序列化執行', '會關閉 L2 cache', '會降低時脈'],
       answer: 1,
       explanation: 'SIMT 下同一 warp 共用一條指令流, 分歧的路徑只能一條一條跑, 等於折損平行度。',
     },
     {
       question: 'CUDA 的 warp 對應到 AMD 的什麼? 大小通常是?',
-      options: ['CU, 32', 'wavefront, 64 (RDNA 可 32)', 'SM, 16', 'LDS, 128'],
+      options: ['CU, 32', 'Wavefront, 64 (RDNA 可 32)', 'SM, 16', 'LDS, 128'],
       answer: 1,
       explanation: 'AMD 的 wavefront 對應 warp, CDNA 為 64 lanes, RDNA 可設定為 32 或 64。',
     },
@@ -109,7 +109,7 @@ HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多
       question: '一個 thread block (CTA) 被排到 SM/CU 之後, 它會?',
       options: ['隨時可能被搬到別的 SM', '在同一個 SM/CU 上執行直到結束', '拆散到多個 SM 平行跑', '先進 L2 cache 排隊'],
       answer: 1,
-      explanation: 'block 是排程的原子單位, 落地後不搬家 — 所以 block 內能便宜同步、共用 shared memory, 跨 block 則不行。',
+      explanation: 'Block 是排程的原子單位, 落地後不搬家 — 所以 block 內能便宜同步、共用 shared memory, 跨 block 則不行。',
     },
     {
       question: 'SIMT 相對 CPU SIMD 的主要程式模型差異是?',

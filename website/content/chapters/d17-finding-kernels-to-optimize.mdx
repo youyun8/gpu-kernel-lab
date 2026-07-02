@@ -27,7 +27,7 @@ prof.export_chrome_trace("trace.json")  # open in chrome://tracing or Perfetto
 
 ## 先看整體: GPU 到底忙不忙
 
-在深入單一 op 之前, 先回答一個更基本的問題: GPU 使用率高嗎? timeline 上如果 GPU 軌道大段留白, 瓶頸根本不在 kernel — 可能是 dataloader (CPU 前處理跟不上)、host↔device 傳輸、或 Python overhead。 這種情況先修 pipeline (更多 dataloader workers、pinned memory、prefetch), 任何 kernel 優化都是白工。 GPU 軌道塞滿了, 才輪到本章接下來的分析。
+在深入單一 op 之前, 先回答一個更基本的問題: GPU 使用率高嗎? Timeline 上如果 GPU 軌道大段留白, 瓶頸根本不在 kernel — 可能是 dataloader (CPU 前處理跟不上)、host↔device 傳輸、或 Python overhead。 這種情況先修 pipeline (更多 dataloader workers、pinned memory、prefetch), 任何 kernel 優化都是白工。 GPU 軌道塞滿了, 才輪到本章接下來的分析。
 
 ## 兩種典型病徵
 
@@ -54,11 +54,11 @@ g.replay()   # hundreds of launches collapse into one
 
 ## 估算天花板再動手
 
-找到候選後, 先用第 5 章的方法估收益上限: 這條鏈的總 memory traffic 是多少? fuse 後剩多少? 比值就是理論加速上限。 如果上限只有 1.15×, 而這條鏈只佔模型 10% 的時間, 整體收益 1.5% — 不值得寫 custom kernel。 Amdahl 定律先算, 再決定投入。
+找到候選後, 先用第 5 章的方法估收益上限: 這條鏈的總 memory traffic 是多少? Fuse 後剩多少? 比值就是理論加速上限。 如果上限只有 1.15×, 而這條鏈只佔模型 10% 的時間, 整體收益 1.5% — 不值得寫 custom kernel。 Amdahl 定律先算, 再決定投入。
 
 ## 別忘了先用內建工具
 
-在動手寫 custom kernel 前, 先試 `torch.compile` — 它會自動 fuse 很多 elementwise 鏈成 Triton kernel, 常常不費力就拿到大半好處。 custom kernel 留給 `torch.compile` 沒 fuse 好、或需要特殊演算法 (如 online softmax) 的地方。
+在動手寫 custom kernel 前, 先試 `torch.compile` — 它會自動 fuse 很多 elementwise 鏈成 Triton kernel, 常常不費力就拿到大半好處。 Custom kernel 留給 `torch.compile` 沒 fuse 好、或需要特殊演算法 (如 online softmax) 的地方。
 
 ## Candidate Scorecard
 
@@ -88,8 +88,8 @@ g.replay()   # hundreds of launches collapse into one
       explanation: '瓶頸常不在直覺以為的地方, 先量測才能對症下藥。',
     },
     {
-      question: 'timeline 上「一大排極短 kernel + CPU 空檔」代表?',
-      options: ['compute-bound', 'launch overhead 主導, 應 fuse 或用 CUDA Graph', 'bank conflict', '數值不穩'],
+      question: 'Timeline 上「一大排極短 kernel + CPU 空檔」代表?',
+      options: ['compute-bound', 'Launch overhead 主導, 應 fuse 或用 CUDA Graph', 'Bank conflict', '數值不穩'],
       answer: 1,
       explanation: '每個 kernel 太小, launch 成本佔比過高, GPU 在等下一次 launch。',
     },
@@ -97,23 +97,23 @@ g.replay()   # hundreds of launches collapse into one
       question: '哪種 op 鏈最值得 fuse?',
       options: ['彼此獨立的大型 GEMM', '連續、memory-bound、中間結果只用一次的 elementwise/reduction 鏈', 'fp64 科學計算', '單一超大 kernel'],
       answer: 1,
-      explanation: 'fuse 能把多次 global memory 往返併成一次, 對 memory-bound 的相接 op 收益最大。',
+      explanation: 'Fuse 能把多次 global memory 往返併成一次, 對 memory-bound 的相接 op 收益最大。',
     },
     {
-      question: 'trace 上 GPU 軌道大段留白, 該先做什麼?',
+      question: 'Trace 上 GPU 軌道大段留白, 該先做什麼?',
       options: ['優化最大的 kernel', '先修 CPU 側瓶頸 (dataloader、傳輸、Python overhead), kernel 優化此時無效', '加大 batch', '換 fp16'],
       answer: 1,
       explanation: 'GPU 閒著代表瓶頸在餵資料的一側; 先讓 GPU 忙起來, kernel 層面的優化才有意義。',
     },
     {
       question: 'CUDA Graph 的主要限制是?',
-      options: ['只支援推論', 'graph 內 shape 與控制流必須固定, 輸入要用固定 buffer 餵', '不支援 ROCm', '會降低精度'],
+      options: ['只支援推論', 'Graph 內 shape 與控制流必須固定, 輸入要用固定 buffer 餵', '不支援 ROCm', '會降低精度'],
       answer: 1,
-      explanation: 'capture 的是固定的 kernel 序列; dynamic shape 或 data-dependent 控制流會讓 graph 失效或需要重錄。',
+      explanation: 'Capture 的是固定的 kernel 序列; dynamic shape 或 data-dependent 控制流會讓 graph 失效或需要重錄。',
     },
     {
       question: '動手寫 custom kernel 前, 為什麼要先估「fuse 後省下的 traffic × 該鏈佔模型時間比」?',
-      options: ['為了寫報告', '這是 Amdahl 定律的上限估算: 若整體收益太小, 不值得付出開發與維護成本', 'profiler 需要這個參數', '否則編譯不過'],
+      options: ['為了寫報告', '這是 Amdahl 定律的上限估算: 若整體收益太小, 不值得付出開發與維護成本', 'Profiler 需要這個參數', '否則編譯不過'],
       answer: 1,
       explanation: '理論加速上限 × 佔比 = 整體收益上限; 先算這筆帳, 避免花一週換 1% 的效能。',
     },

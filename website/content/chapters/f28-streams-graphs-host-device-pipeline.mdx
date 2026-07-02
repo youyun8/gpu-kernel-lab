@@ -46,7 +46,7 @@ for (int chunk = 0; chunk < chunks; ++chunk) {
 }
 ```
 
-理想情況下, chunk `i` 在 compute 時, chunk `i+1` 正在 H2D, chunk `i-1` 正在 D2H。 chunk 太小會被 launch/copy overhead 吃掉; chunk 太大又失去 overlap。
+理想情況下, chunk `i` 在 compute 時, chunk `i+1` 正在 H2D, chunk `i-1` 正在 D2H。 Chunk 太小會被 launch/copy overhead 吃掉; chunk 太大又失去 overlap。
 
 ## Events、Dependencies 與 Stream Semantics
 
@@ -110,19 +110,19 @@ Profiler timeline 是本章的唯一真相。 只看 kernel duration 會錯過 C
   questions={[
     {
       question: 'H2D copy 要和 kernel 重疊通常需要什麼 host memory?',
-      options: ['pageable memory', 'pinned memory', 'texture memory', 'constant memory'],
+      options: ['Pageable memory', 'Pinned memory', 'Texture memory', 'Constant memory'],
       answer: 1,
       explanation: 'Pinned host memory 讓 DMA copy 能非同步進行, pageable memory 常需要 staging 而造成同步或額外成本。',
     },
     {
       question: '多 stream 程式應避免哪種同步方式作為 hot path 預設?',
-      options: ['event dependency', 'stream wait event', '全 device synchronize', '特定 stream synchronization'],
+      options: ['Event dependency', 'Stream wait event', '全 device synchronize', '特定 stream synchronization'],
       answer: 2,
       explanation: '全 device synchronize 會把所有 stream 都停住, 破壞 overlap。',
     },
     {
       question: 'CUDA Graph/HIP Graph 主要解決什麼?',
-      options: ['HBM 容量不足', '大量小 kernel 的 launch overhead 和固定 DAG replay 成本', 'bank conflict', '浮點誤差'],
+      options: ['HBM 容量不足', '大量小 kernel 的 launch overhead 和固定 DAG replay 成本', 'Bank conflict', '浮點誤差'],
       answer: 1,
       explanation: 'Graph capture 固定 launch DAG, 後續 replay 可減少 CPU launch overhead。',
     },

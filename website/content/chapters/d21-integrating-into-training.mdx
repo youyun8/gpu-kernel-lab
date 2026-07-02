@@ -81,14 +81,14 @@ def test_gelu_perf_regression():
       explanation: '正式註冊 (含 fake 實作) 讓 compiler 在不執行下推理, 並把它整合進 graph。',
     },
     {
-      question: 'custom op 內呼叫 .item() 或 data-dependent Python 控制流會?',
+      question: 'Custom op 內呼叫 .item() 或 data-dependent Python 控制流會?',
       options: ['提高精度', '造成 torch.compile 的 graph break, 打斷 fusion 效益', '增加 occupancy', '沒有影響'],
       answer: 1,
-      explanation: 'data-dependent 行為使 compiler 無法保持單一 graph, 導致 graph break。',
+      explanation: 'Data-dependent 行為使 compiler 無法保持單一 graph, 導致 graph break。',
     },
     {
-      question: 'performance regression 測試的關鍵設計?',
-      options: ['固定用某台雲端機', 'baseline 綁硬體、穩健計時 (warmup+events)、合理容忍度', '只跑一次不 warmup', '比對 FLOP 數'],
+      question: 'Performance regression 測試的關鍵設計?',
+      options: ['固定用某台雲端機', 'Baseline 綁硬體、穩健計時 (warmup+events)、合理容忍度', '只跑一次不 warmup', '比對 FLOP 數'],
       answer: 1,
       explanation: '效能數字依硬體而異, 需穩健計時與容忍度才不會 flaky 又能抓到真退化。',
     },
@@ -100,15 +100,15 @@ def test_gelu_perf_regression():
     },
     {
       question: '要讓 custom op 與 CUDA Graph (reduce-overhead) 相容, kernel 路徑上不能有?',
-      options: ['FMA 指令', 'host 同步與臨時的 raw cudaMalloc (capture-unsafe 行為)', 'shared memory', 'fp16'],
+      options: ['FMA 指令', 'Host 同步與臨時的 raw cudaMalloc (capture-unsafe 行為)', 'Shared memory', 'fp16'],
       answer: 1,
-      explanation: 'graph capture 要求純 device、非同步、且記憶體來自 PyTorch allocator; 任何 host 同步都會讓 capture 失敗。',
+      explanation: 'Graph capture 要求純 device、非同步、且記憶體來自 PyTorch allocator; 任何 host 同步都會讓 capture 失敗。',
     },
     {
       question: '為什麼建議保留一條「custom op vs. 內建/torch.compile」的比值測試?',
       options: ['證明自己的 kernel 永遠最快', 'PyTorch 升級後內建實作可能追上, 屆時應考慮移除 custom kernel 以歸零維護成本', 'CI 需要更多測試', '內建實作不會變'],
       answer: 1,
-      explanation: 'custom kernel 是負債也是資產; 當內建足夠快, 最好的優化是刪碼回歸內建。',
+      explanation: 'Custom kernel 是負債也是資產; 當內建足夠快, 最好的優化是刪碼回歸內建。',
     },
   ]}
 />

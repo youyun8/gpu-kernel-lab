@@ -23,7 +23,7 @@ $$
 
 <RooflineChart />
 
-拖動上面的 FLOPs / bytes, 看你的點如何在圖上移動。 vector add 這種 AI ≈ 0.1 的 kernel 死死貼在斜線上 — 這解釋了第 2 章為什麼它 GFLOP/s 很低卻很正常: 它已經接近 bandwidth 屋頂了, 低的是 compute 而非效率。 GEMM 隨著 tiling 把 AI 往右推, 才有機會爬到 compute 屋頂。
+拖動上面的 FLOPs / bytes, 看你的點如何在圖上移動。 Vector add 這種 AI ≈ 0.1 的 kernel 死死貼在斜線上 — 這解釋了第 2 章為什麼它 GFLOP/s 很低卻很正常: 它已經接近 bandwidth 屋頂了, 低的是 compute 而非效率。 GEMM 隨著 tiling 把 AI 往右推, 才有機會爬到 compute 屋頂。
 
 ## 常見 Kernel 的 AI 落點
 
@@ -37,7 +37,7 @@ $$
 | Naive GEMM | 2K per output | 8K per output | 0.25 | bandwidth-bound (零 reuse) |
 | Tiled GEMM (tile = T) | — | — | O (T) | 隨 tile 增大爬向 compute roof |
 
-注意 naive GEMM 的 AI 與矩陣大小無關 — 不做 reuse, 它永遠是 0.25。 tiling 之所以是 GEMM 優化的第一課 (第 12 章), 就是因為只有它能改變 AI 本身。
+注意 naive GEMM 的 AI 與矩陣大小無關 — 不做 reuse, 它永遠是 0.25。 Tiling 之所以是 GEMM 優化的第一課 (第 12 章), 就是因為只有它能改變 AI 本身。
 
 <Callout variant="insight" title="roofline 給你的第一個問題">
 每次看到一個慢 kernel, 先問: 「它是 bandwidth-bound 還是 compute-bound?」這一個判斷就決定了你接下來所有的優化方向。 搞錯方向, 你可能花一週優化 compute, 而瓶頸其實在 memory。
@@ -79,16 +79,16 @@ Roofline 的好處是能把技巧翻譯成座標變化:
 <Quiz
   questions={[
     {
-      question: 'arithmetic intensity 的定義是?',
-      options: ['每秒 FLOP 數', '每 byte memory traffic 做的 FLOP 數', 'register 使用量', 'occupancy 百分比'],
+      question: 'Arithmetic intensity 的定義是?',
+      options: ['每秒 FLOP 數', '每 byte memory traffic 做的 FLOP 數', 'Register 使用量', 'Occupancy 百分比'],
       answer: 1,
       explanation: 'AI = FLOP / bytes moved, 是 roofline 的橫軸, 決定 kernel 落在斜線還是水平線下。',
     },
     {
-      question: 'kernel 的 AI 落在 ridge point 左側, 代表?',
-      options: ['compute-bound', 'bandwidth-bound, 應優先減少/加速 memory traffic', '已達最佳', 'occupancy 不足'],
+      question: 'Kernel 的 AI 落在 ridge point 左側, 代表?',
+      options: ['compute-bound', 'Bandwidth-bound, 應優先減少/加速 memory traffic', '已達最佳', 'Occupancy 不足'],
       answer: 1,
-      explanation: 'ridge point 左邊由斜線 (bandwidth) 封頂, 瓶頸在資料搬移。',
+      explanation: 'Ridge point 左邊由斜線 (bandwidth) 封頂, 瓶頸在資料搬移。',
     },
     {
       question: '為什麼提高 tiling / reuse 能幫 bandwidth-bound kernel?',
@@ -98,15 +98,15 @@ Roofline 的好處是能把技巧翻譯成座標變化:
     },
     {
       question: '量測 AI 遠低於理論 AI, 最可能代表?',
-      options: ['FLOP 數錯了', '實際 memory traffic 比理想多 (coalescing 差、cache miss), memory 系統在搬沒用到的 bytes', 'GPU 太舊', 'roofline 不適用'],
+      options: ['FLOP 數錯了', '實際 memory traffic 比理想多 (coalescing 差、cache miss), memory 系統在搬沒用到的 bytes', 'GPU 太舊', 'Roofline 不適用'],
       answer: 1,
       explanation: '理論 bytes 是演算法最少需要的搬運量; 量測值偏大代表搬了用不到的資料, 先修 access pattern。',
     },
     {
       question: '一個 kernel 的量測點遠低於 bandwidth 與 compute 兩條屋頂, 通常是?',
-      options: ['不可能發生', 'latency-bound: warp 不足或 ILP 不足, latency 沒被藏好, 兩種資源都閒著', '量錯了', 'compute-bound'],
+      options: ['不可能發生', 'Latency-bound: warp 不足或 ILP 不足, latency 沒被藏好, 兩種資源都閒著', '量錯了', 'compute-bound'],
       answer: 1,
-      explanation: 'roofline 假設 memory 與 compute 至少一方飽和; 都不飽和代表卡在等待, 該補 occupancy 或 ILP (第 8 章)。',
+      explanation: 'Roofline 假設 memory 與 compute 至少一方飽和; 都不飽和代表卡在等待, 該補 occupancy 或 ILP (第 8 章)。',
     },
   ]}
 />

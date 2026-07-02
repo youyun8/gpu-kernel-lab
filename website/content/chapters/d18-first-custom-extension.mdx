@@ -28,7 +28,7 @@ ROCm 環境下同一套流程可用: PyTorch 的 cpp_extension 會自動把 `.cu
 1. `TORCH_CHECK(x.is_cuda())` — 確認在 GPU 上。
 2. `TORCH_CHECK(x.is_contiguous())` 或 `x = x.contiguous()` — kernel 通常假設連續記憶體。
 3. `TORCH_CHECK(x.scalar_type() == at::kFloat)` — dtype 相符, 別把 half 當 float 讀。
-4. device guard: `const at::cuda::CUDAGuard guard(x.device());` — 多 GPU 下切到正確 device。
+4. Device guard: `const at::cuda::CUDAGuard guard(x.device());` — 多 GPU 下切到正確 device。
 5. 用 current stream: `at::cuda::getCurrentCUDAStream()` 傳給 kernel launch, 才不會和 PyTorch 的非同步執行打架。
 </Callout>
 
@@ -125,7 +125,7 @@ class GeluFn(torch.autograd.Function):
   questions={[
     {
       question: '把 tensor 傳進 custom kernel 前, 為什麼常要 `.contiguous()`?',
-      options: ['加快 Python', 'kernel 通常假設連續記憶體佈局, 非連續會讀錯位址', '提高精度', '減少 register'],
+      options: ['加快 Python', 'Kernel 通常假設連續記憶體佈局, 非連續會讀錯位址', '提高精度', '減少 register'],
       answer: 1,
       explanation: '非連續 tensor 的 stride 不規則, 直接用 data_ptr 線性索引會讀到錯的元素。',
     },
@@ -136,16 +136,16 @@ class GeluFn(torch.autograd.Function):
       explanation: '在 current stream 上 launch 才能與框架的其他非同步操作正確排序。',
     },
     {
-      question: 'gradcheck 的用途?',
+      question: 'Gradcheck 的用途?',
       options: ['檢查 forward 速度', '用數值微分驗證 custom backward 的正確性', '測 occupancy', '檢查記憶體洩漏'],
       answer: 1,
-      explanation: 'gradcheck 比對解析梯度與數值梯度, 是驗證 autograd Function 的標準做法。',
+      explanation: 'Gradcheck 比對解析梯度與數值梯度, 是驗證 autograd Function 的標準做法。',
     },
     {
       question: 'AT_DISPATCH_FLOATING_TYPES 系列 macro 的作用是?',
       options: ['自動求導', '依 tensor 的 runtime dtype 選擇對應的 template 實例, 一份 kernel 服務多 dtype', '把 kernel 編譯成 PTX', '檢查 contiguity'],
       answer: 1,
-      explanation: 'dispatch macro 在編譯期為每種 dtype 實例化 kernel, 執行期依 scalar_type 分發 — 免去手寫 switch。',
+      explanation: 'Dispatch macro 在編譯期為每種 dtype 實例化 kernel, 執行期依 scalar_type 分發 — 免去手寫 switch。',
     },
     {
       question: 'half/bf16 kernel 的常見計算慣例是?',
@@ -154,8 +154,8 @@ class GeluFn(torch.autograd.Function):
       explanation: '低精度存取享受頻寬紅利, float 累加避免長 reduction 的精度崩壞, 是官方 kernel 的標準做法。',
     },
     {
-      question: 'custom op 結果錯誤但不 crash, 最該先懷疑?',
-      options: ['GPU 壞了', 'contiguity 或 dtype 假設被違反 (如輸入是轉置 view 或 half)', '編譯器 bug', 'Python 版本'],
+      question: 'Custom op 結果錯誤但不 crash, 最該先懷疑?',
+      options: ['GPU 壞了', 'Contiguity 或 dtype 假設被違反 (如輸入是轉置 view 或 half)', '編譯器 bug', 'Python 版本'],
       answer: 1,
       explanation: '線性索引 + 錯誤的佈局/型別假設會安靜地算錯; 用非連續與多 dtype 的測試輸入逐一排除。',
     },

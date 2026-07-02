@@ -3,7 +3,7 @@
 為什麼一個「照著數學公式寫」的 SGEMM, 只跑出 cuBLAS 的 2%? 矩陣乘法的 FLOP 數是固定的 ($2MNK$), 但 naive kernel 把時間全花在等 global memory。 這一章是本站的主軸: 我們用同一個 $C = A \times B$, 一步一步把它從不到 5% 推到接近 library 水準, 每一步只解決一個明確的 bottleneck。
 
 <Callout variant="insight" title="貫穿全章的一句話">
-GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。 arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
+GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。 Arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
 </Callout>
 
 ## Step 0: naive — 每個 output 一個 thread
@@ -52,7 +52,7 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 </Platform>
 </PlatformTabs>
 
-問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。 profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
+問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。 Profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
 
 ## Step 1: Shared Memory Tiling — 讓資料被重複使用
 
@@ -129,7 +129,7 @@ sA[threadIdx.y][threadIdx.x * 4 + 3] = v.w;
 
 ## Step 4: double buffering — 把 load 藏進 compute
 
-單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著。 double buffering 配置兩組 shared memory buffer: 算 buffer 0 的同時, 預取下一個 k-tile 進 buffer 1, 每輪交換 — 這就是 software pipelining:
+單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著。 Double buffering 配置兩組 shared memory buffer: 算 buffer 0 的同時, 預取下一個 k-tile 進 buffer 1, 每輪交換 — 這就是 software pipelining:
 
 ```cpp
 // Two shared-memory stages: compute on `cur` while prefetching into `nxt`.
@@ -212,44 +212,44 @@ GEMM 沒有單一最佳 kernel, 常見變體包括:
 <Quiz
   questions={[
     {
-      question: 'naive SGEMM 效能低落的根本原因是?',
-      options: ['FLOP 數太多', 'arithmetic intensity 太低, 卡在 bandwidth roof', 'occupancy 太高', 'register 用太少'],
+      question: 'Naive SGEMM 效能低落的根本原因是?',
+      options: ['FLOP 數太多', 'Arithmetic intensity 太低, 卡在 bandwidth roof', 'Occupancy 太高', 'Register 用太少'],
       answer: 1,
       explanation: '每個 output 讀 2K 個值只做 2K FLOP, intensity ≈ 0.25, 是典型 memory-bound, 再多 SM 也算不快。',
     },
     {
-      question: 'shared memory tiling 主要改善了哪個量?',
-      options: ['register 數量', '每筆 global load 的 reuse 次數 (進而拉高 arithmetic intensity)', 'kernel launch overhead', 'L2 cache 大小'],
+      question: 'Shared memory tiling 主要改善了哪個量?',
+      options: ['Register 數量', '每筆 global load 的 reuse 次數 (進而拉高 arithmetic intensity)', 'Kernel launch overhead', 'L2 cache 大小'],
       answer: 1,
-      explanation: 'tile 載入 shared memory 後被 block 內多個 thread 共用, global traffic 下降、intensity 上升。',
+      explanation: 'Tile 載入 shared memory 後被 block 內多個 thread 共用, global traffic 下降、intensity 上升。',
     },
     {
-      question: 'register tiling (每 thread 算 TM×TN) 相對純 shared memory tiling 的主要好處?',
+      question: 'Register tiling (每 thread 算 TM×TN) 相對純 shared memory tiling 的主要好處?',
       options: ['降低 shared memory 存取次數, 提高 compute 使用率', '完全不需要 __syncthreads', '自動啟用 Tensor Core', '減少 global memory 容量需求'],
       answer: 0,
       explanation: '把 operand 放進 register 反覆使用, 攤薄 shared memory bandwidth, 讓 FMA pipe 更飽和。',
     },
     {
-      question: 'double buffering 的目的是?',
+      question: 'Double buffering 的目的是?',
       options: ['減少 register 使用', '讓下一個 k-tile 的 global load 與當前 compute 重疊以隱藏 latency', '避免 bank conflict', '提高數值精度'],
       answer: 1,
-      explanation: 'software pipelining: 用兩組 buffer, 一邊算一邊預取, 把 memory latency 藏在 compute 後面。',
+      explanation: 'Software pipelining: 用兩組 buffer, 一邊算一邊預取, 把 memory latency 藏在 compute 後面。',
     },
     {
       question: '什麼情況下改用 Tensor Core / MFMA 效益最大?',
-      options: ['fp64 高精度需求', 'half/bf16 且矩陣夠大、intensity 已接近 compute roof', '極小矩陣', 'memory-bound 的 elementwise op'],
+      options: ['fp64 高精度需求', 'half/bf16 且矩陣夠大、intensity 已接近 compute roof', '極小矩陣', 'Memory-bound 的 elementwise op'],
       answer: 1,
       explanation: 'MMA 單元對低精度矩陣乘加提供數量級吞吐, 但要先讓 kernel 不再 memory-bound 才吃得到。',
     },
     {
       question: 'GEMM 的 epilogue 指的是?',
-      options: ['kernel 的最後一個 wave', 'accumulator 算完後、寫回 global memory 前的收尾段, 可融入 bias/activation 等 elementwise 運算', 'K 迴圈的最後一輪', 'cuBLAS 的 log'],
+      options: ['Kernel 的最後一個 wave', 'Accumulator 算完後、寫回 global memory 前的收尾段, 可融入 bias/activation 等 elementwise 運算', 'K 迴圈的最後一輪', 'cuBLAS 的 log'],
       answer: 1,
       explanation: '把 elementwise 融進 epilogue 省掉一次完整的 C 讀寫, 是 cuBLASLt/CUTLASS 提供 fused GEMM 的機制。',
     },
     {
       question: '為什麼手寫 Tensor Core / MFMA kernel 特別困難?',
-      options: ['指令太慢', 'fragment 的 register/記憶體佈局由硬體指令規定, shared memory layout 必須精確配合 (swizzle)', '不支援 fp16', '只能單 thread 呼叫'],
+      options: ['指令太慢', 'Fragment 的 register/記憶體佈局由硬體指令規定, shared memory layout 必須精確配合 (swizzle)', '不支援 fp16', '只能單 thread 呼叫'],
       answer: 1,
       explanation: 'MMA 指令對資料擺放有嚴格要求, 佈局錯誤即錯誤結果或 bank conflict — 這正是 CUTLASS/CK 封裝的核心價值。',
     },

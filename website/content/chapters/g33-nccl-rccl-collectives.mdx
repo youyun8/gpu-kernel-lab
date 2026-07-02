@@ -32,7 +32,7 @@
 
 ## Ring vs. Tree
 
-**Ring**: n 張卡排成環, 資料切成 n 個 chunks。 reduce-scatter 階段 n−1 步, 每步每張卡送出一個 chunk 給下家、收到一個 chunk 累加; all-gather 階段再 n−1 步把完成的 chunks 傳一圈。 關鍵性質: **每張卡每一步都在同時收和送**, 所有 link 滿載, 沒有一條線閒著 — 這讓 ring 是 **bandwidth-optimal**: 每張卡總共只搬 $2(n-1)/n \times S$ 的資料, 與卡數幾乎無關。
+**Ring**: n 張卡排成環, 資料切成 n 個 chunks。 Reduce-scatter 階段 n−1 步, 每步每張卡送出一個 chunk 給下家、收到一個 chunk 累加; all-gather 階段再 n−1 步把完成的 chunks 傳一圈。 關鍵性質: **每張卡每一步都在同時收和送**, 所有 link 滿載, 沒有一條線閒著 — 這讓 ring 是 **bandwidth-optimal**: 每張卡總共只搬 $2(n-1)/n \times S$ 的資料, 與卡數幾乎無關。
 
 **Tree**: 卡排成樹狀, reduce 沿樹往上、broadcast 沿樹往下。 步數是 $O(\log n)$ 而不是 ring 的 $O(n)$, 所以 **latency 低得多**; 代價是每一步只有部分 link 在工作, 頻寬利用率較差。
 
@@ -73,8 +73,8 @@ busbw 的「理論頻寬」由互連決定:
 
 通訊如果串行在 compute 後面, 多卡的收益會被吃掉一大塊。 標準做法 (第 28 章的 stream/event 機制直接適用):
 
-- collective 發在**專用的 communication stream** 上, 與 compute stream 並行。
-- 用 **event** 建立依賴: gradient bucket 算完 → record event → comm stream wait event → all-reduce 該 bucket。 backward 還在算後面的層時, 前面層的 gradient 已經在路上 — PyTorch DDP 的 gradient bucketing 就是這個模式。
+- Collective 發在**專用的 communication stream** 上, 與 compute stream 並行。
+- 用 **event** 建立依賴: gradient bucket 算完 → record event → comm stream wait event → all-reduce 該 bucket。 Backward 還在算後面的層時, 前面層的 gradient 已經在路上 — PyTorch DDP 的 gradient bucketing 就是這個模式。
 - 注意 SM 競爭: NCCL kernel 也占 SM, overlap 不是免費的; 這正是 profiler timeline (第 16 章) 要看的東西。
 
 ## NCCL ↔ RCCL: 同一份 code, 兩個平台
@@ -110,7 +110,7 @@ for (int g = 0; g < num_gpus; ++g) {
 }
 ```
 
-多機訓練用的是另一條初始化路徑 (`ncclGetUniqueId` + `ncclCommInitRank`, 由 torchrun/MPI 把 id 廣播出去), primitives 完全相同。 build 端: CUDA 連 `-lnccl`, ROCm 連 `-lrccl`; 本 repo 的 CMake 用 `find_library` 自動偵測, 找不到就跳過該 target。
+多機訓練用的是另一條初始化路徑 (`ncclGetUniqueId` + `ncclCommInitRank`, 由 torchrun/MPI 把 id 廣播出去), primitives 完全相同。 Build 端: CUDA 連 `-lnccl`, ROCm 連 `-lrccl`; 本 repo 的 CMake 用 `find_library` 自動偵測, 找不到就跳過該 target。
 
 <LabBox path="kernels/07-multi-gpu-collectives">
 在多卡機器上編譯並執行 `allreduce_bench`: 它用 `ncclCommInitAll` 在單一 process 內對所有可見 GPU 做 float sum all-reduce, 從 1 MiB 掃到 256 MiB, 每個 size 先驗證每張卡的結果等於 n(n+1)/2, 再印出 time、algbw 與 busbw。 觀察兩件事: (1) busbw 隨 size 上升後趨於平坦 — 平坦區就是你互連的實效頻寬, 拿去跟 NVLink/xGMI 規格對照; (2) 小 size 的 busbw 很低 — 那是 latency 主宰區, 正是 tree 演算法的舞台。 可以用 `NCCL_ALGO=Ring` / `Tree` 各跑一次比較曲線。
@@ -119,8 +119,8 @@ for (int g = 0; g < num_gpus; ++g) {
 <Quiz
   questions={[
     {
-      question: 'all-reduce 可以拆解成哪兩個 primitives?',
-      options: ['broadcast + gather', 'reduce-scatter + all-gather', 'all-to-all + reduce', 'scatter + broadcast'],
+      question: 'All-reduce 可以拆解成哪兩個 primitives?',
+      options: ['Broadcast + gather', 'Reduce-scatter + all-gather', 'All-to-all + reduce', 'Scatter + broadcast'],
       answer: 1,
       explanation: '先 reduce-scatter 讓每張卡算出結果的 1/n, 再 all-gather 把各段裝配回完整結果。 NCCL 的 ring all-reduce 內部就是這兩個 phase。',
     },
@@ -133,7 +133,7 @@ for (int g = 0; g < num_gpus; ++g) {
         '因為它只用 NVLink',
       ],
       answer: 1,
-      explanation: 'ring 的代價是 2(n-1) 步的 latency; 換來的是沒有任何 link 閒置, 大訊息時逼近硬體頻寬。 小訊息則是 O(log n) 步的 tree 勝出。',
+      explanation: 'Ring 的代價是 2(n-1) 步的 latency; 換來的是沒有任何 link 閒置, 大訊息時逼近硬體頻寬。 小訊息則是 O(log n) 步的 tree 勝出。',
     },
     {
       question: '8 卡 all-reduce, algbw 量到 42 GB/s, busbw 是多少?',

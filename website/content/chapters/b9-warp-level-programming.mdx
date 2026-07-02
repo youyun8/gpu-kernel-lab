@@ -120,34 +120,34 @@ Warp primitive 不只用來 sum:
 <Quiz
   questions={[
     {
-      question: 'warp shuffle (如 __shfl_down_sync) 的主要好處是?',
+      question: 'Warp shuffle (如 __shfl_down_sync) 的主要好處是?',
       options: ['增加 occupancy', '讓同一 warp 的 threads 直接交換 register, 免用 shared memory 與同步', '提高 memory bandwidth', '啟用 Tensor Core'],
       answer: 1,
-      explanation: 'shuffle 在 register 層級交換資料, 省掉 shared memory 來回與 __syncthreads, 降低 latency。',
+      explanation: 'Shuffle 在 register 層級交換資料, 省掉 shared memory 來回與 __syncthreads, 降低 latency。',
     },
     {
       question: '把 CUDA 的 warp reduce 移到 AMD CDNA, 最需要注意?',
-      options: ['FLOP 數', 'warp size 從 32 變 64, 步數與 mask 都要跟著調 (用 warpSize)', 'register 命名', 'kernel launch 語法'],
+      options: ['FLOP 數', 'Warp size 從 32 變 64, 步數與 mask 都要跟著調 (用 warpSize)', 'Register 命名', 'Kernel launch 語法'],
       answer: 1,
       explanation: 'wavefront=64, 寫死 32/16 會漏掉一半 lane; 應一律用 warpSize 推導。',
     },
     {
       question: '__ballot_sync 回傳的是?',
-      options: ['一個浮點總和', '一個 bitmask, 標示哪些 lane 的 predicate 為真', '最大值', 'warp 數量'],
+      options: ['一個浮點總和', '一個 bitmask, 標示哪些 lane 的 predicate 為真', '最大值', 'Warp 數量'],
       answer: 1,
-      explanation: 'ballot 收集每個 lane 的 predicate 成 bitmask, 常用於 compaction 與 active lane 計數。',
+      explanation: 'Ballot 收集每個 lane 的 predicate 成 bitmask, 常用於 compaction 與 active lane 計數。',
     },
     {
       question: '__shfl_xor_sync 做的 butterfly reduction 和 __shfl_down_sync 版本的差別是?',
       options: ['更慢但更準', '結束時每個 lane 都持有總和 (all-reduce), 而非只有 lane 0', '只能算最大值', '不需要 mask'],
       answer: 1,
-      explanation: 'butterfly 交換讓結果對稱地散佈到所有 lane, 適合每個 lane 後續都要用到總和的場景 (如 softmax 分母)。',
+      explanation: 'Butterfly 交換讓結果對稱地散佈到所有 lane, 適合每個 lane 後續都要用到總和的場景 (如 softmax 分母)。',
     },
     {
       question: '為什麼不該把 __activemask() 的結果直接當 mask 傳給 _sync primitive?',
       options: ['太慢', '它只回報當下剛好活躍的 lane, 不提供同步保證, 在 divergence 下行為不可靠', '型別不符', 'AMD 不支援'],
       answer: 1,
-      explanation: 'activemask 是觀測不是約定; 正確做法是明確指定參與的 lane 集合 (通常 0xffffffff), 或用 cooperative groups。',
+      explanation: '`__activemask()` 是觀測不是約定; 正確做法是明確指定參與的 lane 集合 (通常 0xffffffff), 或用 cooperative groups。',
     },
   ]}
 />

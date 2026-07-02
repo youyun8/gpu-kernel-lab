@@ -117,7 +117,7 @@ counter.fetch_add(1, std::memory_order_relaxed);
 atomicAdd(&bins[items[i]], 1);
 ```
 
-CPU 端的 `std::memory_order` 控制這個 atomic 同時對**其他記憶體操作**提供多強的順序保證: 純計數器用 `relaxed` 就夠; 若要「寫完資料再舉旗, 別人看到旗就看得到資料」, 需要 release/acquire。 GPU 端的對應概念是 **atomic scope**: CUDA 的 `atomicAdd_block` / `atomicAdd_system`、HIP 的對應 API, 以及 `__threadfence_block()` / `__threadfence()` / `__threadfence_system()` 分別控制「保證做到 block 內 / device 內 / 跨 device+host 可見」。 scope 越大越慢 — 只買你需要的可見範圍。
+CPU 端的 `std::memory_order` 控制這個 atomic 同時對**其他記憶體操作**提供多強的順序保證: 純計數器用 `relaxed` 就夠; 若要「寫完資料再舉旗, 別人看到旗就看得到資料」, 需要 release/acquire。 GPU 端的對應概念是 **atomic scope**: CUDA 的 `atomicAdd_block` / `atomicAdd_system`、HIP 的對應 API, 以及 `__threadfence_block()` / `__threadfence()` / `__threadfence_system()` 分別控制「保證做到 block 內 / device 內 / 跨 device+host 可見」。 Scope 越大越慢 — 只買你需要的可見範圍。
 
 `gpu_histogram_race.cpp` 用 histogram 對照「壞版 (`bins[b] = bins[b] + 1`) vs 正確版 (`atomicAdd`)」: 壞版每次執行少掉的數量都不同, 正確版永遠與 host reference 一致。
 
@@ -162,10 +162,10 @@ Barrier 回答「大家都做完第一階段了嗎?」:
 
 ## 常見陷阱
 
-- **Race condition**: 廣義的「結果依賴時序」。 data race 是其中最常見的一種, 但就算全用 atomic (沒有 data race), 邏輯上仍可能有 race condition — 例如 check-then-act 之間狀態被別人改掉。
+- **Race condition**: 廣義的「結果依賴時序」。 Data race 是其中最常見的一種, 但就算全用 atomic (沒有 data race), 邏輯上仍可能有 race condition — 例如 check-then-act 之間狀態被別人改掉。
 - **Deadlock**: 兩個 threads 互相等待對方持有的 lock。 GPU 上的變體是 warp 內 divergent branch 中呼叫 `__syncthreads()` — 一部分 lanes 永遠到不了 barrier, kernel 直接卡死。
 - **False sharing** (CPU 特有): 兩個 threads 寫**不同**變數, 但它們落在同一條 64-byte cache line, 硬體被迫在兩個 core 之間來回搬整條 line, 效能崩掉但結果正確 — 最難抓的一類。 解法是 padding 或對齊到 cache line。 GPU 的類比是同一 segment 的寫入競爭與 atomic contention。
-- **非決定性結果**: race 之外, **浮點 reduction 的順序**也會讓結果每次不同 — 浮點加法不滿足結合律, `(a+b)+c ≠ a+(b+c)`。 atomic 累加的順序由排程決定, 所以「全用 atomicAdd 的 float reduction」每次執行可能差在最後幾個 bits。 需要 bitwise 可重現時, 用固定順序的 tree reduction (第 31 章)。
+- **非決定性結果**: race 之外, **浮點 reduction 的順序**也會讓結果每次不同 — 浮點加法不滿足結合律, `(a+b)+c ≠ a+(b+c)`。 Atomic 累加的順序由排程決定, 所以「全用 atomicAdd 的 float reduction」每次執行可能差在最後幾個 bits。 需要 bitwise 可重現時, 用固定順序的 tree reduction (第 31 章)。
 
 ## 偵錯工具
 
@@ -190,7 +190,7 @@ GPU 端用 **compute-sanitizer** (CUDA): `compute-sanitizer --tool racecheck ./m
       question: '兩個 threads 同時執行 x = x + 1 (x 初始為 0), 沒有任何同步。 最終 x 可能是多少?',
       options: ['一定是 2', '一定是 1', '可能是 1 或 2, 取決於交錯順序', '可能是 0'],
       answer: 2,
-      explanation: 'read-modify-write 交錯時, 兩個 threads 都讀到 0、都寫回 1 (lost update); 不交錯時得到 2。 結果依賴時序, 這正是 data race 的非決定性。',
+      explanation: 'Read-modify-write 交錯時, 兩個 threads 都讀到 0、都寫回 1 (lost update); 不交錯時得到 2。 結果依賴時序, 這正是 data race 的非決定性。',
     },
     {
       question: '為什麼 GPU kernel 幾乎不用 lock, 而 CPU 多執行緒常用?',
@@ -201,7 +201,7 @@ GPU 端用 **compute-sanitizer** (CUDA): `compute-sanitizer --tool racecheck ./m
         'GPU 記憶體太小放不下 mutex',
       ],
       answer: 1,
-      explanation: 'lock 把並行度壓回 1; 在 thread 數以十萬計的 GPU 上代價極大, 而 warp 的 SIMT 執行讓「一個 lane 持鎖、同 warp 另一 lane 等鎖」可能永遠等不到。 GPU 用 atomic 或 privatization 取代。',
+      explanation: 'Lock 把並行度壓回 1; 在 thread 數以十萬計的 GPU 上代價極大, 而 warp 的 SIMT 執行讓「一個 lane 持鎖、同 warp 另一 lane 等鎖」可能永遠等不到。 GPU 用 atomic 或 privatization 取代。',
     },
     {
       question: 'OpenMP 的 reduction(+ : sum) 對應 GPU 上的哪個 pattern?',
@@ -234,11 +234,11 @@ GPU 端用 **compute-sanitizer** (CUDA): `compute-sanitizer --tool racecheck ./m
         '是 compiler bug',
       ],
       answer: 1,
-      explanation: 'atomic 保證每次加法完整生效 (沒有 lost update), 但不保證順序; 浮點捨入依賴順序, 所以結果 run-to-run 有微小差異。 需要 bitwise 重現性就要固定 reduction 順序。',
+      explanation: 'Atomic 保證每次加法完整生效 (沒有 lost update), 但不保證順序; 浮點捨入依賴順序, 所以結果 run-to-run 有微小差異。 需要 bitwise 重現性就要固定 reduction 順序。',
     },
     {
       question: '兩個 CPU threads 分別寫兩個「不同」的變數, 效能卻異常地差, 結果正確。 最可能的原因是?',
-      options: ['data race', 'deadlock', 'false sharing: 兩個變數在同一條 cache line, 硬體在 cores 之間來回搬移', 'OS 排程太慢'],
+      options: ['Data race', 'deadlock', 'False sharing: 兩個變數在同一條 cache line, 硬體在 cores 之間來回搬移', 'OS 排程太慢'],
       answer: 2,
       explanation: '結果正確排除了 race; 效能差且與兩個變數的記憶體距離有關, 是 false sharing 的典型病徵。 用 padding 讓熱門變數各占一條 cache line。',
     },

@@ -37,7 +37,7 @@
 
 ## Autotune 的角色
 
-同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。 library (cuBLASLt、CK、Triton 的 autotuner) 會在候選 config 中搜尋最佳解。 你自己寫的 kernel 若要對多種 shape 都快, 也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工, 也是 library 真正的價值所在。
+同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。 Library (cuBLASLt、CK、Triton 的 autotuner) 會在候選 config 中搜尋最佳解。 你自己寫的 kernel 若要對多種 shape 都快, 也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工, 也是 library 真正的價值所在。
 
 Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次遇到新 shape 時實測所有候選 config (冷啟動慢), 之後快取命中; cuBLAS 的 heuristic 零冷啟動但可能次優; TunableOp/CUTLASS profiler 走離線搜索。 選哪種, 取決於你的 shape 分佈是否固定、能否接受首次延遲。
 
@@ -86,9 +86,9 @@ Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次
     },
     {
       question: 'Triton autotune 與 cuBLAS heuristic 的取捨是?',
-      options: ['兩者相同', 'autotune 實測候選 config (首次慢但貼合硬體), heuristic 零冷啟動但對冷門形狀可能次優', 'heuristic 永遠更快', 'autotune 不支援 GEMM'],
+      options: ['兩者相同', 'Autotune 實測候選 config (首次慢但貼合硬體), heuristic 零冷啟動但對冷門形狀可能次優', 'Heuristic 永遠更快', 'Autotune 不支援 GEMM'],
       answer: 1,
-      explanation: 'shape 固定的 workload 適合實測型 (autotune/TunableOp); shape 多變或延遲敏感則靠 heuristic。',
+      explanation: 'Shape 固定的 workload 適合實測型 (autotune/TunableOp); shape 多變或延遲敏感則靠 heuristic。',
     },
   ]}
 />

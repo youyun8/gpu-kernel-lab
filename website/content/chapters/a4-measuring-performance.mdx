@@ -104,7 +104,7 @@ omniperf profile -n vadd -- ./vector_add
 - **End-to-end latency**: 用 timeline 或 CPU wall clock 包住整個 pipeline, 包含 H2D/D2H、launch gap、framework overhead 和同步。
 - **Transfer overlap**: 在 timeline 看 copy engine 和 compute stream 是否重疊。 只有 kernel event 很快不代表 pipeline 快。
 - **Small-kernel overhead**: 將同一小 op 重複 1、10、100、1000 次, 看時間是否線性成長。 若固定成本主導, 優先考慮 fusion 或 graph replay。
-- **Regression benchmark**: 固定 input seed、shape set、clock/environment, 記錄 p50/p90。 production kernel 不只要最快一次, 還要穩定。
+- **Regression benchmark**: 固定 input seed、shape set、clock/environment, 記錄 p50/p90。 Production kernel 不只要最快一次, 還要穩定。
 
 一個常用 sanity check: 把問題大小加倍。 若時間幾乎不變, 你量到的是 launch overhead 或同步; 若時間約加倍, 你量到的是 throughput path; 若時間超線性增加, cache、TLB、L2 residency 或 memory capacity 可能變成新瓶頸。
 
@@ -124,23 +124,23 @@ omniperf profile -n vadd -- ./vector_add
       question: '量 kernel 執行時間應優先用哪種計時?',
       options: ['CPU 的 std::chrono 包住 launch', 'GPU event (cudaEvent/hipEvent)', 'nvidia-smi 的功耗', '編譯時間'],
       answer: 1,
-      explanation: 'launch 非同步, CPU 計時會量到錯誤區間; GPU event 記錄 device 上的實際起訖。',
+      explanation: 'Launch 非同步, CPU 計時會量到錯誤區間; GPU event 記錄 device 上的實際起訖。',
     },
     {
-      question: 'speed-of-light 分析的目的是?',
+      question: 'Speed-of-light 分析的目的是?',
       options: ['測光速', '算出 kernel 相對硬體 peak 的百分比, 判斷還有多少優化空間', '計算 register 數量', '偵測 divergence'],
       answer: 1,
       explanation: '% of peak 讓你知道瓶頸在 memory 還是 compute, 以及是否已接近上限、不值得再調。',
     },
     {
       question: '為什麼嚴謹的 benchmark 要鎖定 (或至少記錄) GPU 時脈?',
-      options: ['避免燒壞 GPU', 'boost 與熱節流讓時脈浮動, 同一 kernel 兩次量測可能差異顯著', '提高精度', 'profiler 才能運作'],
+      options: ['避免燒壞 GPU', 'Boost 與熱節流讓時脈浮動, 同一 kernel 兩次量測可能差異顯著', '提高精度', 'Profiler 才能運作'],
       answer: 1,
       explanation: '時脈不固定時, 你量到的差異可能來自溫度而非程式碼改動; 鎖頻或記錄環境才能公平比較。',
     },
     {
-      question: 'timeline profiler (nsys) 和 kernel profiler (ncu) 的分工是?',
-      options: ['兩者相同', 'timeline 找出時間花在哪個 kernel; kernel profiler 解釋單一 kernel 為什麼慢', 'ncu 只能看 CPU', 'nsys 只能看記憶體'],
+      question: 'Timeline profiler (nsys) 和 kernel profiler (ncu) 的分工是?',
+      options: ['兩者相同', 'Timeline 找出時間花在哪個 kernel; kernel profiler 解釋單一 kernel 為什麼慢', 'ncu 只能看 CPU', 'nsys 只能看記憶體'],
       answer: 1,
       explanation: '先用 timeline 確認目標 kernel 佔比夠大 (Amdahl 定律), 再用 kernel profiler 深入 — 順序反了會浪費力氣。',
     },

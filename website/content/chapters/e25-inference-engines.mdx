@@ -56,7 +56,7 @@ TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 
 - **Speculative decoding**: 增加 draft/verify kernel, 用更多 compute 換更少主模型 decode steps。
 - **Backend flags**: FlashInfer、AITER、Triton、CUTLASS provider 的開關會直接換 kernel 棧。
 
-最佳配置取決於 workload: 短 prompt 高 QPS、長 context、batch offline decoding、低延遲互動式服務, 四者的最優 kernel 組合可能不同。 trace + token-level latency histogram 比單一 tokens/s 更有診斷價值。
+最佳配置取決於 workload: 短 prompt 高 QPS、長 context、batch offline decoding、低延遲互動式服務, 四者的最優 kernel 組合可能不同。 Trace + token-level latency histogram 比單一 tokens/s 更有診斷價值。
 
 <LabBox path="kernels/06-pytorch-integration">
 沒有內建的 serving lab (需要完整模型與權重), 但你可以做一次「考古」: 裝一個 vLLM 或 SGLang, 對一次 generate 用 `torch.profiler` 或 Nsight Systems 抓 timeline, 試著認出裡面的 attention kernel、GEMM、norm/RoPE fused kernel, 並區分哪些屬於 prefill、哪些屬於 decode。 把你在第 17 章學的 trace 分析用在真實的推論引擎上。
@@ -66,12 +66,12 @@ TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 
   questions={[
     {
       question: 'LLM 推論的 prefill 與 decode 兩個 phase 的效能特性是?',
-      options: ['兩者都是 compute-bound', 'prefill 是 compute-bound 的大 GEMM/attention, decode 是 memory-bound 的 GEMV + KV cache 讀取', '兩者都是 memory-bound', 'decode 比 prefill 更吃算力'],
+      options: ['兩者都是 compute-bound', 'Prefill 是 compute-bound 的大 GEMM/attention, decode 是 memory-bound 的 GEMV + KV cache 讀取', '兩者都是 memory-bound', 'Decode 比 prefill 更吃算力'],
       answer: 1,
-      explanation: 'prefill 一次算多 token (compute-bound), decode 每步一個 token 卻要讀整個 KV cache 與 weight (memory-bound)。',
+      explanation: 'Prefill 一次算多 token (compute-bound), decode 每步一個 token 卻要讀整個 KV cache 與 weight (memory-bound)。',
     },
     {
-      question: 'continuous batching (in-flight batching) 的作用是?',
+      question: 'Continuous batching (in-flight batching) 的作用是?',
       options: ['提高數值精度', '動態把新 request 併入正在跑的 batch, 提高 GPU 利用率; 它也決定底層 kernel 收到的形狀', '減少模型大小', '取代 attention'],
       answer: 1,
       explanation: '動態 batching 讓 GPU 不空等, 但也讓 GEMM/attention 形狀多變, 使第 13 章的排程技巧變得實際。',
@@ -90,7 +90,7 @@ TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 
     },
     {
       question: 'vLLM 與 SGLang 的底層 kernel 棧高度重疊, 說明了什麼?',
-      options: ['其中一個抄襲另一個', 'attention/GEMM/量化 kernel 已成共享公共財, 引擎的差異化主要在排程與 cache 策略', 'kernel 不重要', '兩者其實是同一個專案'],
+      options: ['其中一個抄襲另一個', 'attention/GEMM/量化 kernel 已成共享公共財, 引擎的差異化主要在排程與 cache 策略', 'Kernel 不重要', '兩者其實是同一個專案'],
       answer: 1,
       explanation: 'FlashInfer、CUTLASS、AITER 等被多個引擎共用; 競爭轉移到 continuous batching、prefix cache 等系統層。',
     },

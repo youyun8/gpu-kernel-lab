@@ -12,7 +12,7 @@ $$
 
 130 個 CTA 的效率只有 $130 / 256 \approx 51\%$。 這就是 wave quantization。
 
-推廣一下, 這也解釋了一個常見的觀察: 把 N 從 2048 加到 2064, 時間卻跳了一大截 — 多出的那一小條 tile 剛好多開了一個 wave。 deep learning 的 layer 尺寸若能配合 tile 與 wave 的整數倍 (例如 batch 或 hidden dim 選 tile size 的倍數), 常常白拿幾成效能, NVIDIA 的 DL performance 文件對此有專門建議。
+推廣一下, 這也解釋了一個常見的觀察: 把 N 從 2048 加到 2064, 時間卻跳了一大截 — 多出的那一小條 tile 剛好多開了一個 wave。 Deep learning 的 layer 尺寸若能配合 tile 與 wave 的整數倍 (例如 batch 或 hidden dim 選 tile size 的倍數), 常常白拿幾成效能, NVIDIA 的 DL performance 文件對此有專門建議。
 
 ## Tail effect
 
@@ -88,8 +88,8 @@ CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形
 <Quiz
   questions={[
     {
-      question: 'wave quantization 造成效能損失的原因?',
-      options: ['register 不足', 'CTA 數不是每 wave 容量的整數倍, 最後一個 wave 未填滿而閒置執行單元', 'bank conflict', 'divergence'],
+      question: 'Wave quantization 造成效能損失的原因?',
+      options: ['Register 不足', 'CTA 數不是每 wave 容量的整數倍, 最後一個 wave 未填滿而閒置執行單元', 'Bank conflict', 'divergence'],
       answer: 1,
       explanation: '工作以 wave 為批次, 殘缺的最後一 wave 讓部分執行單元空轉, 矩陣越小損失佔比越高。',
     },
@@ -107,12 +107,12 @@ CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形
     },
     {
       question: 'CTA swizzling 主要改善?',
-      options: ['register 使用', '同時執行的 CTA 之間的 L2 資料共用 (locality)', 'occupancy 上限', 'exp 精度'],
+      options: ['Register 使用', '同時執行的 CTA 之間的 L2 資料共用 (locality)', 'Occupancy 上限', 'exp 精度'],
       answer: 1,
       explanation: '重排 CTA→tile 對映讓相鄰執行的 CTA 共用更多 A/B 資料, 提高 L2 命中率。',
     },
     {
-      question: 'persistent kernel 的執行形態是?',
+      question: 'Persistent kernel 的執行形態是?',
       options: ['每個 tile launch 一個 kernel', '只 launch 填滿機器的 CTA 數, 各 CTA 迴圈從 work queue 領工作直到做完', '把 kernel 常駐在 L2', '用 CPU 排程每個 CTA'],
       answer: 1,
       explanation: '固定 CTA 數 + 動態領工作, 避開 wave 邊界與重複 launch, 是 Stream-K 與現代 serving kernel 的基礎形態。',
@@ -121,7 +121,7 @@ CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形
       question: 'cuBLAS 對每個 GEMM 呼叫如何決定用哪個 kernel?',
       options: ['永遠用同一個通用 kernel', '從預編譯的 kernel 變體庫中, 依 (形狀, dtype, layout, 架構) 用 heuristic 挑選, 包括是否啟用 Split-K', '每次現場 JIT 編譯', '由使用者指定 tile size'],
       answer: 1,
-      explanation: 'library 的核心資產是 kernel zoo + 選擇 heuristic; cuBLASLt/hipBLASLt 進一步把候選枚舉開放給使用者自行 benchmark。',
+      explanation: 'Library 的核心資產是 kernel zoo + 選擇 heuristic; cuBLASLt/hipBLASLt 進一步把候選枚舉開放給使用者自行 benchmark。',
     },
     {
       question: 'PyTorch 在 ROCm 上的 TunableOp 做的事情是?',

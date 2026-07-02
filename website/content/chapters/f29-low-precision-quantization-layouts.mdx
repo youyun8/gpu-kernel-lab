@@ -64,8 +64,8 @@ Packing kernel 本身要避免成為瓶頸:
 
 Tensor Core / MFMA 常需要特定 layout。 模型系統裡常見的隱性成本是:
 
-- row-major activation 轉成 tiled layout。
-- weight prepack / interleave。
+- Row-major activation 轉成 tiled layout。
+- Weight prepack / interleave。
 - KV cache page layout conversion。
 - fp16/bf16/fp8 之間的 cast。
 - int4 unpack + dequant 在 GEMM 主迴圈或 epilogue 中發生。
@@ -90,9 +90,9 @@ C_q[row * ldc + col] = static_cast<int8_t>(q);
 
 低精度 kernel 至少要測:
 
-- max absolute error、relative error、ULP 或 task-level metric。
-- outlier input、極小 scale、極大 scale、NaN/Inf policy。
-- deterministic vs. stochastic rounding 的差異。
+- Max absolute error、relative error、ULP 或 task-level metric。
+- Outlier input、極小 scale、極大 scale、NaN/Inf policy。
+- Deterministic vs. stochastic rounding 的差異。
 - 不同 batch/sequence shape 下的誤差分佈。
 - 與 library reference 在相同 accumulator 和 math mode 下比較。
 
@@ -114,19 +114,19 @@ C_q[row * ldc + col] = static_cast<int8_t>(q);
     },
     {
       question: 'Per-block scale 的主要代價是?',
-      options: ['完全不能向量化', 'metadata 和 epilogue 較複雜, scale load 可能成為瓶頸', '一定比 per-tensor 不準', '不支援 GEMM'],
+      options: ['完全不能向量化', 'Metadata 和 epilogue 較複雜, scale load 可能成為瓶頸', '一定比 per-tensor 不準', '不支援 GEMM'],
       answer: 1,
       explanation: '粒度越細精度通常越好, 但需要更多 scale metadata 與更複雜的 load/indexing。',
     },
     {
       question: 'Weight prepack 為什麼常划算?',
-      options: ['weight 通常靜態, 可一次轉成 MMA 友善 layout 後重複使用', 'prepack 可以增加 HBM 容量', 'prepack 會自動提高 clock', '只為了讓程式碼好看'],
+      options: ['Weight 通常靜態, 可一次轉成 MMA 友善 layout 後重複使用', 'Prepack 可以增加 HBM 容量', 'Prepack 會自動提高 clock', '只為了讓程式碼好看'],
       answer: 0,
       explanation: '靜態 weight 的 layout conversion 可以離線或初始化時做, 避免每次 inference 重複付費。',
     },
     {
       question: '低精度 validation 最不應該只看哪個指標?',
-      options: ['max error', 'outlier cases', '平均誤差', 'task-level metric'],
+      options: ['Max error', 'Outlier cases', '平均誤差', 'Task-level metric'],
       answer: 2,
       explanation: '平均誤差可能掩蓋 outlier、overflow、scale 失效和 tail shape 問題。',
     },

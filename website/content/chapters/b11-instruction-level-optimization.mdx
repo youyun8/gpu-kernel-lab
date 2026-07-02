@@ -94,27 +94,27 @@ hipcc -O3 --save-temps kernel.cpp   # inspect the .s file
     },
     {
       question: '過度使用 #pragma unroll 的風險?',
-      options: ['降低 FLOP', 'register 使用膨脹、壓低 occupancy', '造成 bank conflict', '關閉 L2'],
+      options: ['降低 FLOP', 'Register 使用膨脹、壓低 occupancy', '造成 bank conflict', '關閉 L2'],
       answer: 1,
       explanation: '展開會增加同時存活的變數, 吃更多 register, 可能反而拖低 occupancy, 需量測。',
     },
     {
-      question: 'fmaf (a, b, c) 相較先乘後加, 除了更快還有?',
+      question: 'fmaf(a, b, c) 相較先乘後加, 除了更快還有?',
       options: ['佔更多 register', '少一次中間 rounding, 精度通常更好', '需要 fast math', '只能用於 double'],
       answer: 1,
-      explanation: 'fused multiply-add 在單一步驟內完成, 省掉中間結果的 rounding。',
+      explanation: 'Fused multiply-add 在單一步驟內完成, 省掉中間結果的 rounding。',
     },
     {
       question: '把 `sum += a[i]*b[i]` 展開 8 次但仍累加到同一個 sum, 為什麼 ILP 沒有提升?',
-      options: ['編譯器會報錯', '8 條 FMA 透過 sum 形成相依鏈, 必須依序執行; 需要多個獨立累加器才能重疊', 'unroll 只對整數有效', 'FMA 不能連續發射'],
+      options: ['編譯器會報錯', '8 條 FMA 透過 sum 形成相依鏈, 必須依序執行; 需要多個獨立累加器才能重疊', 'Unroll 只對整數有效', 'FMA 不能連續發射'],
       answer: 1,
       explanation: '相依鏈決定了指令能否重疊。 切成 sum0..sum3 等獨立累加器, 才真正暴露平行度。',
     },
     {
       question: '短小的 if-else 邊界檢查通常不需要擔心 divergence, 因為?',
-      options: ['warp 不會 diverge', '編譯器常轉成 predicated instruction, 兩邊都算、依條件選結果, 沒有真正分支', 'GPU 會自動排序資料', '邊界檢查在 CPU 上跑'],
+      options: ['Warp 不會 diverge', '編譯器常轉成 predicated instruction, 兩邊都算、依條件選結果, 沒有真正分支', 'GPU 會自動排序資料', '邊界檢查在 CPU 上跑'],
       answer: 1,
-      explanation: 'predication 把短分支變成無跳轉的條件選擇; 昂貴的是長而不一致的分支, 不是一行 guard。',
+      explanation: 'Predication 把短分支變成無跳轉的條件選擇; 昂貴的是長而不一致的分支, 不是一行 guard。',
     },
   ]}
 />

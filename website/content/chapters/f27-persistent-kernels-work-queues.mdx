@@ -76,7 +76,7 @@ GEMM 中 persistent scheduling 常用來處理小矩陣、skinny 矩陣或 batch
 動態 queue 要處理三件事:
 
 - **Capacity**: ring buffer 滿了怎麼辦? Spin wait 會浪費 SM, 太小會限制 parallelism。
-- **Ordering**: payload 必須先寫完, 再 publish head/tail。 consumer 看到 index 後才能讀 payload。
+- **Ordering**: payload 必須先寫完, 再 publish head/tail。 Consumer 看到 index 後才能讀 payload。
 - **Termination**: 所有 producer 都完成且 queue 為空時, consumer 才能退出。 這通常比看起來難。
 
 若問題可以拆成幾個固定階段, 多個 kernel launch 加上 CUDA Graph/HIP Graph 往往更簡單且更可靠。 Persistent queue 留給真正需要單 kernel 動態排程的情況。
@@ -106,19 +106,19 @@ Persistent kernel 常用較少 blocks 長時間常駐, 因此要更注意:
       question: 'Work queue 每次取一個 task 的主要代價是?',
       options: ['無法 coalescing', '取號 atomic overhead 可能太高', '不能使用 register', '必定降低 occupancy 到 0'],
       answer: 1,
-      explanation: 'task 很小或成本均一時, atomic counter 的成本會壓過動態排程收益。',
+      explanation: 'Task 很小或成本均一時, atomic counter 的成本會壓過動態排程收益。',
     },
     {
       question: 'Persistent launch 的 blocks 數通常如何設定?',
       options: ['等於元素數', '約為 SM/CU 數乘上每 SM/CU 常駐 CTA 數', '固定 1 個 block', '固定 65535 個 block'],
       answer: 1,
-      explanation: 'persistent kernel 讓 blocks 長時間常駐, 通常只啟動足夠填滿硬體的 CTAs。',
+      explanation: 'Persistent kernel 讓 blocks 長時間常駐, 通常只啟動足夠填滿硬體的 CTAs。',
     },
     {
       question: 'Producer-consumer queue 中 publish index 前必須先處理什麼?',
       options: ['提高 clock rate', '確保 payload 已寫入且 memory ordering 正確', '把所有資料排序', '關閉 L2'],
       answer: 1,
-      explanation: 'consumer 看到 index 後會讀 payload, 因此 producer 必須先完成資料寫入並使用正確 fence/scope。',
+      explanation: 'Consumer 看到 index 後會讀 payload, 因此 producer 必須先完成資料寫入並使用正確 fence/scope。',
     },
   ]}
 />

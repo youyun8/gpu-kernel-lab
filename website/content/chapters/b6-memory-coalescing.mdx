@@ -3,7 +3,7 @@
 為什麼同一個 vector add, 只是把索引從 `i` 改成 `i * 2`, achieved bandwidth 就掉了一半? 程式邏輯幾乎沒變, 搬的資料量看起來也一樣。 答案藏在 global memory 的存取粒度裡: GPU 不是一次搬一個 float, 而是一次搬一整段 memory。
 
 <Callout variant="insight" title="先給直覺">
-把 global memory 想成一箱一箱出貨的倉庫, 每箱固定 128 bytes。 你要的東西如果剛好塞在同一箱, 一次就拿完; 如果分散在 32 箱, 你得叫 32 台車, 而且每台車大部分空間都載空氣。 memory coalescing 就是「讓一個 warp 的 32 個 threads 盡量只叫最少的車」。
+把 global memory 想成一箱一箱出貨的倉庫, 每箱固定 128 bytes。 你要的東西如果剛好塞在同一箱, 一次就拿完; 如果分散在 32 箱, 你得叫 32 台車, 而且每台車大部分空間都載空氣。 Memory coalescing 就是「讓一個 warp 的 32 個 threads 盡量只叫最少的車」。
 </Callout>
 
 ## 硬體怎麼看一個 warp 的存取
@@ -170,7 +170,7 @@ __global__ void boxFilterShared(const float* in, float* out, int n) {
 
 ### Gather vs. scatter
 
-如果只能讓讀或寫其中一側 coalesced, 優先讓資料量較大、重用較低的一側 coalesced。 gather (`out[i] = in[idx[i]]`) 天生寫入連續; scatter (`out[idx[i]] = in[i]`) 寫入分散, 若目標還會碰撞就必須用 atomic, 而 atomic 對同一位址會序列化。 下面的互動元件比較兩者, 並展示 aggregation 怎麼減少 atomic 數量:
+如果只能讓讀或寫其中一側 coalesced, 優先讓資料量較大、重用較低的一側 coalesced。 Gather (`out[i] = in[idx[i]]`) 天生寫入連續; scatter (`out[idx[i]] = in[i]`) 寫入分散, 若目標還會碰撞就必須用 atomic, 而 atomic 對同一位址會序列化。 下面的互動元件比較兩者, 並展示 aggregation 怎麼減少 atomic 數量:
 
 <GatherScatterVisualizer />
 
@@ -194,7 +194,7 @@ __global__ void scatterAtomicAggregated(const int* idx, unsigned int* bins, int 
 }
 ```
 
-`gather_scatter` 對 4M 筆資料實測 gather、naive scatter、block-aggregated scatter 三種路徑的差距。 atomic contention 的更多變化 (warp aggregation、privatization) 見第 26 章。
+`gather_scatter` 對 4M 筆資料實測 gather、naive scatter、block-aggregated scatter 三種路徑的差距。 Atomic contention 的更多變化 (warp aggregation、privatization) 見第 26 章。
 
 ### Row padding: 對齊每一 row 的開頭
 
@@ -259,25 +259,25 @@ __global__ void embeddingGather(const float* table, const int* idx,
       question: '對一個 bandwidth-bound kernel, coalescing efficiency 只有 25%, 最可能的效能上限是?',
       options: ['接近硬體 peak bandwidth', '約 peak bandwidth 的 25%', '由 compute peak 決定', '無法判斷'],
       answer: 1,
-      explanation: 'bandwidth-bound 時, 有效頻寬 ≈ peak × efficiency, 25% efficiency 直接把天花板壓到約四分之一。',
+      explanation: 'Bandwidth-bound 時, 有效頻寬 ≈ peak × efficiency, 25% efficiency 直接把天花板壓到約四分之一。',
     },
     {
-      question: 'misaligned 但 stride = 1 的存取, 為什麼仍可能需要兩次 transaction?',
+      question: 'Misaligned 但 stride = 1 的存取, 為什麼仍可能需要兩次 transaction?',
       options: ['因為 warp 太大', '因為存取跨越了兩個 segment 邊界', '因為 register 不夠', '因為 shared memory bank conflict'],
       answer: 1,
       explanation: '起始位址沒對齊時, 連續的 128 bytes 會落在兩個 128-byte segment 上, 硬體必須各搬一次。',
     },
     {
       question: '什麼情況下 AoS 反而是合理的佈局?',
-      options: ['永遠不合理', 'kernel 每次都同時使用該 struct 的所有欄位', '只在 CPU 上', '資料小於 L2 時'],
+      options: ['永遠不合理', 'Kernel 每次都同時使用該 struct 的所有欄位', '只在 CPU 上', '資料小於 L2 時'],
       answer: 1,
       explanation: '同時用到所有欄位時, AoS 的存取本身就是連續的; 佈局的原則是配合 warp 同一時刻要的資料, 不是教條。',
     },
     {
       question: '小 stride 的 uncoalesced 存取實測懲罰常低於理論值, 原因是?',
-      options: ['profiler 量不準', '相鄰 warp 命中 L1/L2 中已搬進的 segment, cache 吸收了部分多餘 traffic', '硬體自動重排 threads', '編譯器修好了'],
+      options: ['Profiler 量不準', '相鄰 warp 命中 L1/L2 中已搬進的 segment, cache 吸收了部分多餘 traffic', '硬體自動重排 threads', '編譯器修好了'],
       answer: 1,
-      explanation: 'cache 讓被「浪費」搬入的 bytes 有機會被之後的 warp 用到; 但資料量超過 cache 後懲罰全額回歸。',
+      explanation: 'Cache 讓被「浪費」搬入的 bytes 有機會被之後的 warp 用到; 但資料量超過 cache 後懲罰全額回歸。',
     },
   ]}
 />

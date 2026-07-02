@@ -12,7 +12,7 @@ $$
 i = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}
 $$
 
-三層各有明確的角色: thread 是計算的單位、block 是「協作」的單位 (同步與 shared memory 的邊界)、grid 是「一次 launch 的全部工作」。 block 大小通常選 128–512 且為 warp size 的倍數; 本站的範例慣用 256。
+三層各有明確的角色: thread 是計算的單位、block 是「協作」的單位 (同步與 shared memory 的邊界)、grid 是「一次 launch 的全部工作」。 Block 大小通常選 128–512 且為 warp size 的倍數; 本站的範例慣用 256。
 
 ## 完整流程: 配置、搬運、launch、取回
 
@@ -84,7 +84,7 @@ void run(const float* hostA, const float* hostB, float* hostC, int n) {
 </PlatformTabs>
 
 <Callout variant="info" title="那個 if (i < n) 不是裝飾">
-grid 用 ceil-div 算出來, 最後一個 block 幾乎一定會有超出 n 的 thread。 少了邊界檢查, 這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
+Grid 用 ceil-div 算出來, 最後一個 block 幾乎一定會有超出 n 的 thread。 少了邊界檢查, 這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
 </Callout>
 
 ## 錯誤檢查: 不要裸奔
@@ -154,14 +154,14 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 還有兩個習慣要從第一天建立: pointer 可標 `const` 和 `__restrict__` 時就標, 讓編譯器知道 aliasing 較少; 所有 kernel launch 在 debug/test 模式都要接 `cudaGetLastError()` / `hipGetLastError()` 和一次同步, 否則錯誤會延後到無關 API 才爆出來。
 
 <LabBox path="kernels/01-basics">
-編譯並執行 `vector_add`。 它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。 vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
+編譯並執行 `vector_add`。 它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。 Vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
 </LabBox>
 
 <Quiz
   questions={[
     {
-      question: 'kernel 裡的 `blockIdx.x * blockDim.x + threadIdx.x` 算的是?',
-      options: ['block 數量', '這個 thread 負責的 global 索引', 'warp 大小', 'shared memory 大小'],
+      question: 'Kernel 裡的 `blockIdx.x * blockDim.x + threadIdx.x` 算的是?',
+      options: ['Block 數量', '這個 thread 負責的 global 索引', 'Warp 大小', 'Shared memory 大小'],
       answer: 1,
       explanation: '把 block 內的 local 索引加上 block 的起始偏移, 得到跨整個 grid 的唯一 global 索引。',
     },
@@ -172,20 +172,20 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
       explanation: 'n 不一定整除 block size, ceil-div 保證覆蓋所有元素; 多出來的 thread 靠邊界檢查擋掉。',
     },
     {
-      question: 'vector add 屬於哪一類 kernel?',
-      options: ['compute-bound', 'memory-bound', 'latency-bound 的序列程式', '完全在 register 內'],
+      question: 'Vector add 屬於哪一類 kernel?',
+      options: ['compute-bound', 'memory-bound', 'Latency-bound 的序列程式', '完全在 register 內'],
       answer: 1,
       explanation: '每個元素只做一次加法卻要讀兩個、寫一個 float, arithmetic intensity 極低, 受限於 memory bandwidth。',
     },
     {
-      question: 'kernel launch 後立刻呼叫 `cudaGetLastError()` 的目的是?',
+      question: 'Kernel launch 後立刻呼叫 `cudaGetLastError()` 的目的是?',
       options: ['同步 device', '抓 launch configuration 本身的錯誤 (如 block size 超限)', '清空 L2 cache', '回收記憶體'],
       answer: 1,
-      explanation: 'launch 是非同步且不回傳錯誤, launch 參數不合法只能靠 cudaGetLastError 抓; 執行期錯誤則要等同步點。',
+      explanation: 'Launch 是非同步且不回傳錯誤, launch 參數不合法只能靠 cudaGetLastError 抓; 執行期錯誤則要等同步點。',
     },
     {
-      question: 'grid-stride loop 相對「一 thread 一元素」的好處是?',
-      options: ['自動消除邊界檢查', 'grid 大小與資料大小解耦, 任意 n 都能用固定 grid 處理', '提高精度', '免去 kernel launch'],
+      question: 'Grid-stride loop 相對「一 thread 一元素」的好處是?',
+      options: ['自動消除邊界檢查', 'Grid 大小與資料大小解耦, 任意 n 都能用固定 grid 處理', '提高精度', '免去 kernel launch'],
       answer: 1,
       explanation: '每個 thread 以 grid 總 thread 數為步幅掃過陣列, 同一個 launch 配置可服務任何資料量, 每 thread 也有更多獨立工作。',
     },

@@ -56,7 +56,7 @@ $$
 \text{softmax}(x_i) = \frac{e^{x_i - \max_j x_j}}{\sum_k e^{x_k - \max_j x_j}}
 $$
 
-實作上就是把本章的 reduction 用兩次 (max 一次、sum 一次), 再做一次 elementwise 正規化 — naive 版本共掃三遍資料。 row 夠短時一個 warp/block 處理一個 row, 中間值全程留在 register, 這正是 fused softmax kernel 的形狀 (第 20 章用 Triton 重寫的就是它)。
+實作上就是把本章的 reduction 用兩次 (max 一次、sum 一次), 再做一次 elementwise 正規化 — naive 版本共掃三遍資料。 Row 夠短時一個 warp/block 處理一個 row, 中間值全程留在 register, 這正是 fused softmax kernel 的形狀 (第 20 章用 Triton 重寫的就是它)。
 
 ## Online softmax: 一次掃描搞定
 
@@ -92,9 +92,9 @@ Reduction 家族很大, 實務上會依 shape 選不同版本:
 - **Block-per-row**: row 較長時, 一個 block 處理一列, 每 thread 多元素 grid-stride, shared memory 合併 warp partials。
 - **Multi-block per row**: row 很長時, 多 blocks 處理同一列並輸出 partial, 第二階段再 reduce。
 - **Persistent reduction**: 大量短 row 且長度不均時, persistent scheduler 動態取 row, 減少 tail effect。
-- **Segmented reduction**: key/value 已排序或有 segment offsets 時, 每段各自 reduce。 histogram、embedding gradient、sparse ops 常用。
+- **Segmented reduction**: key/value 已排序或有 segment offsets 時, 每段各自 reduce。 Histogram、embedding gradient、sparse ops 常用。
 
-數值上也要選策略: 普通 sum 可用 tree reduction; 長向量或精度敏感可用 pairwise/Kahan 類補償, 但會增加 FLOP 和 register。 softmax 則應優先用 max-subtraction 或 online normalizer, 不要靠 `expf` 之後再補救 overflow。
+數值上也要選策略: 普通 sum 可用 tree reduction; 長向量或精度敏感可用 pairwise/Kahan 類補償, 但會增加 FLOP 和 register。 Softmax 則應優先用 max-subtraction 或 online normalizer, 不要靠 `expf` 之後再補救 overflow。
 
 <LabBox path="kernels/04-reductions-softmax">
 `reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。 依序跑, 觀察 reduction 逐步逼近頻寬上限。
@@ -109,13 +109,13 @@ Reduction 家族很大, 實務上會依 shape 選不同版本:
       explanation: '減 max 讓指數的輸入 ≤ 0, e^(x-max) ≤ 1, 避免溢位, 結果數學上不變。',
     },
     {
-      question: 'reduction 最後階段改用 warp shuffle 的好處?',
+      question: 'Reduction 最後階段改用 warp shuffle 的好處?',
       options: ['增加 FLOP', '省掉多輪 shared memory 存取與 __syncthreads', '提高數值精度', '減少 grid 大小'],
       answer: 1,
       explanation: '最後一個 warp 內用 shuffle 交換 register, 不必再進 shared memory 也不必同步。',
     },
     {
-      question: 'online softmax 相對 three-pass 的關鍵優勢?',
+      question: 'Online softmax 相對 three-pass 的關鍵優勢?',
       options: ['精度更高', '只需一次掃描並維護 running max/sum, memory 需求大減 (FlashAttention 基礎)', 'FLOP 更少', '不需要 exp'],
       answer: 1,
       explanation: '邊掃邊 rescale, 避免物化整個 row, 讓 softmax 可 tile 與 fuse。',
@@ -127,10 +127,10 @@ Reduction 家族很大, 實務上會依 shape 選不同版本:
       explanation: '浮點加法不符合結合律, atomic 的完成順序每次不同; 需要可重現結果時用固定順序的兩段式 reduce。',
     },
     {
-      question: 'tree reduction 用 `if(tid % (2*s) == 0)` 的寫法差在哪?',
+      question: 'Tree reduction 用 `if(tid % (2*s) == 0)` 的寫法差在哪?',
       options: ['結果錯誤', '活躍 thread 分散在整個 block, 造成 divergence 與 strided 的 shared memory 存取', '用太多 register', '不能配 shuffle'],
       answer: 1,
-      explanation: 'interleaved addressing 讓每輪的工作 thread 稀疏分佈; sequential addressing (tid < s) 讓活躍 thread 連續, 消除 divergence。',
+      explanation: 'Interleaved addressing 讓每輪的工作 thread 稀疏分佈; sequential addressing (tid < s) 讓活躍 thread 連續, 消除 divergence。',
     },
     {
       question: '兩組 online softmax 的局部 (m, d) 能合併嗎?',

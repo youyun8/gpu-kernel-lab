@@ -1,6 +1,6 @@
 # Track A 練習: GPU 基礎與效能測量
 
-這組練習對應第 1–5 章。 paper-and-pencil 題請先自己算, 再展開解答對照; programming 題的參考解在 <code>kernels/exercises/</code>, 可直接編譯執行。 除非題目另外標明, 假設 warp = 32、一個 memory transaction 覆蓋 128 bytes、`float` 為 4 bytes。
+這組練習對應第 1–5 章。 Paper-and-pencil 題請先自己算, 再展開解答對照; programming 題的參考解在 <code>kernels/exercises/</code>, 可直接編譯執行。 除非題目另外標明, 假設 warp = 32、一個 memory transaction 覆蓋 128 bytes、`float` 為 4 bytes。
 
 <Exercise id="A1" title="SIMT 與 divergence" kind="paper" level="入門">
 一個 kernel 內有 `if(threadIdx.x % 2 == 0) heavy(); else light();`, 其中 `heavy()` 需 100 cycles、`light()` 需 10 cycles。 假設一個 warp 32 個 threads lockstep 執行, 忽略其他 overhead。
@@ -15,12 +15,12 @@
 </Exercise>
 
 <Exercise id="A2" title="Global thread index" kind="paper" level="入門">
-kernel 以 `grid = 8 blocks`、`block = 128 threads` 啟動。 請寫出 `blockIdx.x = 5`、`threadIdx.x = 20` 這個 thread 的 global index, 並說明 grid 總共覆蓋幾個元素、若要處理 `n = 1000` 個元素為何仍需邊界檢查。
+Kernel 以 `grid = 8 blocks`、`block = 128 threads` 啟動。 請寫出 `blockIdx.x = 5`、`threadIdx.x = 20` 這個 thread 的 global index, 並說明 grid 總共覆蓋幾個元素、若要處理 `n = 1000` 個元素為何仍需邊界檢查。
 
 <Solution>
-global index = `blockIdx.x * blockDim.x + threadIdx.x = 5 * 128 + 20 = 660`。
+Global index = `blockIdx.x * blockDim.x + threadIdx.x = 5 * 128 + 20 = 660`。
 
-grid 總共有 `8 * 128 = 1024` 個 threads。 處理 `n = 1000` 時, index 1000–1023 的 24 個 threads 超出範圍, 必須用 `if(i < n)` 擋掉, 否則越界存取造成 undefined behavior / silent corruption。
+Grid 總共有 `8 * 128 = 1024` 個 threads。 處理 `n = 1000` 時, index 1000–1023 的 24 個 threads 超出範圍, 必須用 `if(i < n)` 擋掉, 否則越界存取造成 undefined behavior / silent corruption。
 </Solution>
 </Exercise>
 
@@ -42,7 +42,7 @@ grid 總共有 `8 * 128 = 1024` 個 threads。 處理 `n = 1000` 時, index 1000
 
 (b) `bandwidth = 0.201 GB / 0.75e-3 s ≈ 268 GB/s` (用 `2.01e8 / 0.75e-3 / 1e9`)。
 
-(c) `268 / 1555 ≈ 17.3%`。 vector add 是 memory-bound, GFLOP/s 很低是正常的; 真正該看的是這個 bandwidth 百分比。
+(c) `268 / 1555 ≈ 17.3%`。 Vector add 是 memory-bound, GFLOP/s 很低是正常的; 真正該看的是這個 bandwidth 百分比。
 </Solution>
 </Exercise>
 

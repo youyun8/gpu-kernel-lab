@@ -93,7 +93,7 @@ CUTLASS 的正確使用方式通常不是 fork 後手改 mainloop, 而是替換 
     },
     {
       question: 'CuTe 的 Layout 抽象解決了什麼問題?',
-      options: ['kernel launch 語法', '把資料佈局 (shape: stride + swizzle) 變成可組合的代數, 由型別系統保證 MMA 佈局正確性', '自動微分', '記憶體配置'],
+      options: ['Kernel launch 語法', '把資料佈局 (shape: stride + swizzle) 變成可組合的代數, 由型別系統保證 MMA 佈局正確性', '自動微分', '記憶體配置'],
       answer: 1,
       explanation: 'MMA 指令的佈局要求是手寫 kernel 最易錯的部分; CuTe 用 layout 代數取代人肉 index 推導。',
     },
@@ -111,9 +111,9 @@ CUTLASS 的正確使用方式通常不是 fork 後手改 mainloop, 而是替換 
     },
     {
       question: 'CUTLASS 的 epilogue 元件典型用途是?',
-      options: ['launch 前檢查參數', '在 accumulator 寫回 global 前融合 bias/activation/dtype 轉換, 省一次完整的輸出讀寫', '管理 L2 cache', '做 correctness check'],
+      options: ['Launch 前檢查參數', '在 accumulator 寫回 global 前融合 bias/activation/dtype 轉換, 省一次完整的輸出讀寫', '管理 L2 cache', '做 correctness check'],
       answer: 1,
-      explanation: 'epilogue fusion 是 GEMM + elementwise 融合的標準機制 (第 12、19 章), CUTLASS 以 visitor tree 支援任意組合。',
+      explanation: 'Epilogue fusion 是 GEMM + elementwise 融合的標準機制 (第 12、19 章), CUTLASS 以 visitor tree 支援任意組合。',
     },
   ]}
 />

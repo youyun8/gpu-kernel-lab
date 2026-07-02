@@ -1,20 +1,20 @@
 # Autotuning、Specialization 與 Code Generation
 
-高效 kernel 很少只有一組最佳參數。 tile size、num warps、pipeline stages、vector width、unroll factor、shared memory layout、split-K、epilogue fusion 都會隨 GPU、dtype、shape 改變。 Autotuning 的目的不是追求漂亮抽象, 而是把這些選擇系統化。
+高效 kernel 很少只有一組最佳參數。 Tile size、num warps、pipeline stages、vector width、unroll factor、shared memory layout、split-K、epilogue fusion 都會隨 GPU、dtype、shape 改變。 Autotuning 的目的不是追求漂亮抽象, 而是把這些選擇系統化。
 
 ## 參數空間
 
 一個 GEMM 或 softmax kernel 可能有這些 knobs:
 
-- block tile: `BM × BN × BK`。
-- warp tile 和 thread tile。
+- Block tile: `BM × BN × BK`。
+- Warp tile 和 thread tile。
 - `num_warps` / waves per workgroup。
 - `num_stages` 或 async pipeline depth。
-- vectorized load width, 例如 1、2、4、8 elements。
-- swizzle / padding / shared memory layout。
+- Vectorized load width, 例如 1、2、4、8 elements。
+- Swizzle / padding / shared memory layout。
 - split-K、stream-K、CTA swizzle。
-- math mode, 例如 fp32、tf32、fp16、bf16、fp8。
-- epilogue fusion 選項。
+- Math mode, 例如 fp32、tf32、fp16、bf16、fp8。
+- Epilogue fusion 選項。
 
 不要盲目全排列。 先用硬體限制剪枝: shared memory 上限、register 上限、alignment、MMA instruction shape、occupancy 下限。
 
@@ -95,10 +95,10 @@ Bucket 要小心: shape 差一點點可能讓 tail effect 完全不同。 小矩
 ## Autotuning 的陷阱
 
 - 只用單一 input distribution, 忽略 cache warmness 或 data-dependent branch。
-- benchmark batch 太短, 量到 clock ramp 或 launch overhead。
+- Benchmark batch 太短, 量到 clock ramp 或 launch overhead。
 - 沒把 correctness 納入每次 measurement。
 - 在開發機調到最快, 生產 GPU/driver 版本不同就退化。
-- tune cache 沒有版本化, kernel 改了卻沿用舊結果。
+- Tune cache 沒有版本化, kernel 改了卻沿用舊結果。
 
 <LabBox path="kernels/03-gemm">
 用 `sgemm_step2_register_tiling.cpp` 做小型 autotuner: 掃 `TM/TN`、block size、vector width。 每個 config 先做 correctness check, 再記錄 GFLOP/s、register count 和 achieved occupancy。 把最快 config 依矩陣 shape 寫入 JSON dispatch table。
