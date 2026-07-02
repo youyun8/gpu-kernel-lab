@@ -64,6 +64,10 @@ function(gklab_add_kernel target source)
   endif()
 endfunction()
 
+# CPU parallelism foundations build on any machine, GPU toolchain or not;
+# its GPU targets no-op via gklab_add_kernel when no platform was found.
+add_subdirectory(00-parallel-foundations)
+
 if(NOT GKLAB_PLATFORM STREQUAL "NONE")
   add_subdirectory(01-basics)
   add_subdirectory(02-memory)

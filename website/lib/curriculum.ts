@@ -24,6 +24,14 @@ export const tracks: TrackMeta[] = [
     description: '建立 GPU 的心智模型: 從硬體設計哲學到第一個能跑的 kernel, 以及如何正確測量效能。',
     chapters: [
       {
+        slug: 'a0-parallelization-and-data-races',
+        num: 0,
+        title: '平行化設計與 Data Race',
+        summary:
+          'decomposition、granularity、把工作 map 到硬體; data race 與 lost update; mutex/atomic/reduction/barrier 的 CPU↔GPU 對照, 以及 ThreadSanitizer 與 compute-sanitizer。',
+        lab: 'kernels/00-parallel-foundations',
+      },
+      {
         slug: 'a1-what-is-a-gpu',
         num: 1,
         title: 'GPU 是什麼樣的機器?',

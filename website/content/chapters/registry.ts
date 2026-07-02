@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 
 // Static import map so Next.js can statically export every chapter page.
+import A0 from './a0-parallelization-and-data-races.mdx';
 import A1 from './a1-what-is-a-gpu.mdx';
 import A2 from './a2-first-kernel.mdx';
 import A3 from './a3-memory-hierarchy.mdx';
@@ -35,6 +36,7 @@ import F31 from './f31-correctness-determinism-debugging.mdx';
 import F32 from './f32-optimization-checklist.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
+  'a0-parallelization-and-data-races': A0,
   'a1-what-is-a-gpu': A1,
   'a2-first-kernel': A2,
   'a3-memory-hierarchy': A3,

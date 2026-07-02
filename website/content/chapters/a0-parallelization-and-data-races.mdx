@@ -1,0 +1,256 @@
+# 平行化設計與 Data Race
+
+在寫第一個 GPU kernel 之前, 值得先回答兩個更根本的問題: **工作要怎麼切給幾千個 threads?** 以及 **切下去之後, 什麼東西會壞?** 這兩個問題在 CPU (C++ `std::thread` / OpenMP / Pthread) 和 GPU (CUDA / ROCm) 上的答案高度對稱 — 本章用同一組概念雙邊對照, 每個概念都給可以編譯執行的 code。
+
+<Callout variant="insight" title="先給直覺">
+平行化的本質是「把一個大問題切成可以同時做的小塊」。 切法決定效能, 而「兩個 worker 同時碰同一塊資料」決定正確性。 前者叫 decomposition, 後者出錯就叫 data race。
+</Callout>
+
+## 如何設計平行化: Decomposition
+
+平行化的第一步是選擇切割維度:
+
+- **Data parallelism**: 每個 worker 對**不同資料**做**同一件事**。 對一億個元素做 `y[i] = a * x[i] + y[i]`, 每個元素獨立 — 這是 GPU 的主場。
+- **Task parallelism**: 每個 worker 做**不同的事**。 一個 thread 解碼影片、一個做 UI、一個寫磁碟 — 這是 CPU 多執行緒的主場。
+
+第二步是決定 **granularity (粒度)**: 每個 worker 分到多大的工作? 粒度太粗, worker 數量不夠, 硬體吃不飽; 粒度太細, 排程與同步的 overhead 反而超過工作本身。 同時要注意 **load balancing**: 如果有些小塊比別的大很多 (例如稀疏矩陣的某幾個 row 特別長), 先做完的 worker 只能空等。
+
+第三步是把工作 **map 到硬體**:
+
+| 概念 | CPU | GPU |
+| --- | --- | --- |
+| 硬體平行單位 | core (數個到上百個) | SM / CU (上百個), 每個同時跑多個 warps |
+| 軟體平行單位 | thread (與 core 數同數量級) | thread (數十萬個), 以 block 為單位分派 |
+| 合理粒度 | 每 thread 分幾 MB 的資料、幾 ms 的工作 | 每 thread 常只處理 1~8 個元素 |
+| 排程 | OS 排程器, context switch 貴 | 硬體 warp scheduler, 切換零成本 |
+
+GPU 為什麼偏好 **massive data parallelism**? 因為它靠「同時存在大量 threads」來隱藏記憶體延遲 (第 8 章 occupancy 會深入): 一個 warp 在等資料時, scheduler 立刻切到別的 warp。 這個機制要有效, threads 必須**多到淹沒延遲**, 而只有 data parallelism 能自然產生數十萬個一模一樣的小工作。
+
+```cpp
+// CPU: coarse-grained - each of ~8 threads owns a contiguous slice.
+void saxpyCpu(int num_threads, int n, float a, const float* x, float* y) {
+  std::vector<std::thread> pool;
+  for (int t = 0; t < num_threads; ++t) {
+    pool.emplace_back([=]() {
+      int begin = static_cast<int>(static_cast<long long>(n) * t / num_threads);
+      int end = static_cast<int>(static_cast<long long>(n) * (t + 1) / num_threads);
+      for (int i = begin; i < end; ++i) y[i] = a * x[i] + y[i];
+    });
+  }
+  for (auto& thread : pool) thread.join();
+}
+```
+
+```cpp
+// GPU: fine-grained - one thread per element, hundreds of thousands of threads.
+__global__ void saxpyGpu(int n, float a, const float* x, float* y) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] = a * x[i] + y[i];
+}
+```
+
+同一個 SAXPY, CPU 版把陣列切成 8 條大 slice, GPU 版直接「一個 thread 一個元素」。 兩邊都是 data parallelism, 差別只在粒度 — 由硬體的平行度決定。
+
+## Data Race: 平行化的第一個地雷
+
+當兩個 threads **並行存取同一個記憶體位址**, 其中至少一個是寫入, 而且**沒有同步**時, 就是 data race。 最經典的病徵是 **lost update**: `x = x + 1` 其實是三個步驟 (read、modify、write), 兩個 threads 的三步驟一旦交錯, 就會兩個都讀到舊值、都寫回同一個新值 — 一次加法憑空消失。
+
+下面的互動時間軸把這件事演出來, 也演示 atomic 與 lock 如何修好它:
+
+<DataRaceTimeline />
+
+這不是理論風險。 `kernels/00-parallel-foundations/race_demo.cpp` 讓 8 個 threads 各做一百萬次 `++counter`, 實測輸出:
+
+```text
+race_demo: 8 threads x 1000000 increments, expected total 8000000
+  trial 0: total =    1123093  (lost  86.0% of updates) WRONG
+  trial 1: total =    1144654  (lost  85.7% of updates) WRONG
+  trial 2: total =    1121852  (lost  86.0% of updates) WRONG
+```
+
+不但錯, 而且**每次執行結果都不同** — 這是 data race 的招牌特徵: 結果取決於 threads 恰好怎麼交錯, 換一台機器、換一次執行都可能不一樣。
+
+## 同步工具箱: CPU ↔ GPU 對照
+
+### Mutual exclusion: lock
+
+CPU 的標準答案是 mutex — 讓 read-modify-write 整段互斥:
+
+```cpp
+// C++ std::mutex (race_fixed_mutex.cpp)
+std::mutex counter_mutex;
+auto worker = [&counter, &counter_mutex]() {
+  for (int i = 0; i < kIncrementsPerThread; ++i) {
+    std::lock_guard<std::mutex> guard(counter_mutex);
+    ++counter;  // exclusive access: no interleaving, no lost updates
+  }
+};
+```
+
+```cpp
+// Pthread (pthread_race.cpp)
+pthread_mutex_lock(args->mutex);
+++*args->counter;
+pthread_mutex_unlock(args->mutex);
+```
+
+```cpp
+// OpenMP
+#pragma omp critical
+++counter;
+```
+
+**GPU 上幾乎不用 lock。** 原因很結構性: 一個 warp 的 32 個 threads 同步執行 (lockstep), 如果 lane 0 拿到 lock 而 lane 1 在 spin-wait 等同一個 lock, 兩個 lane 在舊架構上會互相等待到 deadlock; 就算硬體支援 (independent thread scheduling), 數十萬個 threads 排隊拿一個 lock 也等於把整台 GPU 序列化。 GPU 的做法是: **用 atomic 取代 lock**, 或者**重新設計演算法讓競爭消失** (privatization — 每個 block 先在自己的 shared memory 裡累積, 最後才合併, 見第 26 章)。
+
+### Atomics
+
+把 read-modify-write 變成一條不可分割的指令, 兩邊語法幾乎平行:
+
+```cpp
+// CPU: std::atomic (race_fixed_atomic.cpp)
+std::atomic<long long> counter{0};
+counter.fetch_add(1, std::memory_order_relaxed);
+```
+
+```cpp
+// GPU: device atomics (gpu_histogram_race.cpp)
+atomicAdd(&bins[items[i]], 1);
+```
+
+CPU 端的 `std::memory_order` 控制這個 atomic 同時對**其他記憶體操作**提供多強的順序保證: 純計數器用 `relaxed` 就夠; 若要「寫完資料再舉旗, 別人看到旗就看得到資料」, 需要 release/acquire。 GPU 端的對應概念是 **atomic scope**: CUDA 的 `atomicAdd_block` / `atomicAdd_system`、HIP 的對應 API, 以及 `__threadfence_block()` / `__threadfence()` / `__threadfence_system()` 分別控制「保證做到 block 內 / device 內 / 跨 device+host 可見」。 scope 越大越慢 — 只買你需要的可見範圍。
+
+`gpu_histogram_race.cpp` 用 histogram 對照「壞版 (`bins[b] = bins[b] + 1`) vs 正確版 (`atomicAdd`)」: 壞版每次執行少掉的數量都不同, 正確版永遠與 host reference 一致。
+
+### Reduction: 私有化再合併
+
+「所有元素加總」如果每個 thread 都 atomic 到同一個位址, 正確但慢到不能用。 兩邊的解法是同一個思想 — **先私有化, 再合併**:
+
+```cpp
+// OpenMP: each thread accumulates a private copy, combined at the end.
+#pragma omp parallel for reduction(+ : counter)
+for (int i = 0; i < kNumIterations; ++i) ++counter;
+```
+
+```cpp
+// GPU: each block reduces in shared memory, one atomicAdd per block.
+__global__ void blockReduceSum(const float* in, float* out, int n) {
+  __shared__ float partials[kBlockSize];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  partials[threadIdx.x] = (i < n) ? in[i] : 0.0f;
+  __syncthreads();
+  for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) partials[threadIdx.x] += partials[threadIdx.x + stride];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) atomicAdd(out, partials[0]);
+}
+```
+
+`openmp_reduction.cpp` 的實測數字很有說服力 (16 threads, 8M 次累加): racy 版**錯**且 103 ms, `critical` 版對但 **2988 ms**, `reduction` 版對且 **9.6 ms** — 私有化再合併比整段上鎖快了 300 倍。 GPU 版的完整推導在第 9、10 章 (warp shuffle、vectorized loads)。
+
+### Barrier 與 memory fence
+
+Barrier 回答「大家都做完第一階段了嗎?」:
+
+| | CPU | GPU |
+| --- | --- | --- |
+| 等一組 threads | `pthread_barrier_wait`, OpenMP `#pragma omp barrier` | `__syncthreads()` (block 內), cooperative groups `sync()` |
+| 只保證可見性、不等待 | `std::atomic_thread_fence` | `__threadfence()` 系列 |
+| 等所有 threads | join 所有 threads | kernel launch 邊界 (或 cooperative launch 的 grid sync) |
+
+`__syncthreads()` 只覆蓋**一個 block**。 上面 `blockReduceSum` 的 tree reduction, 每一輪之間的 `__syncthreads()` 保證「這一輪的寫入完成, 下一輪才讀」 — 拿掉任何一個, 就是 shared memory 上的 data race。 而跨 block 的協調 (例如 single-pass reduction 讓「最後一個完成的 block」收尾) 必須用 `__threadfence()` + atomic ticket, `gpu_threadfence.cpp` 是完整的範例: fence 保證 partial sum 先發佈、才領 ticket, 少了 fence 最後一個 block 可能讀到 stale 資料 — 這種跨 block race 是 `__syncthreads()` 救不了的。
+
+## 常見陷阱
+
+- **Race condition**: 廣義的「結果依賴時序」。 data race 是其中最常見的一種, 但就算全用 atomic (沒有 data race), 邏輯上仍可能有 race condition — 例如 check-then-act 之間狀態被別人改掉。
+- **Deadlock**: 兩個 threads 互相等待對方持有的 lock。 GPU 上的變體是 warp 內 divergent branch 中呼叫 `__syncthreads()` — 一部分 lanes 永遠到不了 barrier, kernel 直接卡死。
+- **False sharing** (CPU 特有): 兩個 threads 寫**不同**變數, 但它們落在同一條 64-byte cache line, 硬體被迫在兩個 core 之間來回搬整條 line, 效能崩掉但結果正確 — 最難抓的一類。 解法是 padding 或對齊到 cache line。 GPU 的類比是同一 segment 的寫入競爭與 atomic contention。
+- **非決定性結果**: race 之外, **浮點 reduction 的順序**也會讓結果每次不同 — 浮點加法不滿足結合律, `(a+b)+c ≠ a+(b+c)`。 atomic 累加的順序由排程決定, 所以「全用 atomicAdd 的 float reduction」每次執行可能差在最後幾個 bits。 需要 bitwise 可重現時, 用固定順序的 tree reduction (第 31 章)。
+
+## 偵錯工具
+
+CPU 端用 **ThreadSanitizer**: 加上 `-fsanitize=thread` 重新編譯執行, 它會在 race 發生的當下印出兩條衝突存取的 stack trace:
+
+```bash
+g++ -fsanitize=thread -O1 -g race_demo.cpp -o race_tsan && ./race_tsan
+# WARNING: ThreadSanitizer: data race
+#   Write of size 8 ... race_demo.cpp:28 in operator()
+#   Previous write of size 8 ... race_demo.cpp:28 in operator()
+```
+
+GPU 端用 **compute-sanitizer** (CUDA): `compute-sanitizer --tool racecheck ./my_kernel` 抓 shared memory 上的 race (例如漏掉的 `__syncthreads()`); `--tool memcheck` 抓越界。 ROCm 對應的是 ROCgdb 與 `rocprofv3`, 而 HIP 程式的 host 端 race 一樣可以用 ThreadSanitizer; AMD 也提供 `hipcc -fsanitize=address` (需 `-g`) 抓 device 端記憶體錯誤。 這些工具跑起來慢 5~20 倍, 但在 CI 裡跑小 shape 的 sanitizer job 是抓 race 最便宜的保險 (第 31 章)。
+
+<LabBox path="kernels/00-parallel-foundations">
+編譯這個目錄 (無 GPU toolchain 也能編 CPU 部分): 先跑 `race_demo`, 觀察 5 次 trial 的 total 不但少於 8,000,000 而且每次不同; 再跑 `race_fixed_mutex` 與 `race_fixed_atomic`, 確認每次都正確。 接著跑 `openmp_reduction`, 比較 racy / critical / reduction 三版的正確性與時間差 (你應該會看到 reduction 比 critical 快兩個數量級)。 有 GPU 的話再跑 `gpu_histogram_race` (racy vs atomic histogram)、`gpu_block_reduce` 與 `gpu_threadfence`。 最後用 `-fsanitize=thread` 重新編譯 `race_demo.cpp`, 看 ThreadSanitizer 怎麼指出 race 的位置。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '兩個 threads 同時執行 x = x + 1 (x 初始為 0), 沒有任何同步。 最終 x 可能是多少?',
+      options: ['一定是 2', '一定是 1', '可能是 1 或 2, 取決於交錯順序', '可能是 0'],
+      answer: 2,
+      explanation: 'read-modify-write 交錯時, 兩個 threads 都讀到 0、都寫回 1 (lost update); 不交錯時得到 2。 結果依賴時序, 這正是 data race 的非決定性。',
+    },
+    {
+      question: '為什麼 GPU kernel 幾乎不用 lock, 而 CPU 多執行緒常用?',
+      options: [
+        'GPU 硬體沒有 atomic 指令',
+        'GPU 有數十萬 threads, lock 會造成大規模序列化, 且 warp 內 lockstep 執行讓 spin-wait 容易 deadlock',
+        'CPU 的 lock 免費',
+        'GPU 記憶體太小放不下 mutex',
+      ],
+      answer: 1,
+      explanation: 'lock 把並行度壓回 1; 在 thread 數以十萬計的 GPU 上代價極大, 而 warp 的 SIMT 執行讓「一個 lane 持鎖、同 warp 另一 lane 等鎖」可能永遠等不到。 GPU 用 atomic 或 privatization 取代。',
+    },
+    {
+      question: 'OpenMP 的 reduction(+ : sum) 對應 GPU 上的哪個 pattern?',
+      options: [
+        '每個 thread 直接 atomicAdd 到全域 sum',
+        '每個 block 在 shared memory 私有累積, 最後每 block 一次 atomicAdd',
+        '用一個 giant lock 保護 sum',
+        '把資料搬回 host 用單執行緒加總',
+      ],
+      answer: 1,
+      explanation: '兩者都是「先私有化、再合併」: OpenMP 給每個 thread 一份私有副本, GPU 讓每個 block 在 shared memory 裡 tree reduce, 對全域位址的競爭從 N 次降到 blocks 次。',
+    },
+    {
+      question: '__syncthreads() 不能解決哪種 race?',
+      options: [
+        '同一 block 內 shared memory 的 read-after-write',
+        '同一 block 內 tree reduction 兩輪之間的競爭',
+        '兩個不同 blocks 對 global memory 同一位址的競爭',
+        '同一 warp 內的 shared memory 競爭',
+      ],
+      answer: 2,
+      explanation: '__syncthreads() 是 block 內的 barrier, 對其他 block 完全沒有作用。 跨 block 的協調需要 kernel launch 邊界、cooperative groups 的 grid sync, 或 __threadfence() + atomic 的手工協議。',
+    },
+    {
+      question: '一個全用 atomicAdd 的 float reduction, 每次執行結果在最後幾個 bits 不同。 這是 bug 嗎?',
+      options: [
+        '是 data race, 要加 lock',
+        '不是 data race; 是浮點加法不滿足結合律, atomic 的完成順序不固定導致捨入差異',
+        '是硬體故障',
+        '是 compiler bug',
+      ],
+      answer: 1,
+      explanation: 'atomic 保證每次加法完整生效 (沒有 lost update), 但不保證順序; 浮點捨入依賴順序, 所以結果 run-to-run 有微小差異。 需要 bitwise 重現性就要固定 reduction 順序。',
+    },
+    {
+      question: '兩個 CPU threads 分別寫兩個「不同」的變數, 效能卻異常地差, 結果正確。 最可能的原因是?',
+      options: ['data race', 'deadlock', 'false sharing: 兩個變數在同一條 cache line, 硬體在 cores 之間來回搬移', 'OS 排程太慢'],
+      answer: 2,
+      explanation: '結果正確排除了 race; 效能差且與兩個變數的記憶體距離有關, 是 false sharing 的典型病徵。 用 padding 讓熱門變數各占一條 cache line。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Synchronization Functions," in CUDA C++ Programming Guide, 2024', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#synchronization-functions' },
+    { citation: 'NVIDIA Corporation, "Compute Sanitizer User Manual," 2024', href: 'https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html' },
+    { citation: 'ThreadSanitizer Team, "ThreadSanitizer Manual," GitHub google/sanitizers wiki, 2024', href: 'https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual' },
+    { citation: 'OpenMP Architecture Review Board, "OpenMP Application Programming Interface, Version 5.2," 2021', href: 'https://www.openmp.org/specifications/' },
+    { citation: 'Advanced Micro Devices, Inc., "HIP Programming Guide," ROCm Documentation, 2024', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api.html' },
+  ]}
+/>
