@@ -1,0 +1,2 @@
+gklab_add_kernel(vector_add vector_add.cpp)
+gklab_add_kernel(occupancy_experiment occupancy_experiment.cpp)
