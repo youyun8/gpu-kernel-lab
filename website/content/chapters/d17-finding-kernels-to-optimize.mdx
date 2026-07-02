@@ -30,7 +30,7 @@ prof.export_chrome_trace("trace.json")  # open in chrome://tracing or Perfetto
 **memory-bound elementwise 鏈: ** 一連串 `add`、`mul`、`gelu`、`layernorm` 各自讀寫一次 global memory。單看每個都不慢, 但同一份 tensor 被反覆讀寫, bandwidth 全浪費在中間結果上。解法是把整條鏈 fuse 成一個 kernel, 只讀一次、只寫一次。
 
 <Callout variant="insight" title="哪種 op 值得 fuse">
-值得 fuse 的訊號: (1) 連續、彼此相接的 elementwise / reduction op;(2) 每個都是 memory-bound (低 arithmetic intensity);(3) 中間結果只被下一個 op 用一次。把它們合併, 就能把 N 次 global memory 往返壓成 1 次。
+值得 fuse 的訊號: (1) 連續、彼此相接的 elementwise / reduction op; (2) 每個都是 memory-bound (低 arithmetic intensity); (3) 中間結果只被下一個 op 用一次。把它們合併, 就能把 N 次 global memory 往返壓成 1 次。
 </Callout>
 
 ## 別忘了先用內建工具

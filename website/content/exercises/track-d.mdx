@@ -3,7 +3,7 @@
 對應第 17–21 章。programming 題需要 GPU 版 PyTorch (第 4 題需 Triton)。
 
 <Exercise id="D1" title="Launch overhead 估算" kind="paper" level="入門">
-一個模型每次 forward 送出 500 個很小的 kernel, 每個 kernel 實際 compute 只需 2 μs, 但每次 launch overhead 約 5 μs。(a) 一次 forward 的總 GPU 時間下限約多少?(b) 其中 launch overhead 佔比?(c) 這個病徵在 trace 上長什麼樣?該怎麼優化?
+一個模型每次 forward 送出 500 個很小的 kernel, 每個 kernel 實際 compute 只需 2 μs, 但每次 launch overhead 約 5 μs。(a) 一次 forward 的總 GPU 時間下限約多少? (b) 其中 launch overhead 佔比? (c) 這個病徵在 trace 上長什麼樣?該怎麼優化?
 
 <Solution>
 (a) 若序列化, 每 kernel `5 + 2 = 7` μs → `500 * 7 = 3500` μs = 3.5 ms。
@@ -38,7 +38,7 @@
 </Exercise>
 
 <Exercise id="D4" title="fused speedup 上限估算" kind="paper" level="進階">
-baseline `add → gelu → sum` 對一個大 tensor 各讀寫一次 global memory, 共約 5 次全張量 traffic (add 讀2寫1、gelu 讀1寫1... 概估)。fused 版只讀一次、寫一個極小的 reduction 結果。(a) 若 kernel 純 memory-bound, fused 的理論加速上限約多少倍?(b) 為什麼實測通常達不到這個上限?
+baseline `add → gelu → sum` 對一個大 tensor 各讀寫一次 global memory, 共約 5 次全張量 traffic (add 讀2寫1、gelu 讀1寫1... 概估)。fused 版只讀一次、寫一個極小的 reduction 結果。(a) 若 kernel 純 memory-bound, fused 的理論加速上限約多少倍? (b) 為什麼實測通常達不到這個上限?
 
 <Solution>
 (a) memory-bound 時時間正比於 traffic。baseline 約 5 次全張量 traffic, fused 約 1 次 → 理論上限約 **5×** (數量級;精確值看你怎麼數中間張量)。
