@@ -1,9 +1,9 @@
 # GEMM 優化全流程
 
-為什麼一個「照著數學公式寫」的 SGEMM, 只跑出 cuBLAS 的 2%?矩陣乘法的 FLOP 數是固定的 ($2MNK$), 但 naive kernel 把時間全花在等 global memory。這一章是本站的主軸: 我們用同一個 $C = A \times B$, 一步一步把它從不到 5% 推到接近 library 水準, 每一步只解決一個明確的 bottleneck。
+為什麼一個「照著數學公式寫」的 SGEMM, 只跑出 cuBLAS 的 2%? 矩陣乘法的 FLOP 數是固定的 ($2MNK$), 但 naive kernel 把時間全花在等 global memory。 這一章是本站的主軸: 我們用同一個 $C = A \times B$, 一步一步把它從不到 5% 推到接近 library 水準, 每一步只解決一個明確的 bottleneck。
 
 <Callout variant="insight" title="貫穿全章的一句話">
-GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
+GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。 arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
 </Callout>
 
 ## Step 0: naive — 每個 output 一個 thread
@@ -18,15 +18,15 @@ GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global me
 // output, with essentially zero reuse -> memory-bound, far below peak.
 __global__ void sgemmNaive(const float* A, const float* B, float* C,
                            int m, int n, int k) {
-  int row = blockIdx.y * blockDim.y + threadIdx.y;
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row < m && col < n) {
-    float acc = 0.0f;
-    for (int p = 0; p < k; ++p) {
-      acc += A[row * k + p] * B[p * n + col];
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < m && col < n) {
+        float acc = 0.0f;
+        for (int p = 0; p < k; ++p) {
+            acc += A[row * k + p] * B[p * n + col];
+        }
+        C[row * n + col] = acc;
     }
-    C[row * n + col] = acc;
-  }
 }
 ```
 
@@ -37,26 +37,26 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 // Same kernel under HIP; portable as-is because it uses no vendor intrinsics.
 __global__ void sgemmNaive(const float* A, const float* B, float* C,
                            int m, int n, int k) {
-  int row = blockIdx.y * blockDim.y + threadIdx.y;
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row < m && col < n) {
-    float acc = 0.0f;
-    for (int p = 0; p < k; ++p) {
-      acc += A[row * k + p] * B[p * n + col];
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < m && col < n) {
+        float acc = 0.0f;
+        for (int p = 0; p < k; ++p) {
+            acc += A[row * k + p] * B[p * n + col];
+        }
+        C[row * n + col] = acc;
     }
-    C[row * n + col] = acc;
-  }
 }
 ```
 
 </Platform>
 </PlatformTabs>
 
-問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
+問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。 profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
 
-## Step 1: shared memory tiling — 讓資料被重複使用
+## Step 1: Shared Memory Tiling — 讓資料被重複使用
 
-把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
+把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。 每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
 
 <TilingAnimator />
 
@@ -66,29 +66,29 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 constexpr int kTile = 32;
 __global__ void sgemmTiled(const float* A, const float* B, float* C,
                            int m, int n, int k) {
-  __shared__ float sA[kTile][kTile];
-  __shared__ float sB[kTile][kTile];
-  int row = blockIdx.y * kTile + threadIdx.y;
-  int col = blockIdx.x * kTile + threadIdx.x;
-  float acc = 0.0f;
-  for (int t = 0; t < k; t += kTile) {
-    sA[threadIdx.y][threadIdx.x] = A[row * k + (t + threadIdx.x)];
-    sB[threadIdx.y][threadIdx.x] = B[(t + threadIdx.y) * n + col];
-    __syncthreads();
-    for (int p = 0; p < kTile; ++p) {
-      acc += sA[threadIdx.y][p] * sB[p][threadIdx.x];
+    __shared__ float sA[kTile][kTile];
+    __shared__ float sB[kTile][kTile];
+    int row = blockIdx.y * kTile + threadIdx.y;
+    int col = blockIdx.x * kTile + threadIdx.x;
+    float acc = 0.0f;
+    for (int t = 0; t < k; t += kTile) {
+        sA[threadIdx.y][threadIdx.x] = A[row * k + (t + threadIdx.x)];
+        sB[threadIdx.y][threadIdx.x] = B[(t + threadIdx.y) * n + col];
+        __syncthreads();
+        for (int p = 0; p < kTile; ++p) {
+            acc += sA[threadIdx.y][p] * sB[p][threadIdx.x];
+        }
+        __syncthreads();
     }
-    __syncthreads();
-  }
-  if (row < m && col < n) C[row * n + col] = acc;
+    if (row < m && col < n) C[row * n + col] = acc;
 }
 ```
 
-profiler 觀察: global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。
+Profiler 觀察: global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。
 
 ## Step 2: register tiling — 一個 thread 算一小塊 C
 
-光靠 shared memory 還不夠: shared memory 的 bandwidth 也有限。下一步讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 registers 反覆用, 把 shared memory 的存取次數再攤薄。這一步通常帶來最大的單步跳躍。
+光靠 shared memory 還不夠: shared memory 的 bandwidth 也有限。 下一步讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 registers 反覆用, 把 shared memory 的存取次數再攤薄。 這一步通常帶來最大的單步跳躍。
 
 ```cpp
 // Each thread now computes a TM x TN block of C, holding operands in registers.
@@ -98,29 +98,87 @@ constexpr int kTN = 4;
 // (full kernel in kernels/03-gemm/sgemm_step2_register_tiling; abridged here)
 float acc[kTM][kTN] = {};
 for (int p = 0; p < kTile; ++p) {
-  float a[kTM], b[kTN];
-  #pragma unroll
-  for (int i = 0; i < kTM; ++i) a[i] = sA[threadIdx.y * kTM + i][p];
-  #pragma unroll
-  for (int j = 0; j < kTN; ++j) b[j] = sB[p][threadIdx.x * kTN + j];
-  #pragma unroll
-  for (int i = 0; i < kTM; ++i)
+    float a[kTM], b[kTN];
     #pragma unroll
-    for (int j = 0; j < kTN; ++j) acc[i][j] += a[i] * b[j];
+    for (int i = 0; i < kTM; ++i) a[i] = sA[threadIdx.y * kTM + i][p];
+    #pragma unroll
+    for (int j = 0; j < kTN; ++j) b[j] = sB[p][threadIdx.x * kTN + j];
+    #pragma unroll
+    for (int i = 0; i < kTM; ++i)
+        #pragma unroll
+        for (int j = 0; j < kTN; ++j) acc[i][j] += a[i] * b[j];
 }
 ```
 
-## Step 3–5: vectorized loads、double buffering、Tensor Core / MFMA
+注意 micro-tile 的 outer-product 結構: 每一步從 shared memory 讀 `TM + TN` 個值, 做 `TM × TN` 次 FMA — shared memory 存取相對 FLOP 的比例又下降了一階。 這也是第 8 章「低 occupancy + 高 ILP」路線的實例: `acc[TM][TN]` 吃掉大量 register, 但 4×4 = 16 條獨立 FMA 鏈本身就是絕佳的 latency hiding。
 
-接下來的三步分別攻擊不同的殘餘 bottleneck, 細節在後續小節與 lab 展開:
+## Step 3: vectorized loads
 
-- Step 3 **vectorized loads**: 用 `float4` 一次搬 128 bits, 減少 load 指令數與 address 計算 overhead。
-- Step 4 **double buffering**: 預先載入下一個 k-tile 到另一組 shared memory buffer, 讓 compute 與 global load 重疊, 隱藏 latency (software pipelining)。
-- Step 5 **Tensor Core (WMMA) / AMD MFMA**: 改用矩陣乘加硬體單元, 對 half/bf16 提供數量級的吞吐提升。
+用 `float4` 一次搬 128 bits, 減少 load 指令數與 address 計算 overhead (第 11 章)。 GEMM 裡它有兩個用武之地: global → shared 的搬運, 以及 shared → register 的讀取。 搭配上一層的 tile 尺寸設計, 讓每個 thread 的 load 都是對齊的 128-bit:
+
+```cpp
+// Global-to-shared copy, four floats at a time. Tile sizes are chosen so each
+// thread's slice is 16-byte aligned; the K dimension must be divisible by 4.
+const float4* src = reinterpret_cast<const float4*>(&A[row * k + t]);
+float4 v = src[threadIdx.x];
+sA[threadIdx.y][threadIdx.x * 4 + 0] = v.x;
+sA[threadIdx.y][threadIdx.x * 4 + 1] = v.y;
+sA[threadIdx.y][threadIdx.x * 4 + 2] = v.z;
+sA[threadIdx.y][threadIdx.x * 4 + 3] = v.w;
+```
+
+## Step 4: double buffering — 把 load 藏進 compute
+
+單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著。 double buffering 配置兩組 shared memory buffer: 算 buffer 0 的同時, 預取下一個 k-tile 進 buffer 1, 每輪交換 — 這就是 software pipelining:
+
+```cpp
+// Two shared-memory stages: compute on `cur` while prefetching into `nxt`.
+__shared__ float sA[2][kTile][kTile];
+__shared__ float sB[2][kTile][kTile];
+int cur = 0;
+loadTile(sA[cur], sB[cur], /*t=*/0);
+__syncthreads();
+for (int t = kTile; t < k; t += kTile) {
+    int nxt = cur ^ 1;
+    loadTile(sA[nxt], sB[nxt], t);   // issue loads for the next tile
+    computeTile(sA[cur], sB[cur]);   // FMAs overlap the loads in flight
+    __syncthreads();
+    cur = nxt;
+}
+computeTile(sA[cur], sB[cur]);       // epilogue: last tile
+```
+
+理想情況下每個 k-tile 的成本從 `L + C` 變成 `max(L, C)` — 當 compute 時間足以覆蓋 load, memory latency 就完全被藏掉。 Ampere 之後的 `cp.async` (第 14 章) 讓 prefetch 不再佔用 register, pipeline 可以疊到 3–5 個 stage。
+
+## Step 5: Tensor Core (WMMA) / AMD MFMA
+
+最後一步換引擎: 用矩陣乘加硬體單元取代 FMA pipe。 NVIDIA 走 `wmma` API (或 PTX `mma` 指令), AMD 走 MFMA intrinsic — 兩者都以「warp/wavefront 共同持有一塊小矩陣」為單位運算:
+
+```cpp
+// WMMA sketch (CUDA): a warp cooperatively multiplies 16x16x16 fp16 fragments.
+#include <mma.h>
+using namespace nvcuda::wmma;
+fragment<matrix_a, 16, 16, 16, half, row_major> fa;
+fragment<matrix_b, 16, 16, 16, half, col_major> fb;
+fragment<accumulator, 16, 16, 16, float> facc;
+fill_fragment(facc, 0.0f);
+for (int t = 0; t < k; t += 16) {
+    load_matrix_sync(fa, &A[row * k + t], k);
+    load_matrix_sync(fb, &B[t + col * k], k);
+    mma_sync(facc, fa, fb, facc);    // one instruction, 16x16x16 MACs
+}
+store_matrix_sync(&C[row * n + col], facc, n, mem_row_major);
+```
+
+對 half/bf16, MMA 單元提供相對 fp32 FMA 數量級的吞吐提升; fp32 輸入也可透過 TF32 (NVIDIA) 或 xf32 模式吃到部分加速。 代價是資料佈局被指令規定死了 — fragment 在 register 的擺放由硬體決定, shared memory layout 必須配合 (swizzle, 第 7 章), 這正是手寫 MMA kernel 困難、而 CUTLASS/CK (第 15、22 章) 價值所在的原因。
+
+## Epilogue: 別忘了輸出端
+
+完整的 GEMM 是 $C = \alpha AB + \beta C$, 尾端還常掛 bias、activation、dtype 轉換。 這段「算完 accumulator 之後、寫回 global memory 之前」的程式叫 **epilogue**。 把 bias + GELU 這類 elementwise 融進 epilogue, 省掉一次完整的 C 讀寫 — 這是 library (cuBLASLt 的 epilogue 選項、CUTLASS 的 epilogue visitor tree) 提供 fused GEMM 的機制, 也是第 19 章 fusion 思想在 GEMM 上的體現。
 
 ## 每一步的效果 (示意數據)
 
-下圖讀取 `bench_all.py` 產生的 JSON, 展示每一步相對 library 的百分比。切換 CUDA / ROCm 看兩個平台的差異:
+下圖讀取 `bench_all.py` 產生的 JSON, 展示每一步相對 library 的百分比。 切換 CUDA / ROCm 看兩個平台的差異:
 
 <BenchmarkComparison />
 
@@ -129,11 +187,26 @@ for (int p = 0; p < kTile; ++p) {
 <RooflineChart />
 
 <Callout variant="warn" title="profiler 截圖說明">
-本 repo 不內建截圖 (避免造假數據)。請用 `scripts/profile_ncu.sh` 或 `scripts/profile_rocprof.sh` 對每一個 step kernel 各跑一次, 觀察這些 metric 的變化: Step 1 看 DRAM throughput 下降、Step 2 看 shared memory 存取下降與 compute 使用率上升、Step 4 看 stall (long scoreboard) 減少、Step 5 看 Tensor/MFMA pipe 使用率。
+本 repo 不內建截圖 (避免造假數據)。 請用 `scripts/profile_ncu.sh` 或 `scripts/profile_rocprof.sh` 對每一個 step kernel 各跑一次, 觀察這些 metric 的變化: Step 1 看 DRAM throughput 下降、Step 2 看 shared memory 存取下降與 compute 使用率上升、Step 4 看 stall (long scoreboard) 減少、Step 5 看 Tensor/MFMA pipe 使用率。
 </Callout>
 
+## Shape-Specific GEMM Tweaks
+
+GEMM 沒有單一最佳 kernel, 常見變體包括:
+
+- **Skinny GEMM**: M 或 N 很小時, 增加 Split-K / Stream-K 或 persistent scheduling, 避免 CTA 數不足。
+- **Batched small GEMM**: 將 batch 維併入 grid, 或用 grouped GEMM 把不同 shape 的小 GEMM 合成一次 launch。
+- **Tall/skinny output**: 調整 `BM/BN` 讓 coalesced store 和 L2 reuse 平衡, 不要硬套 128×128。
+- **Transpose/layout flags**: 若 B 是 column-major 或已 prepacked, shared memory layout 和 vectorized load 方向要跟著改。
+- **Epilogue-heavy GEMM**: bias、activation、scale、quantize 若太複雜, 可能讓 epilogue 成為瓶頸; 此時要拆 epilogue、降低 vector width 或用 library visitor tree。
+- **Low precision**: fp16/bf16/fp8/int8 路徑的瓶頸常從 FMA pipe 轉成 scale load、layout conversion 或 accumulator store。
+
+一個 practical tuning order: 先讓 global load/store coalesced, 再確保 tile reuse 足夠, 接著調 register tile 和 stage 數, 最後才碰 Tensor Core/MFMA 和 epilogue fusion。 若還沒爬過 ridge point, 直接上 MMA 只會讓更快的 compute pipe 等 memory。
+
+到這裡, 單一大矩陣的優化路線走完了。 但真實世界的 GEMM 常是「小而怪的形狀」— 那是另一組問題 (wave quantization、Split-K、Stream-K), 留給第 13 章; 而 cuBLAS/hipBLASLt 如何從上千個 kernel 變體中挑出最快的那個, 也在第 13 章一併揭曉。
+
 <LabBox path="kernels/03-gemm">
-`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step5_wmma` (HIP 版對應 MFMA) 以及 `sgemm_cublas`/`sgemm_hipblaslt` 參考。每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。依序編譯執行, 把你機器的數字餵給 `bench_all.py`, 再回來看上面的圖表變成你自己的資料。
+`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step5_wmma` (HIP 版對應 MFMA) 以及 `sgemm_cublas`/`sgemm_hipblaslt` 參考。 每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。 依序編譯執行, 把你機器的數字餵給 `bench_all.py`, 再回來看上面的圖表變成你自己的資料。
 </LabBox>
 
 <Quiz
@@ -168,6 +241,18 @@ for (int p = 0; p < kTile; ++p) {
       answer: 1,
       explanation: 'MMA 單元對低精度矩陣乘加提供數量級吞吐, 但要先讓 kernel 不再 memory-bound 才吃得到。',
     },
+    {
+      question: 'GEMM 的 epilogue 指的是?',
+      options: ['kernel 的最後一個 wave', 'accumulator 算完後、寫回 global memory 前的收尾段, 可融入 bias/activation 等 elementwise 運算', 'K 迴圈的最後一輪', 'cuBLAS 的 log'],
+      answer: 1,
+      explanation: '把 elementwise 融進 epilogue 省掉一次完整的 C 讀寫, 是 cuBLASLt/CUTLASS 提供 fused GEMM 的機制。',
+    },
+    {
+      question: '為什麼手寫 Tensor Core / MFMA kernel 特別困難?',
+      options: ['指令太慢', 'fragment 的 register/記憶體佈局由硬體指令規定, shared memory layout 必須精確配合 (swizzle)', '不支援 fp16', '只能單 thread 呼叫'],
+      answer: 1,
+      explanation: 'MMA 指令對資料擺放有嚴格要求, 佈局錯誤即錯誤結果或 bank conflict — 這正是 CUTLASS/CK 封裝的核心價值。',
+    },
   ]}
 />
 
@@ -175,6 +260,7 @@ for (int p = 0; p < kTile; ++p) {
   links={[
     { citation: 'NVIDIA Corporation, "Efficient GEMM in CUDA," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
     { citation: 'NVIDIA Corporation, "Warp Matrix Functions (WMMA)," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-matrix-functions' },
+    { citation: 'Advanced Micro Devices, Inc., "AMD Matrix Cores," ROCm Blogs, 2023.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html' },
     { citation: 'Advanced Micro Devices, Inc., Composable Kernel Library, 2024.', href: 'https://github.com/ROCm/composable_kernel' },
     { citation: 'S. Boehm, "How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance," 2022.', href: 'https://siboehm.com/articles/22/CUDA-MMM' },
   ]}

@@ -22,6 +22,17 @@ import D18 from './d18-first-custom-extension.mdx';
 import D19 from './d19-fused-elementwise-reduction.mdx';
 import D20 from './d20-triton-intro.mdx';
 import D21 from './d21-integrating-into-training.mdx';
+import E22 from './e22-cutlass-deep-dive.mdx';
+import E23 from './e23-amd-kernel-ecosystem.mdx';
+import E24 from './e24-attention-kernels.mdx';
+import E25 from './e25-inference-engines.mdx';
+import F26 from './f26-atomics-histograms-irregular-access.mdx';
+import F27 from './f27-persistent-kernels-work-queues.mdx';
+import F28 from './f28-streams-graphs-host-device-pipeline.mdx';
+import F29 from './f29-low-precision-quantization-layouts.mdx';
+import F30 from './f30-autotuning-specialization-codegen.mdx';
+import F31 from './f31-correctness-determinism-debugging.mdx';
+import F32 from './f32-optimization-checklist.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
   'a1-what-is-a-gpu': A1,
@@ -45,4 +56,15 @@ export const chapterComponents: Record<string, ComponentType> = {
   'd19-fused-elementwise-reduction': D19,
   'd20-triton-intro': D20,
   'd21-integrating-into-training': D21,
+  'e22-cutlass-deep-dive': E22,
+  'e23-amd-kernel-ecosystem': E23,
+  'e24-attention-kernels': E24,
+  'e25-inference-engines': E25,
+  'f26-atomics-histograms-irregular-access': F26,
+  'f27-persistent-kernels-work-queues': F27,
+  'f28-streams-graphs-host-device-pipeline': F28,
+  'f29-low-precision-quantization-layouts': F29,
+  'f30-autotuning-specialization-codegen': F30,
+  'f31-correctness-determinism-debugging': F31,
+  'f32-optimization-checklist': F32,
 };

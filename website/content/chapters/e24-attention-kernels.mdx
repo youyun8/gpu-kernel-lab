@@ -1,0 +1,121 @@
+# Attention Kernel: FlashAttention 與 FlashInfer
+
+Transformer 的核心是 attention, 而 attention 的 GPU 實作是過去幾年 kernel 工程進步最集中的地方。 這一章把前面所有概念 — online softmax (第 10 章)、tiling (第 7、12 章)、warp specialization 與非同步搬運 (第 14 章) — 匯流成一個完整案例: 為什麼 naive attention 慢、FlashAttention 怎麼解、以及 serving 場景又催生了 PagedAttention 與 FlashInfer。
+
+## Naive Attention 的問題
+
+標準 attention 是 $O = \text{softmax}(QK^\top / \sqrt{d})\, V$。 照公式寫, 你會物化一個 $N \times N$ 的分數矩陣 $S = QK^\top$:
+
+- **Memory 爆炸**: 序列長度 $N$, $S$ 是 $O(N^2)$。$N = 8192$ 時光一個 head 的 $S$ 就要 256 MB (fp32), 根本放不進 shared memory, 只能寫回 HBM 再讀回來做 softmax。
+- **Bandwidth 主導**: attention 的算術強度不高, 把 $O(N^2)$ 的中間矩陣在 HBM 進出兩三趟, 時間全花在搬 $S$ 上 — 典型的 memory-bound (第 5 章), 而且還吃爆記憶體。
+
+## FlashAttention: tiling + online softmax
+
+FlashAttention 的洞見: **永遠不要物化整個 $S$**。 把 $Q, K, V$ 沿序列切成 block, 用兩層迴圈逐塊計算, softmax 用第 10 章的 online 公式邊算邊 rescale:
+
+```text
+for each block of Q (outer):
+    m = -inf, l = 0, acc = 0          # running max, denom, output
+    for each block of K, V (inner):
+        S_ij = Q_i @ K_j^T            # small tile, lives in shared memory / registers
+        m_new = max(m, rowmax(S_ij))
+        P_ij  = exp(S_ij - m_new)     # unnormalized probabilities for this tile
+        l = l * exp(m - m_new) + rowsum(P_ij)   # rescale running denom (ch. 10)
+        acc = acc * exp(m - m_new) + P_ij @ V_j # rescale running output
+        m = m_new
+    O_i = acc / l                     # finalize
+```
+
+關鍵收益: 中間的 $S_{ij}$ 只有 block 大小、全程留在 shared memory/register, 從不寫 HBM。 HBM traffic 從 $O (N^2)$ 降到 $O (N)$ — 這是把「IO-awareness」帶進 kernel 設計的教科書範例, 也讓 attention 從 memory-bound 翻身接近 compute-bound。 backward 用同樣的 tiling, 靠重算 (recompute) $S$ 避免存下整個矩陣。
+
+<Callout variant="insight" title="這章其實沒有新東西">
+FlashAttention 不引入任何你沒學過的原語: 它就是 online softmax (第 10 章) + tiling (第 7、12 章) + 對 memory 階層的執著 (第 3、5 章)。 這正是本站的論點 — 頂尖 kernel 是基礎技巧的深度組合, 不是魔法。
+</Callout>
+
+## 版本演進: 榨乾每一代硬體
+
+- **FlashAttention-1** (2022): 確立 tiling + online softmax + recompute backward。
+- **FlashAttention-2** (2023): 重排迴圈減少非 matmul 的 FLOP、更好的 warp 分工、把 work 沿序列維度平行化以填滿 GPU (第 13 章的 occupancy/quantization 考量)。
+- **FlashAttention-3** (2024): 針對 Hopper — 用 TMA 搬 tile、`wgmma` 做 MMA、warp specialization 讓 softmax 與 matmul 重疊 (全是第 14 章的機制), 並支援 fp8。
+
+每一代的進步都對應「更充分利用新硬體特性」, 而非改演算法本身 — 讀它們的 changelog 幾乎就是第 12–14 章的實戰註解。
+
+## Serving 場景: PagedAttention 與 FlashInfer
+
+訓練時序列長度整齊; LLM **推論**時每個 request 的 KV cache 長度不一、還在動態增長, 這帶來新問題:
+
+- **PagedAttention** (vLLM): 借作業系統分頁的想法, 把 KV cache 切成固定大小的 block 分散存放, 用一張 block table 索引。 消除了「為最長序列預留連續記憶體」的浪費, 讓 batch 內不同長度的 request 高效共存 — 這是 kernel 設計配合記憶體管理的典範 (attention kernel 必須能從非連續的 KV block 讀取)。
+- **FlashInfer**: 專為 LLM serving 的 attention kernel library, 針對 decode (每步一個 token, 極度 memory-bound)、prefill、以及各種 KV layout 與 mask 提供高度優化且可組合的 kernel; 被 vLLM、SGLang、TensorRT-LLM 採用。 它把「serving 場景的 attention」當成一個獨立的優化問題, 而不只是訓練 kernel 的縮小版。
+
+decode 階段特別值得注意: batch=1、query 只有一個 token, 這是純 memory-bound (讀整個 KV cache 只算一步), 優化重點從 compute 轉向「KV cache 的搬運與量化」— 與訓練/prefill 的 compute-bound 大 tile 是完全不同的 regime。
+
+## 你會在哪裡遇到這些
+
+幾乎無所不在, 而且多半不用自己寫: PyTorch 的 `F.scaled_dot_product_attention` 會自動選 FlashAttention/memory-efficient backend; HuggingFace 用 `attn_implementation="flash_attention_2"` 開啟; vLLM/SGLang 依場景在 FlashAttention、FlashInfer、PagedAttention、AITER (AMD, 第 23 章) 之間切換。 你的價值在於: 讀得懂 profiler 說 attention 卡在哪、知道該換哪個 backend、以及理解為什麼。
+
+## Attention Variant Map
+
+不同 attention 變體對 kernel 的要求不同:
+
+- **Causal self-attention**: mask 是三角形, tile 排程可跳過未來區塊。
+- **Cross-attention**: Q 長度和 KV 長度不同, prefill/decode 的 reuse pattern 改變。
+- **Grouped-query / multi-query attention**: 多個 query heads 共用 KV heads, decode 讀 KV 的 bandwidth 降低。
+- **Sliding-window attention**: 每個 token 只看局部窗口, tile scheduler 可限制 K/V block 範圍。
+- **Paged KV cache**: KV 不連續, kernel 需要讀 block table, coalescing 和 TLB/cache locality 變成核心。
+- **Quantized KV**: fp8/int8 KV cache 降 bytes, 但每次讀取要 dequant scale, scale layout 會影響 decode latency。
+
+因此 attention backend 不是單選題。 prefill、decode、長上下文、短上下文、量化、不同 mask 可能各自對應不同 kernel。 production 引擎通常維護一個 dispatch table, 而不是「FlashAttention 永遠最快」。
+
+<LabBox path="kernels/04-reductions-softmax">
+本章沒有獨立的 attention lab (完整 FlashAttention 太長), 但 `softmax` target 的 online 版本就是 FlashAttention 的 softmax 核心。 動手: 把 online softmax 擴展成「一個 block 處理 Q 的一 row、內迴圈掃 K/V tile、維護 (m, l, acc)」的簡化 single-head attention, 對 PyTorch 的 `sdpa` 做 correctness 比對。 你會親手重現上面的虛擬碼。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'naive attention 的主要問題是?',
+      options: ['FLOP 太多', '物化 O (N²) 的分數矩陣 S, 記憶體爆炸且把 S 在 HBM 反覆進出 (memory-bound)', 'divergence', 'register 不足'],
+      answer: 1,
+      explanation: 'N×N 的 S 放不進 shared memory, 只能寫回 HBM 再讀, bandwidth 全耗在搬中間矩陣上。',
+    },
+    {
+      question: 'FlashAttention 避免物化整個 S 的關鍵技巧是?',
+      options: ['更大的 register file', 'tiling + online softmax: 分塊計算並邊算邊 rescale running max/denom/output', '降低精度', '用 CPU 算 softmax'],
+      answer: 1,
+      explanation: '每個 S 的小 tile 只在 shared memory/register 存活, online softmax 讓分塊結果能正確合併, HBM traffic 降到 O (N)。',
+    },
+    {
+      question: 'FlashAttention-3 相對前代的主要進步來自?',
+      options: ['新的注意力公式', '充分利用 Hopper 特性: TMA 搬運、wgmma、warp specialization 重疊 softmax 與 matmul、fp8', '不再需要 softmax', '改用 fp64'],
+      answer: 1,
+      explanation: '演算法不變, 進步在於把第 14 章的非同步/warp-specialized 機制與新指令用滿。',
+    },
+    {
+      question: 'PagedAttention 解決的核心問題是?',
+      options: ['訓練不穩定', 'LLM 推論時不同 request 的 KV cache 長度不一, 用分頁式非連續存放消除記憶體浪費', 'softmax overflow', 'GEMM 太慢'],
+      answer: 1,
+      explanation: '借 OS 分頁思想把 KV cache 切 block 索引, attention kernel 從非連續 block 讀取, 讓變長 batch 高效共存。',
+    },
+    {
+      question: 'LLM decode 階段 (batch=1、單 token query) 的 attention 是哪種 regime?',
+      options: ['compute-bound, 重點在 MMA 使用率', '純 memory-bound, 重點轉向 KV cache 的搬運與量化', '完全在 register 內', 'launch-bound'],
+      answer: 1,
+      explanation: 'decode 每步只算一個 token 卻要讀整個 KV cache, 是 memory-bound, 與 prefill/訓練的大 tile compute-bound 完全不同。',
+    },
+    {
+      question: '本章對「頂尖 kernel」的核心論點是?',
+      options: ['需要祕密硬體指令', 'FlashAttention 是 online softmax + tiling + memory 階層意識的深度組合, 全是本站教過的基礎', '只有大公司能寫', '演算法比工程重要'],
+      answer: 1,
+      explanation: '它不引入新原語; 威力來自把基礎技巧針對硬體極致地組合起來。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré, "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness," arXiv: 2205.14135, 2022.', href: 'https://arxiv.org/abs/2205.14135' },
+    { citation: 'T. Dao, "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning," arXiv: 2307.08691, 2023.', href: 'https://arxiv.org/abs/2307.08691' },
+    { citation: 'W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention," in Proc. SOSP, 2023.', href: 'https://arxiv.org/abs/2309.06180' },
+    { citation: 'Z. Ye et al., "FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving," arXiv: 2501.01005, 2025.', href: 'https://arxiv.org/abs/2501.01005' },
+  ]}
+/>

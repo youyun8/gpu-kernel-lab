@@ -1,0 +1,111 @@
+# AMD Kernel 生態: CK、hipBLASLt 與 AITER
+
+CUDA 生態的每個角色, ROCm 都有對應 — 但名字、成熟度與使用方式各有差異。 這一章把 AMD 側的 kernel 棧一次講清楚: Composable Kernel、hipBLASLt/Tensile、rocWMMA, 以及專為 AI workload 而生的 AITER。 在 MI300X 這類硬體上做 LLM 訓練/推論的人, 這一章是你的地圖。
+
+## Composable Kernel (CK): AMD 的 CUTLASS
+
+CK 是 AMD 的 C++ template kernel library, 設計哲學與 CUTLASS 同源: 把 GEMM/conv/attention 拆成可組合的分層元件, 以 template 參數決定 tile 尺寸、pipeline、epilogue。 差異在底層抽象 — CK 以「coordinate transformation」描述資料佈局與 thread 對映 (類比 CuTe 的 layout 代數), 指令層封裝的是 **MFMA** (CDNA 的 matrix core 指令) 與 direct-to-LDS 非同步搬運 (第 14 章的 AMD 對應)。
+
+CK 支援 fp32/fp16/bf16/fp8/int8, 提供 GEMM、batched/grouped GEMM、fused GEMM+epilogue、attention 等 device op。 vLLM 與 SGLang 在 ROCm 上的 FlashAttention 路徑, 有相當部分就是 CK 實作的。
+
+## hipBLASLt 與 Tensile: BLAS 這一層
+
+第 13 章講過 hipBLASLt 的 heuristic 與 tuning; 這裡補上它的 kernel 從哪來。 **Tensile** 是 AMD 的 GEMM kernel 生成器: 以 YAML 描述 problem space, 自動生成大量 assembly/HIP kernel 變體並離線 benchmark, 產出「per-架構、per-形狀」的 solution library。 hipBLASLt 執行期依形狀查表選 kernel — 所以它對「tune 過的形狀」極快, 對沒 tune 過的形狀靠 heuristic 泛化。
+
+實務工具鏈:
+
+```bash
+# Enumerate and benchmark all hipBLASLt algos for a given GEMM shape
+hipblaslt-bench --m 4096 --n 4096 --k 4096 --precision f16_r --algo_method all
+
+# PyTorch on ROCm: let TunableOp search per-shape best algo at runtime
+PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=1 python train.py
+# results land in tunableop_results.csv and are reused on the next run
+```
+
+## rocWMMA 與 MFMA intrinsic: 自己動手這一層
+
+想手寫 matrix core kernel 時有兩個高度可選: **rocWMMA** 提供與 CUDA `wmma` 相似的 fragment API (portable 程式碼的好選擇); 或直接用 `__builtin_amdgcn_mfma_*` intrinsic 控制每一條 MFMA 指令 (對應第 12 章 Step 5 的 HIP 版)。 MFMA 指令以 wavefront (64 lanes) 為單位運算 16×16×16 或 32×32×8 等 shape, fragment 佈局同樣由指令規定 — CuTe/CK 存在的理由在 AMD 側一樣成立。
+
+## AITER: AMD 的 AI Kernel 百寶箱
+
+**AITER** (AI Tensor Engine for ROCm) 是 AMD 較新的高階 kernel 集合, 目標很直接: 把 LLM 訓練/推論常用的關鍵 op — attention (prefill/decode/MLA)、GEMM (含 fp8/int8 量化)、MoE kernel、norm/activation fusion — 以「開箱即用 + 針對 CDNA 手調」的形式提供 Python/C++ API。 它內部混用 CK、Triton 與手寫 assembly, 對外只暴露統一介面。
+
+AITER 的定位是「生態加速器」: vLLM 與 SGLang 的 ROCm backend 大量接入 AITER kernel (attention、MoE、量化 GEMM), 在 MI300X 上帶來顯著加速 — 對使用者而言通常只是一個環境變數或 config 開關 (例如 vLLM 的 `VLLM_ROCM_USE_AITER=1`)。 這是第 25 章推論引擎 kernel 棧在 AMD 側的直接體現。
+
+## 對照表: 兩個生態的一一對應
+
+| 角色 | NVIDIA | AMD |
+| --- | --- | --- |
+| 黑盒 BLAS + 可調 API | cuBLAS / cuBLASLt | hipBLAS / hipBLASLt (Tensile 生成) |
+| template kernel library | CUTLASS (CuTe) | Composable Kernel |
+| portable MMA API | wmma / CUTLASS | rocWMMA |
+| Python DSL | Triton (NVIDIA backend) | Triton (AMD backend) |
+| AI kernel 集合 | cuDNN / TensorRT-LLM kernels | AITER / MIOpen |
+| 離線 GEMM tuning | cuBLASLt algo 搜索 / CUTLASS profiler | TunableOp / hipblaslt-bench / Tensile tuning |
+
+<Callout variant="warn" title="移植時的心態校準">
+「HIP 把 CUDA API 鏡像過來」只解決語法層; 效能層的假設要逐條重驗: wavefront 64 (第 9 章)、LDS bank 行為 (第 7 章)、MFMA 的 tile shape 與 fp8 格式差異 (MI300 用 fp8 e4m3fnuz, 與 NVIDIA 的 e4m3fn 不同)、以及「哪個 library 在這張卡上被 tune 得最好」。 同一個模型在 H100 與 MI300X 上的最佳 kernel 棧組合可能完全不同 — 量測, 不要移植直覺。
+</Callout>
+
+## ROCm Tuning Checklist
+
+在 AMD 上壓 kernel 效能時, 多看這些:
+
+- **Wavefront width**: 所有 warp-level code 用 `warpSize`, ballot mask 型別要能容納 64 lanes。
+- **LDS layout**: bank conflict 和 NVIDIA 類似但不是完全相同, transpose/GEMM swizzle 要重測。
+- **MFMA shape**: 選 tile 時配合 CDNA 支援的 MFMA 指令形狀, 不要照抄 Tensor Core fragment。
+- **Direct-to-LDS path**: 大型 pipeline 盡量使用 CK/AITER 已封裝好的 LDS copy 機制。
+- **hipBLASLt tuning**: 固定 shape 必跑 `hipblaslt-bench` 或 PyTorch TunableOp。
+- **fp8 format**: e4m3fnuz scaling 和 saturation policy 要和 NVIDIA 路徑分開測。
+
+ROCm 的性能工程更依賴「用對 library 版本 + tune cache」。 升級 ROCm 後, 舊 tuning 結果應視為可疑並重新抽樣驗證。
+
+<LabBox path="kernels/03-gemm">
+在 ROCm 環境下: (1) 跑 `sgemm_hipblaslt` 記下數字; (2) 用 `hipblaslt-bench --algo_method all` 對同形狀枚舉, 看 heuristic 選的和實測最佳差多少; (3) 若裝了 PyTorch, 開 `PYTORCH_TUNABLEOP_ENABLED=1` 跑一個 matmul script, 觀察 tuning 前後與 CSV 內容。 這條流程就是 MI300X 上壓 GEMM 效能的標準作業。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Composable Kernel (CK) 在 AMD 生態的定位是?',
+      options: ['profiler', '對應 CUTLASS 的 template kernel library, 以可組合元件封裝 MFMA 與 LDS pipeline', '驅動程式', 'Python DSL'],
+      answer: 1,
+      explanation: 'CK 與 CUTLASS 同源: 分層、可組合、封裝矩陣指令與資料搬運, 是 ROCm 上客製高效 kernel 的主力。',
+    },
+    {
+      question: 'Tensile 在 hipBLASLt 體系中的角色是?',
+      options: ['執行期 JIT', 'GEMM kernel 生成器: 離線生成大量變體並 benchmark, 產出 per-形狀的 solution library', '記憶體管理', 'ONNX 轉換器'],
+      answer: 1,
+      explanation: 'hipBLASLt 的 kernel zoo 由 Tensile 離線生成與 tune; 執行期查表 + heuristic 選擇 (第 13 章)。',
+    },
+    {
+      question: 'AITER 的定位是?',
+      options: ['AMD 的編譯器', '針對 LLM workload 的高階 kernel 集合 (attention/MoE/量化 GEMM), 內部混用 CK/Triton/assembly, 供 vLLM/SGLang 等直接接入', 'AMD 的 profiler', '取代 HIP 的新語言'],
+      answer: 1,
+      explanation: 'AITER 把手調好的 AI kernel 用統一 API 打包, serving 框架開個開關就能吃到 MI300X 的效能。',
+    },
+    {
+      question: '把 fp8 模型從 H100 移到 MI300X, 需要注意的量化細節是?',
+      options: ['fp8 完全相同', '兩邊的 fp8 格式不同 (e4m3fn vs. e4m3fnuz), scale 與數值範圍需對應處理', 'MI300X 不支援 fp8', '只差在名字'],
+      answer: 1,
+      explanation: '格式差異影響可表示範圍與 scaling 策略; 移植量化 pipeline 時必須逐條重驗數值假設。',
+    },
+    {
+      question: '在 ROCm 上為固定形狀的 GEMM 壓出最後一段效能, 標準流程是?',
+      options: ['調高時脈', '用 hipblaslt-bench / TunableOp 對實際形狀枚舉實測 algo, 讓之後的執行直接命中最佳 kernel', '改用 fp64', '增加 batch'],
+      answer: 1,
+      explanation: 'heuristic 對冷門形狀可能次優; 離線搜索 + 落盤重用是 AMD 側 (也是 NVIDIA 側) 的標準解法。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'Advanced Micro Devices, Inc., Composable Kernel Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/composable_kernel/en/latest/' },
+    { citation: 'Advanced Micro Devices, Inc., AITER: AI Tensor Engine for ROCm, 2025.', href: 'https://github.com/ROCm/aiter' },
+    { citation: 'Advanced Micro Devices, Inc., hipBLASLt Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/hipBLASLt/en/latest/' },
+    { citation: 'Advanced Micro Devices, Inc., "AITER: AI Tensor Engine For ROCm," ROCm Blogs, 2025.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/aiter:-ai-tensor-engine-for-rocm™/README.html' },
+    { citation: 'Advanced Micro Devices, Inc., rocWMMA Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/rocWMMA/en/latest/' },
+  ]}
+/>

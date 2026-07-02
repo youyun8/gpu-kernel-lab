@@ -1,0 +1,143 @@
+# Low-Precision、Quantization 與 Layout Conversion
+
+現代 GPU 的最高吞吐通常不在 fp32 scalar FMA, 而在 Tensor Core / Matrix Core 的 fp16、bf16、tf32、fp8、int8 路徑。 低精度優化不是把型別改小而已; 它同時牽涉 scale、accumulator、layout、alignment、epilogue 和 numerical validation。
+
+## 低精度格式的角色
+
+常見格式可粗分:
+
+- **fp32**: reference、accumulator、敏感 reduction。
+- **tf32**: NVIDIA 上讓 fp32 GEMM 走 Tensor Core 的折衷, mantissa 較短但 exponent 範圍接近 fp32。
+- **fp16**: bandwidth 小、Tensor Core 快, 但 dynamic range 較窄。
+- **bf16**: mantissa 較短, exponent 範圍接近 fp32, training 較穩。
+- **fp8**: 需要 per-tensor / per-channel / per-block scaling, 適合大型 GEMM 和 attention。
+- **int8 / int4**: 推論常用, 需要 zero point、scale、packing 和 dequantization。
+
+選格式時先問: 瓶頸是 bandwidth、compute、還是 memory capacity? 如果 kernel 仍被 scalar overhead 或不規則存取限制, 換成 fp8 不會自動變快。
+
+## Accumulate Higher Than You Store
+
+低精度輸入通常用較高精度累加:
+
+```cpp
+// Conceptual pattern: low-precision input, fp32 accumulation, low-precision output.
+half a = A[i];
+half b = B[i];
+float acc = __half2float(a) * __half2float(b);
+// Reduce acc in fp32, then cast or quantize in the epilogue.
+```
+
+GEMM 中常見路徑是 fp16/bf16/fp8 input, fp32 accumulator, epilogue 再轉 fp16/bf16/fp8。 Reduction、softmax、normalization 的 sum/max 通常也要留在 fp32, 尤其是長 row 或大 batch。
+
+## Scale 的粒度
+
+Quantization 需要 scale, scale 粒度是效能與精度的交換:
+
+- **Per-tensor**: metadata 最少, 但 outlier 會浪費整個 tensor 的 range。
+- **Per-channel**: conv/linear 常用, 精度好很多, metadata 還可接受。
+- **Per-token / per-row**: LLM activation 常用, 適合 row-wise GEMM。
+- **Per-block**: fp8/int4 常用, 每 16 到 128 個元素一個 scale, 精度佳但 epilogue 較複雜。
+
+Scale load 也要 coalesced 且 cache-friendly。 很多 int4/fp8 kernel 慢在 scale 和 zero point 的不規則讀取, 不是慢在 MMA。
+
+## Packing 與 Vectorized Conversion
+
+低 bit-width 格式必須 packing:
+
+```cpp
+// Pack two signed int4 values into one byte. Values are assumed clipped to [-8, 7].
+__device__ unsigned char pack_i4(int lo, int hi) {
+    unsigned ulo = static_cast<unsigned>(lo) & 0x0f;
+    unsigned uhi = static_cast<unsigned>(hi) & 0x0f;
+    return static_cast<unsigned char>(ulo | (uhi << 4));
+}
+```
+
+Packing kernel 本身要避免成為瓶頸:
+
+- 一個 thread 處理多個元素, 用 vectorized load/store。
+- 盡量 fuse clamp、round、scale、pack。
+- 避免每個元素都做 expensive division, 預先算 reciprocal scale。
+- 保持輸出對齊, 讓後續 GEMM 能用 16-byte 或更寬的 transaction。
+
+## Layout Conversion 是 Kernel
+
+Tensor Core / MFMA 常需要特定 layout。 模型系統裡常見的隱性成本是:
+
+- row-major activation 轉成 tiled layout。
+- weight prepack / interleave。
+- KV cache page layout conversion。
+- fp16/bf16/fp8 之間的 cast。
+- int4 unpack + dequant 在 GEMM 主迴圈或 epilogue 中發生。
+
+Weight 是靜態時, prepack 一次最划算。 Activation 每步都變, layout conversion 必須 fuse 進 producer 或 consumer, 否則會多一次完整 memory round trip。
+
+## Epilogue Dequant / Requant
+
+低精度 GEMM 的 epilogue 常做一串工作:
+
+```cpp
+float y = alpha * acc + bias[col];
+y = gelu(y);
+float q = nearbyintf(y * inv_scale[col]);
+q = fminf(127.0f, fmaxf(-128.0f, q));
+C_q[row * ldc + col] = static_cast<int8_t>(q);
+```
+
+把 bias、activation、scale、clamp 和 cast 放進 epilogue 可省下中間 tensor 寫回。 代價是 epilogue register pressure 變高, 且 scale/bias load 需要良好 locality。
+
+## Validation 不只看平均誤差
+
+低精度 kernel 至少要測:
+
+- max absolute error、relative error、ULP 或 task-level metric。
+- outlier input、極小 scale、極大 scale、NaN/Inf policy。
+- deterministic vs. stochastic rounding 的差異。
+- 不同 batch/sequence shape 下的誤差分佈。
+- 與 library reference 在相同 accumulator 和 math mode 下比較。
+
+<Callout variant="warn" title="不要把 dtype 當成單純效能開關">
+低精度加速成立的前提是資料對齊、layout 合適、MMA 路徑真的被使用、scale metadata 不拖累 memory、且 numerical error 在產品指標內。 缺任何一項, 都可能只是更快地算錯。
+</Callout>
+
+<LabBox path="kernels/03-gemm">
+在 SGEMM lab 外加一個 quantized epilogue experiment: fp32 accumulator 加 bias 後輸出 int8, scale 分別用 per-tensor、per-row、per-column。 記錄 kernel time、scale load pattern、以及相對 fp32 reference 的最大誤差。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '低精度 GEMM 常見的 accumulator 是什麼?',
+      options: ['永遠和 input 同精度', '通常比 input 高, 常見為 fp32', '只能 int32', '不需要 accumulator'],
+      answer: 1,
+      explanation: '低精度 input 搭配較高精度 accumulator 能保留數值穩定性, epilogue 再 cast 或 quantize。',
+    },
+    {
+      question: 'Per-block scale 的主要代價是?',
+      options: ['完全不能向量化', 'metadata 和 epilogue 較複雜, scale load 可能成為瓶頸', '一定比 per-tensor 不準', '不支援 GEMM'],
+      answer: 1,
+      explanation: '粒度越細精度通常越好, 但需要更多 scale metadata 與更複雜的 load/indexing。',
+    },
+    {
+      question: 'Weight prepack 為什麼常划算?',
+      options: ['weight 通常靜態, 可一次轉成 MMA 友善 layout 後重複使用', 'prepack 可以增加 HBM 容量', 'prepack 會自動提高 clock', '只為了讓程式碼好看'],
+      answer: 0,
+      explanation: '靜態 weight 的 layout conversion 可以離線或初始化時做, 避免每次 inference 重複付費。',
+    },
+    {
+      question: '低精度 validation 最不應該只看哪個指標?',
+      options: ['max error', 'outlier cases', '平均誤差', 'task-level metric'],
+      answer: 2,
+      explanation: '平均誤差可能掩蓋 outlier、overflow、scale 失效和 tail shape 問題。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'P. Micikevicius et al., "Mixed Precision Training," in Proc. ICLR, 2018', href: 'https://arxiv.org/abs/1710.03740' },
+    { citation: 'B. Jacob et al., "Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference," in Proc. CVPR, 2018', href: 'https://arxiv.org/abs/1712.05877' },
+    { citation: 'NVIDIA Corporation, "Floating Point and IEEE 754 Compliance for NVIDIA GPUs," CUDA Documentation, 2026', href: 'https://docs.nvidia.com/cuda/floating-point/index.html' },
+    { citation: 'NVIDIA Corporation, "Warp Matrix Functions," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-matrix-functions' },
+  ]}
+/>

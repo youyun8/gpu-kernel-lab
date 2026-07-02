@@ -14,7 +14,7 @@ export default function ExercisesIndexPage() {
     <AppWidthContainer as="main" className="px-4 py-12">
       <h1 className="text-3xl font-bold text-foreground">練習與解答</h1>
       <p className="mt-3 max-w-2xl text-muted-foreground">
-        每個 track 都有一組練習, 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 共 {total} 題。每題附完整解答 (點開 <span className="text-primary">顯示解答</span> 展開); programming 題的參考解位於 <code>kernels/exercises/</code>, 可直接編譯執行。
+        每個 track 都有一組練習, 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 共 {total} 題。 每題附完整解答 (點開 <span className="text-primary">顯示解答</span> 展開); programming 題的參考解位於 <code>kernels/exercises/</code>, 可直接編譯執行。
       </p>
       <div className="mt-8 grid gap-4 sm:grid-cols-2">
         {exerciseSets.map((set) => (

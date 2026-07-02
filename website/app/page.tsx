@@ -30,9 +30,9 @@ export default function HomePage() {
       </section>
 
       <section className="mt-12 grid gap-4 sm:grid-cols-3">
-        <InfoCard title="目標讀者" body="會寫 C/C++、對效能有好奇心的工程師與研究者。不需要 GPU 背景, 但假設你能讀基本的 C++。從 Track A 開始, 或依 profiler 找到的瓶頸直接跳章。" />
-        <InfoCard title="環境需求" body={`${siteConfig.requirements}。需要 CMake ≥ 3.24、Python ≥ 3.10 (PyTorch 章節)。無 GPU 也能讀內容並做 syntax-level 編譯驗證。`} />
-        <InfoCard title="數據誠實" body="網站上的預設圖表為示意數據 (illustrative)。用 scripts/bench_all.py 在你自己的硬體上跑出真實數字, 再替換 JSON。" />
+        <InfoCard title="目標讀者" body="會寫 C/C++、對效能有好奇心的工程師與研究者。 不需要 GPU 背景, 但假設你能讀基本的 C++。 從 Track A 開始, 或依 profiler 找到的瓶頸直接跳章。" />
+        <InfoCard title="環境需求" body={`${siteConfig.requirements}。 需要 CMake ≥ 3.24、Python ≥ 3.10 (PyTorch 章節)。 無 GPU 也能讀內容並做 syntax-level 編譯驗證。`} />
+        <InfoCard title="數據誠實" body="網站上的預設圖表為示意數據 (illustrative)。 用 scripts/bench_all.py 在你自己的硬體上跑出真實數字, 再替換 JSON。" />
       </section>
 
       <section className="mt-12">
@@ -55,7 +55,7 @@ cd .. && python scripts/bench_all.py --out website/content/data/benchmarks.json`
 
       <section className="mt-12 mb-16">
         <h2 className="mb-2 text-2xl font-semibold text-foreground">學習路線圖</h2>
-        <p className="mb-6 text-sm text-muted-foreground">Track A → D。前三個 track 是能力階梯, Track D 貫穿各等級, 把技巧帶回 PyTorch 實戰。</p>
+        <p className="mb-6 text-sm text-muted-foreground">Track A → F。 A–C 是能力階梯, D–F 則把技巧延伸到 PyTorch、library 與 production kernel 戰場。</p>
         <LearningPathMap />
       </section>
     </AppWidthContainer>

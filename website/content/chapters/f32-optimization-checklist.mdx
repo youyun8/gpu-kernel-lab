@@ -1,0 +1,140 @@
+# GPU Kernel Optimization Checklist
+
+這一章是整本手冊的索引。 當你面對一個慢 kernel, 不要從某個技巧開始套; 先定位瓶頸, 再用對應的工具。 下面的 checklist 按照診斷順序排列, 也標出每種技術通常改善哪個瓶頸。
+
+## Step 1: 確認問題值得做
+
+- Kernel 是否佔 end-to-end 時間的顯著比例?
+- 是否有 library / compiler / Triton 已經能解?
+- CPU-GPU transfer、launch gap、framework sync 是否比 kernel 本身更大?
+- Input shape 是否穩定, 還是只有少數 batch 慢?
+- Correctness reference 和 benchmark harness 是否已經可靠?
+
+若答案是否定的, 先回第 17、28、31 章。 錯的目標會讓所有 micro-optimization 失去意義。
+
+## Step 2: 判斷瓶頸類型
+
+| 症狀 | 優先技巧 |
+| --- | --- |
+| DRAM throughput 高, compute 低 | Coalescing、vectorized load、fusion、tiling、compression |
+| DRAM throughput 低, stall long scoreboard 高 | 增加 occupancy/ILP、prefetch、更多 independent work |
+| Shared memory bank conflict 高 | Padding、swizzle、改 layout、warp shuffle |
+| Eligible warps per cycle 低 | 降 register/shared usage、調 block size、增加 grid |
+| Tensor pipe idle | 改 layout、MMA tile、pipeline stages、library kernel |
+| Atomic stall 高 | Privatization、warp aggregation、sort/reduce |
+| Tail effect 高 | Split-K、Stream-K、persistent scheduler、CTA swizzle |
+| Launch overhead 高 | Fusion、CUDA/HIP Graphs、persistent kernel |
+| Copy engine idle 或 copy/compute 串行 | Pinned memory、streams、double buffering |
+
+## Step 3: Memory 技巧
+
+- Coalesced global load/store。
+- 對齊配置, 讓每個 warp 讀連續 segment。
+- AoS 改 SoA, 或 hot fields 拆開。
+- Vectorized access: `float2`、`float4`、`int4`。
+- Grid-stride loop 增加每 thread 工作量。
+- Shared memory tiling 提高 reuse。
+- Padding / swizzle 避免 bank conflict。
+- Read-only cache、constant memory、texture path 用於 broadcast 或 spatial locality。
+- Cache hint / eviction policy 在資料重用距離明確時才使用。
+- Compress / quantize 降低 bandwidth, 但要計入 scale metadata。
+
+## Step 4: Execution 技巧
+
+- 選 block size 讓 active warps 足以隱藏 latency。
+- 控制 register pressure, 避免 spill。
+- 用 ILP 補 occupancy 不足: 多 accumulator、多 independent load。
+- Loop unrolling 只在 instruction overhead 或 dependency chain 需要時使用。
+- FMA、fast math、approx function 要配 numerical policy。
+- 減少 branch divergence, 或改成 predication / data partition。
+- Warp-level primitive 取代 shared memory 小範圍溝通。
+- Cooperative groups 用於明確表達 tile/warp/block scope。
+
+## Step 5: Algorithm 技巧
+
+- Tiling: block tile、warp tile、thread tile。
+- Register tiling 和 outer-product microkernel。
+- Double buffering / software pipeline。
+- Async copy: `cp.async`、TMA 或平台對應機制。
+- Tensor Core / MFMA / MMA 指令。
+- Split-K、parallel reduction、scan、prefix sum。
+- Online softmax、streaming normalizer、fused attention。
+- Work decomposition: persistent scheduler、work stealing、CTA swizzle。
+- Precompute / prepack static data。
+- Fusion / fission: 根據 memory traffic、register pressure 和 reuse 決定。
+
+## Step 6: Numerics 與資料型別
+
+- Accumulate in higher precision。
+- 選 fp32、tf32、fp16、bf16、fp8、int8/int4 的依據要明確。
+- Scale 粒度: per-tensor、per-channel、per-row、per-block。
+- Epilogue fusion: bias、activation、dequant、requant、clamp。
+- Deterministic reduction tree vs. atomic reduction。
+- Tolerance 按 dtype、operation 和 size 設計。
+
+## Step 7: Production 化
+
+- Autotune tile shape、warps、stages、split-K、swizzle。
+- Cache tuning result, 並將 GPU/driver/dtype/shape/layout 納入 key。
+- Dispatch 有 fallback, 不支援 shape 不應 crash。
+- Sanitizer 小 shape CI + benchmark regression CI。
+- 記錄 profiler metric, 不只記 latency。
+- 保留 reference kernel 和最小 reproduction。
+
+<Callout variant="warn" title="一次只改一個主要變因">
+很多優化會互相干擾: vectorization 增 register, fusion 降 memory traffic 但降 occupancy, larger tile 提高 reuse 但增加 shared memory。 每次改動都要重新量測 bottleneck, 不要假設上一輪結論仍然成立。
+</Callout>
+
+## Minimal Optimization Loop
+
+```text
+1. Build a correct reference.
+2. Measure end-to-end and single-kernel time.
+3. Classify the bottleneck with profiler metrics.
+4. Pick one technique tied to that bottleneck.
+5. Re-check correctness on tail shapes.
+6. Re-profile and compare against the previous best.
+7. Keep the change only if the metric and wall time both improve.
+```
+
+<LabBox path="kernels">
+挑任一 lab kernel, 寫一份 optimization log: baseline 數字、profiler bottleneck、採用技巧、修改後 metric、correctness/tail shape 結果。 最後把最快版本和最清楚版本都保留, 註明何時該用哪一個。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '優化慢 kernel 的第一步是?',
+      options: ['直接加 shared memory', '確認它在 end-to-end 中值得優化且 benchmark/reference 可靠', '改用最大 block size', '打開所有 fast math'],
+      answer: 1,
+      explanation: '沒有可靠目標和量測, micro-optimization 很容易優化錯地方。',
+    },
+    {
+      question: 'DRAM throughput 高且 compute 低時, 優先思考什麼?',
+      options: ['memory traffic 和 reuse, 例如 coalescing、tiling、fusion', '增加 printf', '降低資料重用', '改變 README'],
+      answer: 0,
+      explanation: '這是典型 bandwidth-bound 訊號, 要減少 bytes 或提高每 byte 的運算量。',
+    },
+    {
+      question: 'Tail effect 高時可考慮哪組技巧?',
+      options: ['Split-K、Stream-K、persistent scheduler、CTA swizzle', '只改 fast math', '只換 CPU timer', '關閉所有 cache'],
+      answer: 0,
+      explanation: '這些技巧都在改善工作分配和尾端 SM 閒置。',
+    },
+    {
+      question: '為什麼每次優化後都要重新 profile?',
+      options: ['瓶頸可能轉移, 下一個最佳技巧會改變', '因為 profiler 會自動修 code', '因為 correctness 不重要', '因為 latency 永遠不變'],
+      answer: 0,
+      explanation: '一個技巧解掉原瓶頸後, kernel 可能變成受 register、shared memory、atomic 或 launch overhead 限制。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, CUDA C++ Best Practices Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html' },
+    { citation: 'NVIDIA Corporation, Nsight Compute Kernel Profiling Guide, 2026', href: 'https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html' },
+    { citation: 'Advanced Micro Devices, Inc., "ROCm Performance and Profiling," ROCm Documentation, 2026', href: 'https://rocm.docs.amd.com/en/latest/how-to/performance.html' },
+    { citation: 'S. Williams, A. Waterman, and D. Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures," Commun. ACM, vol. 52, no. 4, pp. 65-76, Apr. 2009', href: 'https://dl.acm.org/doi/10.1145/1498765.1498785' },
+  ]}
+/>

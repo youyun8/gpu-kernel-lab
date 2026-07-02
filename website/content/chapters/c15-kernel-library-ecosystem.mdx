@@ -1,14 +1,14 @@
-# 認識 kernel library 生態
+# 認識 Kernel Library 生態
 
-讀到這裡你已經能手寫相當快的 GEMM。但殘酷的事實是: 你花一個月寫的 kernel, cuBLAS 一行呼叫就打平甚至超越。那學這些還有意義嗎?有 — 但你得知道什麼時候該收手、把工作交給 library。這一章畫出生態地圖, 幫你做這個決定。
+讀到這裡你已經能手寫相當快的 GEMM。 但殘酷的事實是: 你花一個月寫的 kernel, cuBLAS 一行呼叫就打平甚至超越。 那學這些還有意義嗎? 有 — 但你得知道什麼時候該收手、把工作交給 library。 這一章畫出生態地圖, 幫你做這個決定; Track E 會對地圖上的每個重要節點深入展開。
 
 ## 三種抽象層次
 
-**CUTLASS (NVIDIA) ** 是一套 C++ template library, 把 GEMM/conv 拆成分層的可組合元件: device → kernel → threadblock → warp → instruction (MMA)。你可以在任一層插入自訂 epilogue、fusion、data type, 同時複用底層高度優化的 pipeline。它是「我要 library 級效能, 但需要客製」的答案。AMD 的對應是 **Composable Kernel (CK) **, 同樣走 template 分層、可組合的路線。
+**CUTLASS (NVIDIA)** 是一套 C++ template library, 把 GEMM/conv 拆成分層的可組合元件: device → kernel → threadblock → warp → instruction (MMA)。 你可以在任一層插入自訂 epilogue、fusion、data type, 同時複用底層高度優化的 pipeline。 它是「我要 library 級效能, 但需要客製」的答案。 AMD 的對應是 **Composable Kernel (CK)**, 同樣走 template 分層、可組合的路線。 第 22、23 章分別深入兩者。
 
-**Triton** 是一個 Python DSL: 你用類似 NumPy 的 block-level 語法寫 kernel, compiler 幫你處理 shared memory 配置、coalescing、pipelining。生產力極高, 可攜性好 (同一份 Triton 可跑 NVIDIA 與 AMD), 峰值效能通常略低於手調 CUTLASS 但常常「夠好」。
+**Triton** 是一個 Python DSL: 你用類似 NumPy 的 block-level 語法寫 kernel, compiler 幫你處理 shared memory 配置、coalescing、pipelining。 生產力極高, 可攜性好 (同一份 Triton 可跑 NVIDIA 與 AMD), 峰值效能通常略低於手調 CUTLASS 但常常「夠好」。 它也是 `torch.compile` 的 codegen backend (第 20 章)。
 
-**cuBLAS / hipBLASLt** 是黑盒 BLAS: 最省事、對標準 GEMM 通常最快, 但無法客製 fusion、也看不到內部。
+**cuBLAS / hipBLASLt** 是黑盒 BLAS: 最省事、對標準 GEMM 通常最快, 但無法客製 fusion (cuBLASLt 的 epilogue 選單除外)、也看不到內部。 第 13 章講過它們內部的 kernel zoo 與 heuristic。
 
 | 需求 | 建議 |
 | --- | --- |
@@ -17,18 +17,45 @@
 | 快速原型、可攜性優先、團隊用 Python | Triton |
 | 學習、教學、極端客製的研究 | 手寫 kernel |
 
-## 什麼時候該自己寫, 什麼時候該用 library
+## 這張地圖如何接到真實世界
+
+你平常用的框架, 底下全是這張地圖上的元件:
+
+- **PyTorch**: `torch.mm` 走 cuBLAS/hipBLASLt;`scaled_dot_product_attention` 走 FlashAttention/內建 kernel; fp8 的 `_scaled_mm` 用 CUTLASS;`torch.compile` 生成 Triton。
+- **vLLM / SGLang** (LLM serving): attention 用 FlashAttention/FlashInfer/自製 PagedAttention kernel, GEMM 用 cuBLASLt/CUTLASS/hipBLASLt, MoE 與量化 kernel 用 CUTLASS/Triton/AITER (AMD)。
+- **TensorRT-LLM**: NVIDIA 的推論引擎, 內部大量使用 CUTLASS 生成的 kernel 與手寫 attention。
+
+換句話說: 學會讀懂這些 library, 你就能讀懂 (並優化) 現代 AI infra 的底層。 Track E (第 22–25 章) 逐一拆解。
+
+## 什麼時候該自己寫, 什麼時候該用 Library
 
 <Callout variant="insight" title="決策原則">
-先量測: 如果 cuBLAS/hipBLASLt 已經佔了你 kernel 時間的大宗且接近 roofline, 別重寫, 把精力放在別處。當你需要的是「library 不提供的 fusion」或「奇特的 shape/dtype」, 才輪到 CUTLASS/CK 或手寫。手寫 from scratch 的價值主要在學習與研究, 以及 library 完全沒覆蓋的場景。
+先量測: 如果 cuBLAS/hipBLASLt 已經佔了你 kernel 時間的大宗且接近 roofline, 別重寫, 把精力放在別處。 當你需要的是「library 不提供的 fusion」或「奇特的 shape/dtype」, 才輪到 CUTLASS/CK 或手寫。 手寫 from scratch 的價值主要在學習與研究, 以及 library 完全沒覆蓋的場景。
 </Callout>
 
-## autotune 的角色
+一個實用的決策順序 (由省力到費力): 內建 op → `torch.compile` → library 的 fusion 選項 (cuBLASLt epilogue) → Triton → CUTLASS/CK → 手寫。 每往下一層, 開發與維護成本增加一個量級, 只有量測證明上一層不夠時才往下走。
 
-同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。library (cuBLASLt、CK、Triton 的 autotuner) 會在候選 config 中搜尋最佳解。你自己寫的 kernel 若要對多種 shape 都快, 也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工, 也是 library 真正的價值所在。
+## Autotune 的角色
+
+同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。 library (cuBLASLt、CK、Triton 的 autotuner) 會在候選 config 中搜尋最佳解。 你自己寫的 kernel 若要對多種 shape 都快, 也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工, 也是 library 真正的價值所在。
+
+Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次遇到新 shape 時實測所有候選 config (冷啟動慢), 之後快取命中; cuBLAS 的 heuristic 零冷啟動但可能次優; TunableOp/CUTLASS profiler 走離線搜索。 選哪種, 取決於你的 shape 分佈是否固定、能否接受首次延遲。
+
+## Library Selection Playbook
+
+做選型時把需求寫成矩陣:
+
+- **Shape stability**: 固定 shape 適合離線 autotune; 高度動態 shape 偏向 heuristic 或 persistent scheduler。
+- **Fusion need**: 只有 bias/ReLU/GELU 時先試 cuBLASLt/hipBLASLt epilogue; 任意 epilogue 才進 CUTLASS/CK/Triton。
+- **Portability**: 同一 codebase 要跑 CUDA/ROCm, Triton 或 ATen native op 的維護成本最低。
+- **Peak requirement**: 要最後 5% 且 shape 固定, CUTLASS/CK + profiler 值得; 否則 Triton 常更划算。
+- **Build constraints**: C++ template library 會拉長 build time; Python JIT 會有 cold start; 黑盒 BLAS 部署最簡單。
+- **Debuggability**: 手寫/Triton 最容易插入檢查; 黑盒最快但可觀測性最低。
+
+例子: 一個固定 shape 的 fp8 GEMM + custom dequant + activation, NVIDIA 上可用 CUTLASS epilogue visitor; ROCm 上先試 AITER/CK; 若兩邊都要快速交付, Triton prototype 先建立 correctness 和收益上限, 再決定是否下探。
 
 <LabBox path="kernels/03-gemm">
-`sgemm_cublas` (CUDA)/ `sgemm_hipblaslt` (HIP) 把你手寫的最佳版本和 library 並排 benchmark, 印出兩者的 GFLOP/s 與比值。跑一遍, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
+`sgemm_cublas` (CUDA)/ `sgemm_hipblaslt` (HIP) 把你手寫的最佳版本和 library 並排 benchmark, 印出兩者的 GFLOP/s 與比值。 跑一遍, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
 </LabBox>
 
 <Quiz
@@ -49,7 +76,19 @@
       question: '什麼情況最該直接用 cuBLAS/hipBLASLt?',
       options: ['需要奇特的 fusion', '標準 GEMM 且已接近 roofline, 追求省事與最快', '教學示範', '需要看內部實作'],
       answer: 1,
-      explanation: '標準形狀下 library 通常最快且零維護成本;沒有客製需求就不必重造輪子。',
+      explanation: '標準形狀下 library 通常最快且零維護成本; 沒有客製需求就不必重造輪子。',
+    },
+    {
+      question: '合理的 kernel 開發決策順序是?',
+      options: ['永遠從手寫開始', '內建 op → torch.compile → library fusion → Triton → CUTLASS/CK → 手寫, 量測不足才往下走', '直接用 CUTLASS', '先寫 PTX'],
+      answer: 1,
+      explanation: '每往下一層成本增加一個量級; 由省力到費力逐層嘗試, 用量測決定是否值得繼續往下。',
+    },
+    {
+      question: 'Triton autotune 與 cuBLAS heuristic 的取捨是?',
+      options: ['兩者相同', 'autotune 實測候選 config (首次慢但貼合硬體), heuristic 零冷啟動但對冷門形狀可能次優', 'heuristic 永遠更快', 'autotune 不支援 GEMM'],
+      answer: 1,
+      explanation: 'shape 固定的 workload 適合實測型 (autotune/TunableOp); shape 多變或延遲敏感則靠 heuristic。',
     },
   ]}
 />

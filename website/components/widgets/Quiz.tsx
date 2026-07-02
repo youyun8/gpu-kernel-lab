@@ -11,17 +11,17 @@ export interface QuizQuestion {
 
 export function Quiz({ questions }: { questions: QuizQuestion[] }) {
   return (
-    <section aria-label="章末測驗" className="my-8 rounded-lg border border-border bg-card/40 p-5">
-      <p className="mb-4 flex items-center gap-2 text-base font-semibold text-foreground">
+    <details aria-label="章末測驗" className="my-8 rounded-lg border border-border bg-card/40 p-5">
+      <summary className="flex cursor-pointer items-center gap-2 text-base font-semibold text-foreground marker:text-muted-foreground">
         <span aria-hidden>📝</span>
         <span>章末測驗</span>
-      </p>
-      <ol className="space-y-6">
+      </summary>
+      <ol className="mt-4 space-y-6">
         {questions.map((q, i) => (
           <QuizItem key={i} index={i} question={q} />
         ))}
       </ol>
-    </section>
+    </details>
   );
 }
 

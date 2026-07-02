@@ -1,37 +1,88 @@
 # 小矩陣與尾端效應
 
-你的 GEMM 在 4096×4096 上跑得漂亮, 換成 4096×4096×48 的瘦長矩陣卻掉到一半效能。同一個 kernel, 為什麼形狀一變就崩?答案是 wave quantization 與 tail effect — GPU 把工作切成 wave 一批批送, 最後那批沒填滿就是純浪費。
+你的 GEMM 在 4096×4096 上跑得漂亮, 換成 4096×4096×48 的瘦長矩陣卻掉到一半效能。 同一個 kernel, 為什麼形狀一變就崩? 答案是 wave quantization 與 tail effect — GPU 把工作切成 wave 一批批送, 最後那批沒填滿就是純浪費。 這一章講清楚病因, 以及 Split-K、Stream-K、persistent kernel 這一族解法 — 也順便揭開 cuBLAS/hipBLASLt 內部怎麼處理這些問題。
 
-## wave quantization
+## Wave Quantization
 
-GPU 一次能同時跑的 CTA (block) 數量有限 (取決於 SM/CU 數與每 SM 可容納的 block 數)。所有 CTA 分成一批批「wave」執行。如果你的 grid 產生 130 個 CTA, 而硬體一 wave 能跑 128 個, 那你需要 2 個 wave: 第一 wave 滿載 128, 第二 wave 只有 2 個 CTA 在跑, 其餘執行單元閒置。
+GPU 一次能同時跑的 CTA (block) 數量有限 (取決於 SM/CU 數與每 SM 可容納的 block 數)。 所有 CTA 分成一批批「wave」執行。 如果你的 grid 產生 130 個 CTA, 而硬體一 wave 能跑 128 個, 那你需要 2 個 wave: 第一 wave 滿載 128, 第二 wave 只有 2 個 CTA 在跑, 其餘執行單元閒置。
 
 $$
 \text{efficiency} = \frac{\text{CTA count}}{\lceil \text{CTA count} / \text{CTAs per wave} \rceil \times \text{CTAs per wave}}
 $$
 
-130 個 CTA 的效率只有 $130 / 256 \approx 51\%$。這就是 wave quantization。
+130 個 CTA 的效率只有 $130 / 256 \approx 51\%$。 這就是 wave quantization。
 
-## tail effect
+推廣一下, 這也解釋了一個常見的觀察: 把 N 從 2048 加到 2064, 時間卻跳了一大截 — 多出的那一小條 tile 剛好多開了一個 wave。 deep learning 的 layer 尺寸若能配合 tile 與 wave 的整數倍 (例如 batch 或 hidden dim 選 tile size 的倍數), 常常白拿幾成效能, NVIDIA 的 DL performance 文件對此有專門建議。
 
-同一個 wave 內, 若各 CTA 工作量不均 (例如邊界 tile 較小), 整個 wave 要等最慢的 CTA 收工。最後一個 wave 又常常最空 — 兩者疊加就是 tail effect, 對小矩陣或不整除的形狀特別明顯。
+## Tail effect
+
+同一個 wave 內, 若各 CTA 工作量不均 (例如邊界 tile 較小), 整個 wave 要等最慢的 CTA 收工。 最後一個 wave 又常常最空 — 兩者疊加就是 tail effect, 對小矩陣或不整除的形狀特別明顯。
 
 <Callout variant="insight" title="為什麼大矩陣沒事">
-大矩陣產生成百上千個 CTA, 最後一個沒填滿的 wave 佔比極小, quantization 損失被稀釋。矩陣越小、wave 數越少, 最後一個殘缺 wave 的相對成本越高。這是小矩陣特有的痛。
+大矩陣產生成百上千個 CTA, 最後一個沒填滿的 wave 佔比極小, quantization 損失被稀釋。 矩陣越小、wave 數越少, 最後一個殘缺 wave 的相對成本越高。 這是小矩陣特有的痛。
 </Callout>
 
-## Split-K 與 Stream-K
+## Split-K: 用 K 維平行度補 CTA
 
-當 M、N 很小但 K 很大時, 能產生的 CTA (由 M×N tile 決定) 太少, 填不滿 GPU。**Split-K** 把 K 維切成多段, 讓多個 CTA 各算一段 partial sum, 最後再 reduce — 用更多 CTA 換取填滿硬體, 代價是一次額外的 reduction。
+當 M、N 很小但 K 很大時, 能產生的 CTA (由 M×N tile 決定) 太少, 填不滿 GPU。 **Split-K** 把 K 維切成多段, 讓多個 CTA 各算一段 partial sum, 最後再 reduce — 用更多 CTA 換取填滿硬體, 代價是一次額外的 reduction:
 
-**Stream-K** 更進一步: 把所有 output tile 的 MAC 工作攤平成一條連續的 work stream, 均勻分給固定數量的 CTA, 天生解決 quantization 與負載不均。它讓每個 CTA 的工作量幾乎相等, 最後只需少量 fixup。現代 library (CUTLASS) 用它處理任意形狀。
+```cpp
+// Split-K sketch: each CTA accumulates a K-slice, then merges into C.
+// splitIdx in [0, kSplit); each slice covers k / kSplit of the K loop.
+int kBegin = splitIdx * (k / kSplit);
+int kEnd   = kBegin + (k / kSplit);
+float acc = 0.0f;
+for (int p = kBegin; p < kEnd; ++p) {
+    acc += A[row * k + p] * B[p * n + col];
+}
+// Merge strategy 1: atomicAdd into C (C must be zero-initialized).
+atomicAdd(&C[row * n + col], acc);
+// Merge strategy 2: write partials to workspace, run a second reduce kernel
+// (deterministic, needs kSplit * M * N floats of workspace).
+```
 
-## CTA swizzling 與 L2 locality
+兩種合併策略的取捨和第 10 章 reduction 相同: atomic 版省 launch 但結果順序不定; workspace + 第二個 kernel 的版本確定性強, library 通常兩種都備著。 選多大的 split? 太小填不滿, 太大則 reduction 與 workspace 成本上升 — 這本身就是個 autotuning 問題。
 
-CTA 的 launch 順序影響哪些 tile 同時在跑, 進而影響它們共享的 A/B 資料是否還在 L2。預設的 row-major CTA ordering 可能讓同時執行的 CTA 存取分散的 A/B 區塊;**swizzle** (重排 CTA 到 tile 的對映, 例如以 group 為單位 Z 字形) 讓相鄰執行的 CTA 共用更多 A/B row/column, 提高 L2 命中率。
+## Stream-K: 把工作攤成一條流
+
+Split-K 仍以「整數個 tile」為單位切割, 形狀不巧時還是會不均。 **Stream-K** 更進一步: 把所有 output tile 的 MAC 迭代攤平成一條連續的 work stream, 均勻切給固定數量的 CTA (通常 = SM 數)。 每個 CTA 領到的工作量幾乎完全相等, 天生解決 quantization 與負載不均; 一個 output tile 的計算可能橫跨兩個 CTA, 交界處用輕量的 fixup (旗標 + partial 合併) 處理。
+
+CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形狀不可預測」的 workload (例如 LLM serving 中隨 batch 變化的 GEMM) 特別有價值 — 它把「對每個形狀都要重新 tune tile/wave 配置」的問題, 換成一個對形狀不敏感的排程策略。
+
+## Persistent Kernel 與 CTA Swizzling
+
+**Persistent kernel** 是 Stream-K 背後的執行形態: 只 launch 剛好填滿機器的 CTA 數, 每個 CTA 用迴圈從全域 work queue (通常就是一個 atomic counter) 領工作直到做完。 好處是完全避開 wave 邊界、launch overhead 只付一次, 也讓 CTA 可以跨 tile 保留狀態。 現代 library 的 GEMM 與 attention kernel 大量採用這個形態。
+
+**CTA swizzling** 解決另一個維度的問題: CTA 的 launch 順序影響哪些 tile 同時在跑, 進而影響它們共享的 A/B 資料是否還在 L2。 預設的 row-major CTA ordering 可能讓同時執行的 CTA 存取分散的 A/B 區塊; **swizzle** (重排 CTA 到 tile 的對映, 例如以 group 為單位 Z 字形) 讓相鄰執行的 CTA 共用更多 A/B row/column, 提高 L2 命中率。 這對大矩陣同樣有效, 是幾乎零成本的優化。
+
+## cuBLAS / cuBLASLt / hipBLASLt 怎麼做這些決定
+
+呼叫一行 `cublasSgemm`, 底下發生的事遠比你想的多:
+
+- **Kernel zoo**: library 內建成百上千個預編譯的 GEMM kernel 變體 — 不同 tile 尺寸 (128×128、128×64、64×64…)、stage 數、Split-K 因子、swizzle 模式、Tensor Core 指令形狀的排列組合。
+- **Heuristic 選擇**: 依據 (M, N, K, dtype, layout, 架構) 用啟發式模型 (查表 + 解析模型, 部分版本含 ML 模型) 預測哪個變體最快 — 包含要不要開 Split-K、切幾段。 這就是為什麼 cuBLAS 對瘦長矩陣仍然快: 它會自動切換到 Split-K 變體。
+- **cuBLASLt 把選擇權開放給你**: `cublasLtMatmulAlgoGetHeuristic` 回傳前 N 名候選 algo, 你可以自己 benchmark 後挑最快的 (許多框架就這麼做); 還能指定 epilogue (bias、GELU、ReLU) 讓 fusion 在 library 內完成。
+- **hipBLASLt 走同一條路**: heuristic API (`hipblaslt_ext::getAllAlgos` 等) + 離線 tuning。 它的 kernel 主要由 Tensile/CK 生成, 支援以 YAML 描述的 per-shape tuning 結果; PyTorch 的 **TunableOp** (`PYTORCH_TUNABLEOP_ENABLED=1`) 就是在 ROCm 上對每個實際遇到的 GEMM 形狀離線搜索 hipBLASLt algo, 把結果存成 CSV 供之後直接命中。
+
+<Callout variant="warn" title="heuristic 不是神諭">
+啟發式選擇對「常見形狀」極準, 對冷門形狀可能次優 — 這就是 cuBLASLt/hipBLASLt 開放 algo 枚舉、以及 TunableOp 這類離線 autotune 存在的原因。 如果你的 workload 形狀固定又冷門, 花十分鐘枚舉 + benchmark 所有 algo, 常能白拿 10–30%。
+</Callout>
+
+## Scheduler Decision Matrix
+
+遇到 tail effect 時, 依形狀選解法:
+
+- **CTA 數略少**: 增加 batch 維、合併多個小 op、或降低 tile size 產生更多 CTAs。
+- **M/N 小但 K 大**: Split-K 通常最簡單, 但要檢查 atomic/reduction 成本和 determinism。
+- **形狀高度不規則**: Stream-K 或 persistent work queue 比固定 grid 更穩。
+- **L2 hit rate 低**: 先試 CTA swizzle, 它通常比改 mainloop 便宜。
+- **單次 launch 太多**: grouped GEMM 或 CUDA/HIP Graphs 可能比改 GEMM kernel 本身有效。
+- **邊界 tile 慢**: 將 full tile 和 residue tile 分成兩個 kernel, 讓 hot path 無 branch。
+
+判斷標準不是哪個技巧最酷, 而是 profiler 中哪個浪費最大: achieved occupancy 低看 scheduler, DRAM bytes 高看 locality, launch gap 高看 graph/fusion。
 
 <LabBox path="kernels/05-advanced-scheduling">
-`split_k_gemm` 對一個瘦長 (小 M、N, 大 K) 矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化, 對照本章的 quantization 公式。
+`split_k_gemm` 對一個瘦長 (小 M、N, 大 K) 矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。 用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化, 對照本章的 quantization 公式。
 </LabBox>
 
 <Quiz
@@ -60,13 +111,33 @@ CTA 的 launch 順序影響哪些 tile 同時在跑, 進而影響它們共享的
       answer: 1,
       explanation: '重排 CTA→tile 對映讓相鄰執行的 CTA 共用更多 A/B 資料, 提高 L2 命中率。',
     },
+    {
+      question: 'persistent kernel 的執行形態是?',
+      options: ['每個 tile launch 一個 kernel', '只 launch 填滿機器的 CTA 數, 各 CTA 迴圈從 work queue 領工作直到做完', '把 kernel 常駐在 L2', '用 CPU 排程每個 CTA'],
+      answer: 1,
+      explanation: '固定 CTA 數 + 動態領工作, 避開 wave 邊界與重複 launch, 是 Stream-K 與現代 serving kernel 的基礎形態。',
+    },
+    {
+      question: 'cuBLAS 對每個 GEMM 呼叫如何決定用哪個 kernel?',
+      options: ['永遠用同一個通用 kernel', '從預編譯的 kernel 變體庫中, 依 (形狀, dtype, layout, 架構) 用 heuristic 挑選, 包括是否啟用 Split-K', '每次現場 JIT 編譯', '由使用者指定 tile size'],
+      answer: 1,
+      explanation: 'library 的核心資產是 kernel zoo + 選擇 heuristic; cuBLASLt/hipBLASLt 進一步把候選枚舉開放給使用者自行 benchmark。',
+    },
+    {
+      question: 'PyTorch 在 ROCm 上的 TunableOp 做的事情是?',
+      options: ['把 GEMM 改成 Triton', '對實際遇到的每個 GEMM 形狀離線枚舉並 benchmark hipBLASLt 的 algo, 記錄最快者供之後使用', '自動改寫模型', '停用 hipBLASLt'],
+      answer: 1,
+      explanation: 'TunableOp 是「heuristic 不夠準就實測」的工程化: 首次搜索、結果落盤、之後直接命中, 對固定形狀的 workload 特別有效。',
+    },
   ]}
 />
 
 <FurtherReading
   links={[
     { citation: 'M. Osama, D. Merrill, C. Cecka, M. Garland, and J. D. Owens, "Stream-K: Work-Centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU," arXiv: 2301.03598, 2023.', href: 'https://arxiv.org/abs/2301.03598' },
-    { citation: 'NVIDIA Corporation, "Efficient GEMM (tile scheduling)," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
-    { citation: 'NVIDIA Corporation, "Matrix Multiplication Background," in Deep Learning Performance Documentation, 2024.', href: 'https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html' },
+    { citation: 'NVIDIA Corporation, "Matrix Multiplication Background (wave quantization)," in Deep Learning Performance Documentation, 2024.', href: 'https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html' },
+    { citation: 'NVIDIA Corporation, "cublasLtMatmulAlgoGetHeuristic," in cuBLAS Library Documentation, 2024.', href: 'https://docs.nvidia.com/cuda/cublas/index.html#cublasltmatmulalgogetheuristic' },
+    { citation: 'Advanced Micro Devices, Inc., hipBLASLt Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/hipBLASLt/en/latest/' },
+    { citation: 'PyTorch Foundation, "TunableOp," in PyTorch Documentation, 2024.', href: 'https://pytorch.org/docs/stable/cuda.tunable.html' },
   ]}
 />

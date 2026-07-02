@@ -1,0 +1,145 @@
+# Streams、Graphs 與 Host-Device Pipeline
+
+很多 GPU 程式慢不是因為單一 kernel 不夠快, 而是整條 pipeline 沒有餵飽 GPU: CPU 每次 launch 都等一下, H2D copy 和 kernel 串行, 小 kernel 太多, 或同步點散落在 Python/C++ 邊界。 這一章把優化視角從「一個 kernel」拉到「一串 kernel 和資料搬移」。
+
+## 找出隱性同步
+
+下列操作常讓 CPU/GPU pipeline 被迫停下:
+
+- `cudaDeviceSynchronize()` / `hipDeviceSynchronize()` 放在每個 step 後面。
+- 從 GPU tensor 取 scalar 到 CPU, 例如 PyTorch 的 `.item()`。
+- Pageable host memory copy, driver 必須先 staging 到 pinned buffer。
+- 同一 default stream 混用所有工作, 讓本可重疊的 copy 和 compute 串行。
+- 計時方式錯誤, 用 CPU timer 包住非同步 launch 卻沒有 event。
+
+先用 timeline profiler 看 stream lane。 若 GPU 上出現很多空洞, 不要急著改 kernel; 先把 pipeline 接順。
+
+## Pinned Memory 與 Asynchronous Copy
+
+H2D/D2H copy 要和 kernel 重疊, host buffer 通常需要 pinned memory:
+
+```cpp
+float* h = nullptr;
+float* d = nullptr;
+cudaMallocHost(&h, bytes);     // pinned host memory
+cudaMalloc(&d, bytes);
+
+cudaStream_t stream;
+cudaStreamCreate(&stream);
+cudaMemcpyAsync(d, h, bytes, cudaMemcpyHostToDevice, stream);
+kernel<<<grid, block, 0, stream>>>(d);
+cudaMemcpyAsync(h, d, bytes, cudaMemcpyDeviceToHost, stream);
+```
+
+Pinned memory 不要無限制配置。 它會降低 OS 記憶體調度彈性, 通常用少數 staging buffers 重複利用。
+
+## Double Buffering Across Streams
+
+資料流式處理時, 用兩到三組 buffer 做 host-device pipeline:
+
+```cpp
+for (int chunk = 0; chunk < chunks; ++chunk) {
+    int s = chunk % 2;
+    cudaMemcpyAsync(d_in[s], h_in[chunk], bytes, cudaMemcpyHostToDevice, streams[s]);
+    transform<<<grid, block, 0, streams[s]>>>(d_in[s], d_out[s]);
+    cudaMemcpyAsync(h_out[chunk], d_out[s], bytes, cudaMemcpyDeviceToHost, streams[s]);
+}
+```
+
+理想情況下, chunk `i` 在 compute 時, chunk `i+1` 正在 H2D, chunk `i-1` 正在 D2H。 chunk 太小會被 launch/copy overhead 吃掉; chunk 太大又失去 overlap。
+
+## Events、Dependencies 與 Stream Semantics
+
+多 stream 不是自動並行。 你必須用 event 表示真正的依賴:
+
+```cpp
+cudaEventRecord(copy_done, copy_stream);
+cudaStreamWaitEvent(compute_stream, copy_done, 0);
+kernel<<<grid, block, 0, compute_stream>>>(d);
+```
+
+避免在 hot path 使用全 device synchronize。 需要等某一段工作時, 等 event 或同步特定 stream。
+
+## CUDA Graphs / HIP Graphs
+
+小 kernel 很多時, launch overhead 會變成瓶頸。 Graph 把固定的 launch DAG capture 起來, 後續 replay:
+
+```cpp
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+op1<<<g1, b1, 0, stream>>>(x);
+op2<<<g2, b2, 0, stream>>>(x, y);
+op3<<<g3, b3, 0, stream>>>(y);
+cudaStreamEndCapture(stream, &graph);
+cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+
+for (int iter = 0; iter < iters; ++iter) {
+    cudaGraphLaunch(exec, stream);
+}
+```
+
+Graph 適合 shape、address、控制流相對固定的迭代。 若每次 shape 都不同, 需要 graph cache 或退回一般 launch。
+
+## Kernel Fusion 與 Pipeline 的取捨
+
+Fusion 可以省掉 launch 和 global memory round trip, 但也可能:
+
+- 增加 register pressure, 降低 occupancy。
+- 把原本可重疊的 copy/compute 綁死在同一個長 kernel。
+- 讓中間結果無法重用或無法被 library kernel 接手。
+
+決策方式很直接: 若兩個 op 之間只傳一個大中間 tensor, 且後續沒有其他 consumer, fusion 通常划算。 若中間 tensor 被多處使用, 或其中一段已有高度優化 library kernel, fusion 要用 end-to-end benchmark 證明。
+
+## Multi-GPU 與 Communication Overlap
+
+多 GPU 中, kernel 優化常輸給 communication:
+
+- 使用 pinned memory、Peer-to-Peer、NVLink / xGMI 路徑, 避免多餘 host bounce。
+- 將 gradient bucket、activation shard 或 KV cache page 切成能 overlap 的粒度。
+- 讓 NCCL/RCCL communication stream 與 compute stream 用 event 建依賴。
+- 量測 exposed communication time, 不是只看 bandwidth 峰值。
+
+<Callout variant="warn" title="同步點比你想像多">
+Profiler timeline 是本章的唯一真相。 只看 kernel duration 會錯過 CPU launch gap、copy engine idle、default stream serialization、以及 framework 隱式同步。
+</Callout>
+
+<LabBox path="kernels/05-advanced-scheduling">
+執行 `stream_pipeline.cpp`: 它用 pinned host memory、兩個 streams 和 double buffering 實作 chunked H2D → kernel → D2H pipeline, 並和 single-stream 同步版本比較 end-to-end latency。 PyTorch 端的隱性同步可搭配第 17 章的 `kernels/06-pytorch-integration/profile_model.py` 追蹤。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'H2D copy 要和 kernel 重疊通常需要什麼 host memory?',
+      options: ['pageable memory', 'pinned memory', 'texture memory', 'constant memory'],
+      answer: 1,
+      explanation: 'Pinned host memory 讓 DMA copy 能非同步進行, pageable memory 常需要 staging 而造成同步或額外成本。',
+    },
+    {
+      question: '多 stream 程式應避免哪種同步方式作為 hot path 預設?',
+      options: ['event dependency', 'stream wait event', '全 device synchronize', '特定 stream synchronization'],
+      answer: 2,
+      explanation: '全 device synchronize 會把所有 stream 都停住, 破壞 overlap。',
+    },
+    {
+      question: 'CUDA Graph/HIP Graph 主要解決什麼?',
+      options: ['HBM 容量不足', '大量小 kernel 的 launch overhead 和固定 DAG replay 成本', 'bank conflict', '浮點誤差'],
+      answer: 1,
+      explanation: 'Graph capture 固定 launch DAG, 後續 replay 可減少 CPU launch overhead。',
+    },
+    {
+      question: 'Kernel fusion 一定更快嗎?',
+      options: ['一定', '不一定, 可能增加 register pressure 或破壞 overlap, 必須 end-to-end 量測', '只在 CPU 上有效', '只支援 int8'],
+      answer: 1,
+      explanation: 'Fusion 省 memory round trip 和 launch, 但也可能降低 occupancy 或妨礙 pipeline。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Asynchronous Concurrent Execution," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-concurrent-execution' },
+    { citation: 'NVIDIA Corporation, "CUDA Graphs," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cuda-graphs' },
+    { citation: 'Advanced Micro Devices, Inc., "Graph Management," in HIP Documentation, 2026', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/graph_management.html' },
+    { citation: 'NVIDIA Corporation, "Pinned Memory," in CUDA C++ Best Practices Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#pinned-memory' },
+  ]}
+/>

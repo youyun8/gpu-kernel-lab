@@ -1,12 +1,12 @@
-# Warp-level programming
+# Warp-Level Programming
 
-要把一個 warp 內 32 個值加起來, 你會怎麼做?寫進 shared memory 再 reduce?其實同一個 warp 的 threads 可以直接交換 register, 完全不碰 shared memory。這一章介紹 warp-level primitives, 以及它們在 CUDA 與 AMD 之間最容易踩的可攜性陷阱。
+要把一個 warp 內 32 個值加起來, 你會怎麼做? 寫進 shared memory 再 reduce? 其實同一個 warp 的 threads 可以直接交換 register, 完全不碰 shared memory。 這一章介紹 warp-level primitives, 以及它們在 CUDA 與 AMD 之間最容易踩的可攜性陷阱。
 
 ## 為什麼要在 warp 層級思考
 
-同一個 warp 的 threads 是 lockstep 執行的, 硬體提供指令讓它們直接互相讀 register, 省掉 shared memory 的來回與 `__syncthreads()`。這對 reduction、scan、broadcast 特別有用。
+同一個 warp 的 threads 是 lockstep 執行的, 硬體提供指令讓它們直接互相讀 register, 省掉 shared memory 的來回與 `__syncthreads()`。 這對 reduction、scan、broadcast 特別有用。
 
-## shuffle: threads 之間直接傳 register
+## Shuffle: threads 之間直接傳 register
 
 `__shfl_down_sync` 讓 lane 讀取另一個 lane 的 register 值, 是 warp reduce 的基礎:
 
@@ -16,10 +16,10 @@
 ```cpp
 // Warp-level sum reduction using shuffle. No shared memory, no __syncthreads.
 __device__ float warpReduceSum(float val) {
-  for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-    val += __shfl_down_sync(0xffffffff, val, offset);
-  }
-  return val; // lane 0 holds the full sum
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val; // lane 0 holds the full sum
 }
 ```
 
@@ -30,34 +30,91 @@ __device__ float warpReduceSum(float val) {
 // HIP: prefer __shfl_down (no explicit mask) and always use warpSize, which is
 // 64 on CDNA GPUs. Hardcoding 32 here would silently drop half the lanes.
 __device__ float warpReduceSum(float val) {
-  for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-    val += __shfl_down(val, offset);
-  }
-  return val; // lane 0 holds the full sum
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val += __shfl_down(val, offset);
+    }
+    return val; // lane 0 holds the full sum
 }
 ```
 
 </Platform>
 </PlatformTabs>
 
-## ballot / vote: warp 層級的投票
+Shuffle 家族還有幾個成員, 各有典型用途:
 
-`__ballot_sync` 讓每個 lane 提交一個 predicate, 回傳一個 bitmask 代表哪些 lane 為真;`__any_sync` / `__all_sync` 則回傳布林。常用於 stream compaction、動態決定分支、計算 active lane 數。
+- `__shfl_sync(mask, v, lane)`: 從指定 lane 讀值 — broadcast (例如把 lane 0 算好的係數發給全 warp)。
+- `__shfl_up_sync` / `__shfl_down_sync`: 往上/往下位移 — reduction 與 prefix scan。
+- `__shfl_xor_sync(mask, v, laneMask)`: 蝴蝶交換 (butterfly) — all-reduce: 做完後**每個** lane 都持有總和, 不只 lane 0, 常見於 softmax 這種每個 lane 接著都要用到總和的場景。
+
+```cpp
+// Butterfly all-reduce: after the loop every lane holds the total.
+__device__ float warpAllReduceSum(float val) {
+    for (int laneMask = warpSize / 2; laneMask > 0; laneMask >>= 1) {
+        val += __shfl_xor_sync(0xffffffff, val, laneMask);
+    }
+    return val;
+}
+```
+
+## Ballot / vote: warp 層級的投票
+
+`__ballot_sync` 讓每個 lane 提交一個 predicate, 回傳一個 bitmask 代表哪些 lane 為真;`__any_sync` / `__all_sync` 則回傳布林。 常用於 stream compaction、動態決定分支、計算 active lane 數 (`__popc(__ballot_sync(...))`)。
+
+## `_sync` 後綴與 mask 的意義
+
+Volta 之後, 同一個 warp 的 threads 可以獨立排程 (independent thread scheduling), 不再保證隱式 lockstep。`_sync` 版本的 primitive 要求你明確指定「哪些 lane 必須一起參與」, 硬體會先把它們重新收攏。 兩個紀律:
+
+- 一般情況直接用 `0xffffffff` (全 warp), 並確保呼叫點不在 divergent 分支內。
+- 不要用 `__activemask()` 的回傳值當 mask 傳回 `_sync` primitive — 它只告訴你「現在剛好誰活著」, 不構成同步保證, 是官方文件點名的反模式。
+
+## Cooperative groups: 更結構化的寫法
+
+CUDA 的 cooperative groups API 把「一群 threads」抽象成物件, 讓 warp/sub-warp 操作更明確:
+
+```cpp
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
+
+__device__ float tileReduce(float val) {
+    // A statically sized tile of 32 threads; works correctly even inside
+    // divergent code because membership is explicit.
+    auto tile = cg::tiled_partition<32>(cg::this_thread_block());
+    for (int offset = tile.size() / 2; offset > 0; offset >>= 1) {
+        val += tile.shfl_down(val, offset);
+    }
+    return val;
+}
+```
+
+HIP 也提供 cooperative groups 的對應實作。 對新程式碼, 這是比裸 intrinsic 更不容易錯的介面。
 
 ## 可攜性陷阱: 32 vs. 64
 
 這是 CUDA 程式移植到 AMD 最常爆的地方:
 
-- **warp size**: CUDA 恆為 32;AMD CDNA 為 64, RDNA 可 32 或 64。永遠用內建的 `warpSize`, 不要寫死 `32`。
-- **mask 參數**: CUDA 的 `*_sync` 版本要求明確的 32-bit mask;AMD 的對應 API 語意不同 (64 lanes 需要 64-bit 概念)。跨平台時用 portability wrapper 隔離差異。
-- **reduction 步數**: `log2(warpSize)` 而非固定 5 步。寫死步數在 wavefront=64 會少 reduce 一輪。
+- **Warp size**: CUDA 恆為 32; AMD CDNA 為 64, RDNA 可 32 或 64。 永遠用內建的 `warpSize`, 不要寫死 `32`。
+- **Mask 參數**: CUDA 的 `*_sync` 版本要求明確的 32-bit mask; AMD 的對應 API 語意不同 (64 lanes 需要 64-bit 概念, `__ballot` 回傳 64-bit)。 跨平台時用 portability wrapper 隔離差異。
+- **Reduction 步數**: `log2(warpSize)` 而非固定 5 步。 寫死步數在 wavefront=64 會少 reduce 一輪。
+- **連鎖效應**: 所有依賴 warp size 的常數都要重新推導 — 每 block 的 warp 數、shared memory 中每 warp 的 slot 數、`__ballot` 結果的型別 (`unsigned` vs. `unsigned long long`)。
 
 <Callout variant="warn" title="最常見的移植 bug">
-`for(int o = 16; o > 0; o >>= 1)` 這種寫死 16 (= 32/2) 的 warp reduce, 在 AMD 上只 reduce 了前 32 個 lane, 結果錯一半卻不會 crash。永遠寫 `warpSize / 2`。
+`for(int o = 16; o > 0; o >>= 1)` 這種寫死 16 (= 32/2) 的 warp reduce, 在 AMD 上只 reduce 了前 32 個 lane, 結果錯一半卻不會 crash。 永遠寫 `warpSize / 2`。
 </Callout>
 
+## Useful Warp Idioms
+
+Warp primitive 不只用來 sum:
+
+- **Warp prefix sum**: 用 `__shfl_up_sync` 做 inclusive/exclusive scan, 可用於 stream compaction 和 per-warp allocator。
+- **Warp compaction**: `mask = ballot(pred)`, `rank = popc(mask & lanemask_lt)`, active lanes 將資料寫到 compacted shared/global offset。
+- **Grouped atomics**: CUDA 的 `__match_any_sync` 找出同 key lanes, leader lane 做一次 atomic, 降低 histogram/embedding contention。
+- **Register transpose**: 用 `shfl_xor` 在 warp 內交換小矩陣 fragment, 避免 shared memory transpose。
+- **Sub-warp tiling**: 將一個 warp 切成 4/8/16-lane groups 處理短 row。 要用 explicit mask 或 cooperative groups 表達 group membership。
+
+當資料交換範圍超過一個 warp, 才回到 shared memory + block barrier。 這條界線很重要: shared memory 是 block-level tool, shuffle 是 warp-level tool, 用錯層級就會付不必要的同步成本。
+
 <LabBox path="kernels/04-reductions-softmax">
-`warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總, 並和 shared-memory 版本比較速度與正確性。它用 `warpSize` 而非寫死常數, 因此在 CUDA (32) 與 HIP (64) 都正確。跑跑看, 確認兩平台結果都通過 correctness check。
+`warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總, 並和 shared-memory 版本比較速度與正確性。 它用 `warpSize` 而非寫死常數, 因此在 CUDA (32) 與 HIP (64) 都正確。 跑跑看, 確認兩平台結果都通過 correctness check。
 </LabBox>
 
 <Quiz
@@ -72,13 +129,25 @@ __device__ float warpReduceSum(float val) {
       question: '把 CUDA 的 warp reduce 移到 AMD CDNA, 最需要注意?',
       options: ['FLOP 數', 'warp size 從 32 變 64, 步數與 mask 都要跟著調 (用 warpSize)', 'register 命名', 'kernel launch 語法'],
       answer: 1,
-      explanation: 'wavefront=64, 寫死 32/16 會漏掉一半 lane;應一律用 warpSize 推導。',
+      explanation: 'wavefront=64, 寫死 32/16 會漏掉一半 lane; 應一律用 warpSize 推導。',
     },
     {
       question: '__ballot_sync 回傳的是?',
       options: ['一個浮點總和', '一個 bitmask, 標示哪些 lane 的 predicate 為真', '最大值', 'warp 數量'],
       answer: 1,
       explanation: 'ballot 收集每個 lane 的 predicate 成 bitmask, 常用於 compaction 與 active lane 計數。',
+    },
+    {
+      question: '__shfl_xor_sync 做的 butterfly reduction 和 __shfl_down_sync 版本的差別是?',
+      options: ['更慢但更準', '結束時每個 lane 都持有總和 (all-reduce), 而非只有 lane 0', '只能算最大值', '不需要 mask'],
+      answer: 1,
+      explanation: 'butterfly 交換讓結果對稱地散佈到所有 lane, 適合每個 lane 後續都要用到總和的場景 (如 softmax 分母)。',
+    },
+    {
+      question: '為什麼不該把 __activemask() 的結果直接當 mask 傳給 _sync primitive?',
+      options: ['太慢', '它只回報當下剛好活躍的 lane, 不提供同步保證, 在 divergence 下行為不可靠', '型別不符', 'AMD 不支援'],
+      answer: 1,
+      explanation: 'activemask 是觀測不是約定; 正確做法是明確指定參與的 lane 集合 (通常 0xffffffff), 或用 cooperative groups。',
     },
   ]}
 />
@@ -87,6 +156,7 @@ __device__ float warpReduceSum(float val) {
   links={[
     { citation: 'NVIDIA Corporation, "Warp Shuffle Functions," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-shuffle-functions' },
     { citation: 'Y. Lin and V. Grover, "Using CUDA Warp-Level Primitives," NVIDIA Technical Blog, 2018.', href: 'https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/' },
+    { citation: 'NVIDIA Corporation, "Cooperative Groups," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cooperative-groups' },
     { citation: 'Advanced Micro Devices, Inc., HIP Programming Guide (cooperative groups and wavefront portability), 2024.', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/' },
   ]}
 />

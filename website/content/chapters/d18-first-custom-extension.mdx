@@ -1,17 +1,17 @@
-# 第一個 custom CUDA/HIP extension
+# 第一個 Custom CUDA/HIP Extension
 
-找到熱點後, 該把它換成自己的 kernel 了。好消息: PyTorch 讓你不必離開 Python 生態就能掛進 C++/CUDA kernel。壞消息: tensor 的 contiguity、dtype、device、stream 有一堆細節, 錯一個就 silent wrong 或 crash。這一章帶你把流程與陷阱一次走完。
+找到熱點後, 該把它換成自己的 kernel 了。 好消息: PyTorch 讓你不必離開 Python 生態就能掛進 C++/CUDA kernel。 壞消息: tensor 的 contiguity、dtype、device、stream 有一堆細節, 錯一個就 silent wrong 或 crash。 這一章帶你把流程與陷阱一次走完。
 
 ## 兩種載入方式
 
 **`load_inline`** 適合快速實驗: 把 C++/CUDA 原始碼字串直接編譯載入, 不必建置檔案。
 
-**`torch.utils.cpp_extension` (setup.py / `load`) ** 適合正式專案: 有獨立的 `.cpp`/`.cu` 檔、可指定 flags、可打包發佈。
+**`torch.utils.cpp_extension` (setup.py / `load`)** 適合正式專案: 有獨立的 `.cpp`/`.cu` 檔、可指定 flags、可打包發佈。
 
 ```python
 from torch.utils.cpp_extension import load
 
-# Ahead-of-file build; works for both CUDA and ROCm toolchains that PyTorch detects.
+# Ahead-of-time build; works for both CUDA and ROCm toolchains that PyTorch detects.
 ext = load(
     name="my_ops",
     sources=["my_ops.cpp", "my_ops_kernel.cu"],
@@ -19,6 +19,8 @@ ext = load(
     verbose=True,
 )
 ```
+
+ROCm 環境下同一套流程可用: PyTorch 的 cpp_extension 會自動把 `.cu` 交給 hipify 轉換再用 hipcc 編譯, 多數「不含 NVIDIA 特有 intrinsic」的 kernel 原始碼一份就能兩邊跑。
 
 ## 正確處理 tensor: 五個必檢項
 
@@ -36,29 +38,45 @@ ext = load(
 
 // Elementwise y = gelu(x). Launched on PyTorch's current stream and device.
 torch::Tensor geluForward(torch::Tensor x) {
-  TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
-  x = x.contiguous();
-  TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
-  const at::cuda::CUDAGuard guard(x.device());
+    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+    x = x.contiguous();
+    TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
+    const at::cuda::CUDAGuard guard(x.device());
 
-  auto y = torch::empty_like(x);
-  const int n = x.numel();
-  constexpr int kBlock = 256;
-  const int grid = (n + kBlock - 1) / kBlock;
-  auto stream = at::cuda::getCurrentCUDAStream();
-  geluKernel<<<grid, kBlock, 0, stream>>>(
-      x.data_ptr<float>(), y.data_ptr<float>(), n);
-  return y;
+    auto y = torch::empty_like(x);
+    const int n = x.numel();
+    constexpr int kBlock = 256;
+    const int grid = (n + kBlock - 1) / kBlock;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    geluKernel<<<grid, kBlock, 0, stream>>>(
+        x.data_ptr<float>(), y.data_ptr<float>(), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();  // surface launch errors immediately
+    return y;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("gelu_forward", &geluForward, "GELU forward (CUDA)");
+    m.def("gelu_forward", &geluForward, "GELU forward (CUDA)");
 }
 ```
 
-## 支援 backward: autograd Function
+## 支援多種 Dtype: AT_DISPATCH
 
-要讓 custom op 能被訓練, 必須提供 backward。用 `torch.autograd.Function` 包住 forward/backward:
+寫死 `float` 的 kernel 遇到 half/bf16 模型就得 fallback。 PyTorch 的 dispatch macro 讓同一份 template kernel 服務多種 dtype:
+
+```cpp
+// One templated kernel, instantiated per dtype at compile time.
+AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
+    x.scalar_type(), "gelu_forward", [&] {
+        geluKernel<scalar_t><<<grid, kBlock, 0, stream>>>(
+            x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), n);
+    });
+```
+
+半精度的計算慣例: 以 half 讀寫、內部升到 float 累加 (`static_cast<float>`), 兼顧頻寬與精度 — 這也是大多數官方 kernel 的做法。
+
+## 支援 Backward: Autograd Function
+
+要讓 custom op 能被訓練, 必須提供 backward。 用 `torch.autograd.Function` 包住 forward/backward:
 
 ```python
 class GeluFn(torch.autograd.Function):
@@ -77,10 +95,30 @@ class GeluFn(torch.autograd.Function):
 # torch.autograd.gradcheck(GeluFn.apply, (x.double().requires_grad_(),))
 ```
 
-`gradcheck` 用數值微分驗證你的 backward — custom autograd 最容易錯的地方, 務必跑。
+`gradcheck` 用數值微分驗證你的 backward — custom autograd 最容易錯的地方, 務必跑。 注意它要求 double precision 輸入 (數值微分在 fp32 下誤差太大), 所以 kernel 若只支援 fp32, 就先用上一節的 dispatch 補上 double, 或對小輸入用 CPU reference 交叉驗證。
+
+## Debug 心法
+
+- **結果錯但不 crash**: 九成是 contiguity 或 dtype — 用非連續輸入 (`x.t()`) 和各 dtype 寫測試逐一排除。
+- **偶發 crash 或錯值**: 常是 stream 問題 (沒用 current stream) 或缺同步;`CUDA_LAUNCH_BLOCKING=1` 讓錯誤在發生點立刻浮現。
+- **越界**: `compute-sanitizer python test.py` 直接指出出錯的 kernel 與位址。
+- **對照組**: 每個 custom op 都該有一個「純 PyTorch 慢速參考實作」, 測試時比對 — 這是你未來改 kernel 時的安全網。
+
+## Extension Hardening Checklist
+
+把 demo 變成可維護 extension 時, 補齊這些:
+
+- **Shape checks**: 空 tensor、非整除長度、極大 tensor、broadcast bias、negative stride 都要有明確行為。
+- **Dtype dispatch**: fp32、fp16、bf16 至少要決定支援或報錯; 不要 silent cast。
+- **Autocast policy**: 訓練中收到 half/bf16 時, 是內部升 fp32 還是保持低精度?
+- **Workspace**: 需要 scratch 時用 PyTorch allocator 建 tensor, 不要 raw `cudaMalloc` 放在 hot path。
+- **Stream capture**: 不做 host sync、不配置 capture-unsafe memory, 才能和 CUDA Graph/`torch.compile(reduce-overhead)` 共存。
+- **Packaging**: 編譯 flags、arch list、ROCm hipify、ABI 與 PyTorch 版本要記錄在 README 或 setup config。
+
+這些看似工程雜事, 但它們決定 custom kernel 是實驗腳本還是能進訓練/推論服務的元件。
 
 <LabBox path="kernels/06-pytorch-integration/cpp_extension">
-`cpp_extension/` 目錄有完整的 GELU forward+backward extension (`.cpp` + `.cu` + `setup.py` + 測試), 測試會對 `torch.nn.functional.gelu` 做正確性比對並跑 `gradcheck`。HIP 環境下同一份 `.cu` 由 PyTorch 的 hipify 流程處理。跑 `python test_gelu.py` 確認 forward 與 backward 都通過。
+`cpp_extension/` 目錄有完整的 GELU forward+backward extension (`.cpp` + `.cu` + `setup.py` + 測試), 測試會對 `torch.nn.functional.gelu` 做正確性比對並跑 `gradcheck`。 HIP 環境下同一份 `.cu` 由 PyTorch 的 hipify 流程處理。 跑 `python test_gelu.py` 確認 forward 與 backward 都通過。
 </LabBox>
 
 <Quiz
@@ -102,6 +140,24 @@ class GeluFn(torch.autograd.Function):
       options: ['檢查 forward 速度', '用數值微分驗證 custom backward 的正確性', '測 occupancy', '檢查記憶體洩漏'],
       answer: 1,
       explanation: 'gradcheck 比對解析梯度與數值梯度, 是驗證 autograd Function 的標準做法。',
+    },
+    {
+      question: 'AT_DISPATCH_FLOATING_TYPES 系列 macro 的作用是?',
+      options: ['自動求導', '依 tensor 的 runtime dtype 選擇對應的 template 實例, 一份 kernel 服務多 dtype', '把 kernel 編譯成 PTX', '檢查 contiguity'],
+      answer: 1,
+      explanation: 'dispatch macro 在編譯期為每種 dtype 實例化 kernel, 執行期依 scalar_type 分發 — 免去手寫 switch。',
+    },
+    {
+      question: 'half/bf16 kernel 的常見計算慣例是?',
+      options: ['全程用 half 累加', '以 half 讀寫節省頻寬, 內部升到 float 累加保精度', '先轉成 double', '禁止用於 reduction'],
+      answer: 1,
+      explanation: '低精度存取享受頻寬紅利, float 累加避免長 reduction 的精度崩壞, 是官方 kernel 的標準做法。',
+    },
+    {
+      question: 'custom op 結果錯誤但不 crash, 最該先懷疑?',
+      options: ['GPU 壞了', 'contiguity 或 dtype 假設被違反 (如輸入是轉置 view 或 half)', '編譯器 bug', 'Python 版本'],
+      answer: 1,
+      explanation: '線性索引 + 錯誤的佈局/型別假設會安靜地算錯; 用非連續與多 dtype 的測試輸入逐一排除。',
     },
   ]}
 />

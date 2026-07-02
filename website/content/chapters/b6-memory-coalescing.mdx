@@ -1,26 +1,26 @@
-# Memory coalescing
+# Memory Coalescing
 
-為什麼同一個 vector add, 只是把索引從 `i` 改成 `i * 2`, achieved bandwidth 就掉了一半?程式邏輯幾乎沒變, 搬的資料量看起來也一樣。答案藏在 global memory 的存取粒度裡: GPU 不是一次搬一個 float, 而是一次搬一整段 memory。
+為什麼同一個 vector add, 只是把索引從 `i` 改成 `i * 2`, achieved bandwidth 就掉了一半? 程式邏輯幾乎沒變, 搬的資料量看起來也一樣。 答案藏在 global memory 的存取粒度裡: GPU 不是一次搬一個 float, 而是一次搬一整段 memory。
 
 <Callout variant="insight" title="先給直覺">
-把 global memory 想成一箱一箱出貨的倉庫, 每箱固定 128 bytes。你要的東西如果剛好塞在同一箱, 一次就拿完;如果分散在 32 箱, 你得叫 32 台車, 而且每台車大部分空間都載空氣。memory coalescing 就是「讓一個 warp 的 32 個 threads 盡量只叫最少的車」。
+把 global memory 想成一箱一箱出貨的倉庫, 每箱固定 128 bytes。 你要的東西如果剛好塞在同一箱, 一次就拿完; 如果分散在 32 箱, 你得叫 32 台車, 而且每台車大部分空間都載空氣。 memory coalescing 就是「讓一個 warp 的 32 個 threads 盡量只叫最少的車」。
 </Callout>
 
 ## 硬體怎麼看一個 warp 的存取
 
-當一個 warp (NVIDIA 32 threads, AMD wavefront 64 threads) 執行一條 load 指令時, memory subsystem 會收集這 32/64 個 threads 想要的位址, 然後把它們切成固定大小的 memory transactions (常見是 32 或 128 bytes 的 segment)。關鍵指標很簡單:
+當一個 warp (NVIDIA 32 threads, AMD wavefront 64 threads) 執行一條 load 指令時, memory subsystem 會收集這 32/64 個 threads 想要的位址, 然後把它們切成固定大小的 memory transactions (常見是 32 或 128 bytes 的 segment)。 關鍵指標很簡單:
 
 $$
 \text{efficiency} = \frac{\text{useful bytes requested}}{\text{bytes actually moved}}
 $$
 
-如果一個 warp 的 32 個 threads 存取連續且對齊的 32 個 float (128 bytes), 硬體只要一次 transaction 就能滿足, efficiency = 100%。一旦 threads 之間有 stride, touched segments 變多, 搬進來卻沒被用到的 bytes 就是白白浪費的 bandwidth。
+如果一個 warp 的 32 個 threads 存取連續且對齊的 32 個 float (128 bytes), 硬體只要一次 transaction 就能滿足, efficiency = 100%。 一旦 threads 之間有 stride, touched segments 變多, 搬進來卻沒被用到的 bytes 就是白白浪費的 bandwidth。
 
 下面這個互動元件讓你調整 stride 與 offset, 直接看 32 個 threads 如何映射到 transactions:
 
 <MemoryCoalescingVisualizer />
 
-把 stride 從 1 拉到 2, 你會看到 transaction 數量翻倍、efficiency 掉到 50%。這正是 AoS (array of structs) 常見的陷阱。
+把 stride 從 1 拉到 2, 你會看到 transaction 數量翻倍、efficiency 掉到 50%。 這正是 AoS (array of structs) 常見的陷阱。
 
 ## AoS vs. SoA: 同一份資料, 兩種下場
 
@@ -33,14 +33,14 @@ $$
 // AoS: x is interleaved with y, z. A warp reading .x has stride 3 -> uncoalesced.
 struct Particle { float x, y, z; };
 __global__ void scaleXAos(Particle* p, float k, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) p[i].x *= k; // threads touch bytes 0, 12, 24, ... : 3x traffic
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) p[i].x *= k; // threads touch bytes 0, 12, 24, ... : 3x traffic
 }
 
 // SoA: all x values are contiguous. A warp reads 32 consecutive floats -> coalesced.
 __global__ void scaleXSoa(float* x, float k, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) x[i] *= k; // threads touch bytes 0, 4, 8, ... : 1 transaction
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= k; // threads touch bytes 0, 4, 8, ... : 1 transaction
 }
 ```
 
@@ -51,37 +51,63 @@ __global__ void scaleXSoa(float* x, float k, int n) {
 // Identical logic under HIP; a wavefront is 64 lanes on CDNA GPUs.
 struct Particle { float x, y, z; };
 __global__ void scaleXAos(Particle* p, float k, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) p[i].x *= k; // strided access, poor global efficiency
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) p[i].x *= k; // strided access, poor global efficiency
 }
 
 __global__ void scaleXSoa(float* x, float k, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) x[i] *= k; // contiguous, coalesced
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= k; // contiguous, coalesced
 }
 ```
 
 </Platform>
 </PlatformTabs>
 
-SoA 讓「同一個欄位跨 element」變成連續存取, 這正是 warp 想要的排列方式。改資料結構往往比改 kernel 邏輯更有效。
+SoA 讓「同一個欄位跨 element」變成連續存取, 這正是 warp 想要的排列方式。 改資料結構往往比改 kernel 邏輯更有效。
+
+折衷方案也存在: 如果 kernel 總是同時用到 `x, y, z`, 那 AoS 反而只要一次寬存取; 或用 AoSoA (把 SoA 以 warp 大小分塊交錯) 兼顧兩種模式。 原則是: **依照「warp 在同一個 cycle 想要什麼」來排資料**, 而不是依照物件導向的直覺。
 
 ## Misaligned access 的代價
 
-就算 stride = 1, 如果起始位址沒對齊 segment 邊界, 一個 warp 的存取會跨兩個 segment, 需要 2 次 transaction 而不是 1 次。對 memory-bound kernel 來說, 這等於憑空多付近一倍的 bandwidth。實務上: 讓 allocation 對齊、避免對 buffer 做奇數 byte 的 offset、必要時用 padding 把每 row 對齊。
+就算 stride = 1, 如果起始位址沒對齊 segment 邊界, 一個 warp 的存取會跨兩個 segment, 需要 2 次 transaction 而不是 1 次。 對 memory-bound kernel 來說, 這等於憑空多付近一倍的 bandwidth。 實務上: 讓 allocation 對齊、避免對 buffer 做奇數 byte 的 offset、必要時用 padding 把每 row 對齊。
+
+`cudaMalloc` / `hipMalloc` 回傳的指標本身保證至少 256-byte 對齊; misalignment 幾乎都來自你自己的 offset 運算 (例如 `ptr + 3`、對 2D 陣列用未 padding 的 row width)。 對 2D 資料用 `cudaMallocPitch` 或自行把 row stride 補到 128 bytes 的倍數, 可以讓每一 row 的開頭都對齊。
+
+## 讀和寫都要 coalesced
+
+Coalescing 的規則對 load 與 store 同樣成立, 但兩者的病徵不同: uncoalesced read 會多搬進沒用的 bytes; uncoalesced write 更糟, 部分寫入一個 segment 可能觸發 read-modify-write。 經典案例是 matrix transpose — 讀 row-major 是 coalesced 的, 寫 column-major 天生是 strided 的, 這正是第 7 章要用 shared memory 解決的問題。
+
+在 profiler 裡驗證: Nsight Compute 看 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld` 相對理想值的比例 (或 Memory Workload Analysis 的 "sectors per request"); omniperf 看 memory chart 的 coalescing / L1-L2 request 放大倍率。 理想的 fp32 連續存取, 每個 warp request 對應 4 個 32-byte sector; 數字更高就是 access pattern 有問題。
 
 <Callout variant="warn" title="常見誤解">
-「反正資料都要搬, coalesced 與否只差常數。」錯。對 bandwidth-bound kernel, efficiency 直接乘在你的有效頻寬上: efficiency 50% 代表你的 kernel 上限就只有硬體頻寬的一半, 再怎麼調 occupancy 也追不回來。
+「反正資料都要搬, coalesced 與否只差常數。」錯。 對 bandwidth-bound kernel, efficiency 直接乘在你的有效頻寬上: efficiency 50% 代表你的 kernel 上限就只有硬體頻寬的一半, 再怎麼調 occupancy 也追不回來。
 </Callout>
 
+## Cache 能救回多少?
+
+L1/L2 會緩解部分懲罰 — 第一個 warp 搬進來的 segment, 相鄰 warp 若剛好要用就是 cache hit。 所以「stride 小」的 uncoalesced 存取實測可能沒有理論那麼慘。 但別把這當藉口: cache 容量有限, 資料量一大 (超過 L2) 或存取分散, 懲罰就會全額浮現。 用大 buffer 量測才反映真實情況 — 這也是 lab 的 `stride_bandwidth` 用大陣列的原因。
+
+## Advanced Access Patterns
+
+幾個常見場景的處理方式:
+
+- **AoSoA**: 將資料切成 warp/wavefront 大小的小 SoA chunk, chunk 之間仍保留 object grouping。 粒子模擬和 graph feature 常用這個折衷。
+- **Vectorized loads**: 連續、對齊且每 thread 有多元素工作時, 用 `float4` / `int4` 降低指令數。 尾端用 scalar cleanup。
+- **Cooperative loading**: 一個 block 協力把不規則 global 資料整理成 shared memory 中的規則 tile, 之後的 compute 階段就能 coalesced 或 conflict-free。
+- **Gather vs. scatter**: 如果只能讓讀或寫 coalesced, 優先讓資料量較大、重用較低的一側 coalesced。 scatter 寫入若還有 atomic, 通常要先做 warp/block aggregation。
+- **Row padding**: 2D tensor 的 leading dimension 補到 128 bytes 或 cache line 的倍數, 避免每 row 開頭逐漸漂移造成 misalignment。
+
+簡單例子: embedding lookup 是 gather, index 通常不連續。 若同一 batch 內 index 可排序或按 page 分桶, L2 hit rate 會提高; 若輸出端是按原順序, 再用 inverse permutation 還原。 這是用一點額外 bookkeeping 換 coalescing/locality。
+
 <LabBox path="kernels/02-memory">
-編譯 `stride_bandwidth` 這個 benchmark, 它會對同一份 buffer 用 stride = 1, 2, 4, 8, 16, 32 各測一次 achieved bandwidth, 印出 GB/s 與 % of peak。你應該會看到一條隨 stride 遞減的曲線, 和上面的 visualizer 對得起來。接著把 profiler 打開, 對照 `l1tex__t_sectors` 或 rocprof 的 memory efficiency counter。
+編譯 `stride_bandwidth` 這個 benchmark, 它會對同一份 buffer 用 stride = 1, 2, 4, 8, 16, 32 各測一次 achieved bandwidth, 印出 GB/s 與 % of peak。 你應該會看到一條隨 stride 遞減的曲線, 和上面的 visualizer 對得起來。 接著把 profiler 打開, 對照 `l1tex__t_sectors` 或 rocprof 的 memory efficiency counter。
 </LabBox>
 
 <Quiz
   questions={[
     {
-      question: '一個 warp (32 threads) 存取 32 個 float, stride = 1 且對齊 128-byte 邊界。需要幾次 128-byte transaction?',
+      question: '一個 warp (32 threads) 存取 32 個 float, stride = 1 且對齊 128-byte 邊界。 需要幾次 128-byte transaction?',
       options: ['1 次', '2 次', '32 次', '取決於 occupancy'],
       answer: 0,
       explanation: '32 個 float = 128 bytes, 剛好填滿一個 segment, 一次 transaction 就完成, efficiency 100%。',
@@ -103,6 +129,18 @@ SoA 讓「同一個欄位跨 element」變成連續存取, 這正是 warp 想要
       options: ['因為 warp 太大', '因為存取跨越了兩個 segment 邊界', '因為 register 不夠', '因為 shared memory bank conflict'],
       answer: 1,
       explanation: '起始位址沒對齊時, 連續的 128 bytes 會落在兩個 128-byte segment 上, 硬體必須各搬一次。',
+    },
+    {
+      question: '什麼情況下 AoS 反而是合理的佈局?',
+      options: ['永遠不合理', 'kernel 每次都同時使用該 struct 的所有欄位', '只在 CPU 上', '資料小於 L2 時'],
+      answer: 1,
+      explanation: '同時用到所有欄位時, AoS 的存取本身就是連續的; 佈局的原則是配合 warp 同一時刻要的資料, 不是教條。',
+    },
+    {
+      question: '小 stride 的 uncoalesced 存取實測懲罰常低於理論值, 原因是?',
+      options: ['profiler 量不準', '相鄰 warp 命中 L1/L2 中已搬進的 segment, cache 吸收了部分多餘 traffic', '硬體自動重排 threads', '編譯器修好了'],
+      answer: 1,
+      explanation: 'cache 讓被「浪費」搬入的 bytes 有機會被之後的 warp 用到; 但資料量超過 cache 後懲罰全額回歸。',
     },
   ]}
 />

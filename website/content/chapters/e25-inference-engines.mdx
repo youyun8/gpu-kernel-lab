@@ -1,0 +1,113 @@
+# 推論引擎的 Kernel 棧: vLLM、SGLang 與 TensorRT-LLM
+
+當你在生產環境 serve 一個 LLM, 底下跑的是一整套精心組裝的 kernel。 這一章拉高視角, 看 vLLM、SGLang、TensorRT-LLM 這三個主流推論引擎如何把前面所有 library — cuBLASLt/CUTLASS/hipBLASLt (第 13、15、22、23 章)、FlashAttention/FlashInfer/PagedAttention (第 24 章)、Triton (第 20 章)、AITER (第 23 章) — 編排成一個高吞吐系統。 這是本站的收束: 你學的每個 kernel 技巧, 最終都在這裡發揮作用。
+
+## 為什麼 LLM 推論是特殊的 Kernel 問題
+
+LLM 推論分成兩個 phase, 效能特性截然不同:
+
+- **Prefill** (處理 prompt): 一次算很多 token, 是大 GEMM 與大 attention, **compute-bound** — 吃 Tensor Core/MFMA、大 tile、CUTLASS/CK (第 12、22、23 章)。
+- **Decode** (逐 token 生成): 每步只算一個 token, GEMM 退化成 GEMV、attention 讀整個 KV cache, **memory-bound** — 瓶頸在 KV cache 搬運與 weight 讀取 (第 5、24 章)。
+
+一個 serving 系統必須同時把兩種 phase 塞滿 GPU, 這催生了 continuous batching (動態把新 request 併入正在跑的 batch)、chunked prefill (把長 prompt 切塊與 decode 交錯) 等排程策略 — 而這些排程直接決定了底層 kernel 收到什麼形狀 (第 13 章的 wave quantization/Stream-K 在這裡變得極其實際)。
+
+## vLLM: PagedAttention 起家的通用引擎
+
+vLLM 的招牌是 **PagedAttention** (第 24 章) 帶來的高效 KV cache 管理與高吞吐 continuous batching。 它的 kernel 棧是「按場景挑最好的」:
+
+- Attention: FlashAttention、FlashInfer、或自家 PagedAttention kernel, 依 GPU 與 config 選擇。
+- GEMM: cuBLASLt / CUTLASS (量化用), ROCm 上走 hipBLASLt / **AITER** (第 23 章)。
+- 量化 (GPTQ/AWQ/fp8): 大量 CUTLASS 與 Triton kernel; fp8 KV cache 減半 decode 的 memory traffic。
+- 雜項 (RMSNorm、RoPE、sampling): Triton 或手寫 CUDA/HIP fused kernel。
+
+vLLM 的可攜性策略讓它同時支援 NVIDIA、AMD (透過 AITER/CK)、甚至其他加速器 — 換平台時換的是底層 kernel provider, 上層排程不變。
+
+## SGLang: RadixAttention 與 Kernel 選型
+
+SGLang 以 **RadixAttention** 聞名 — 用 radix tree 自動在 request 之間共享 KV cache 前綴 (system prompt、few-shot 範例), 大幅提高快取命中。 在 kernel 層, SGLang 深度整合 **FlashInfer** 作為 attention 後端 (第 24 章), GEMM/量化走 CUTLASS/cuBLASLt, ROCm 上同樣接 AITER。 它和 vLLM 的差異更多在排程與 cache 策略, kernel 棧的組成高度重疊 — 這說明底層 kernel 已經是共享的公共財, 競爭在如何編排它們。
+
+## TensorRT-LLM: NVIDIA 的編譯式引擎
+
+TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 它以 TensorRT 為基礎, 內部大量使用 **CUTLASS** 生成的 GEMM/量化 kernel 與手寫的 fused attention (含 in-flight batching, 即 vLLM 的 continuous batching)。 編譯式的好處是能做跨層 fusion、精細的 kernel 選擇與 plugin; 代價是彈性較低 (改模型要重編)、只綁 NVIDIA。 它代表「為特定硬體壓到極致」的一端, 與 vLLM/SGLang「可攜 + 靈活」的一端形成光譜。
+
+## 一張圖看懂 Kernel 棧的分工
+
+| 元件 | prefill | decode | 主要 kernel 來源 |
+| --- | --- | --- | --- |
+| Attention | 大 tile, compute-bound | 讀 KV cache, memory-bound | FlashAttention / FlashInfer / PagedAttention / AITER |
+| Linear (QKV, MLP) | 大 GEMM | GEMV / 小 GEMM | cuBLASLt / CUTLASS / hipBLASLt |
+| 量化 GEMM | fp8/int8/int4 | 同左, 省 memory | CUTLASS / Triton / AITER / Marlin |
+| Norm / RoPE / activation | fused | fused | Triton / 手寫 CUDA-HIP |
+| Sampling | — | argmax / top-p | Triton / 手寫 |
+
+<Callout variant="insight" title="本站的收束">
+從第 1 章的 SIMT, 到這裡的推論引擎, 是同一條線: 每個 GEMM tile、每個 online softmax、每次 coalescing 的斤斤計較, 最終都變成「每秒多服務幾個 token、每張卡多省幾成成本」。 你現在有能力打開任何一個引擎的 profiler, 認出裡面每個 kernel、判斷它為什麼快或慢、以及該調哪裡。 這就是這趟旅程的終點, 也是你真正工作的起點。
+</Callout>
+
+## Serving Tuning Levers
+
+推論引擎調參其實是在改 kernel shape 和 memory traffic:
+
+- **Max batch / max tokens**: 決定 GEMM tile 數與 attention 工作量, 太小填不滿 GPU, 太大增加排隊延遲。
+- **Chunked prefill size**: 平衡 prefill compute-bound 大 kernel 與 decode memory-bound 小步驟的 overlap。
+- **KV cache block size**: 影響 fragmentation、block table lookup、coalescing 和 page locality。
+- **KV dtype**: fp16/bf16 → fp8/int8 可降 decode bandwidth, 但要看 dequant cost 和精度。
+- **Quantized weights**: int4/int8/fp8 降 memory, 但 GEMM kernel 可能受 unpack/scale 限制。
+- **Speculative decoding**: 增加 draft/verify kernel, 用更多 compute 換更少主模型 decode steps。
+- **Backend flags**: FlashInfer、AITER、Triton、CUTLASS provider 的開關會直接換 kernel 棧。
+
+最佳配置取決於 workload: 短 prompt 高 QPS、長 context、batch offline decoding、低延遲互動式服務, 四者的最優 kernel 組合可能不同。 trace + token-level latency histogram 比單一 tokens/s 更有診斷價值。
+
+<LabBox path="kernels/06-pytorch-integration">
+沒有內建的 serving lab (需要完整模型與權重), 但你可以做一次「考古」: 裝一個 vLLM 或 SGLang, 對一次 generate 用 `torch.profiler` 或 Nsight Systems 抓 timeline, 試著認出裡面的 attention kernel、GEMM、norm/RoPE fused kernel, 並區分哪些屬於 prefill、哪些屬於 decode。 把你在第 17 章學的 trace 分析用在真實的推論引擎上。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'LLM 推論的 prefill 與 decode 兩個 phase 的效能特性是?',
+      options: ['兩者都是 compute-bound', 'prefill 是 compute-bound 的大 GEMM/attention, decode 是 memory-bound 的 GEMV + KV cache 讀取', '兩者都是 memory-bound', 'decode 比 prefill 更吃算力'],
+      answer: 1,
+      explanation: 'prefill 一次算多 token (compute-bound), decode 每步一個 token 卻要讀整個 KV cache 與 weight (memory-bound)。',
+    },
+    {
+      question: 'continuous batching (in-flight batching) 的作用是?',
+      options: ['提高數值精度', '動態把新 request 併入正在跑的 batch, 提高 GPU 利用率; 它也決定底層 kernel 收到的形狀', '減少模型大小', '取代 attention'],
+      answer: 1,
+      explanation: '動態 batching 讓 GPU 不空等, 但也讓 GEMM/attention 形狀多變, 使第 13 章的排程技巧變得實際。',
+    },
+    {
+      question: 'vLLM 的招牌技術是?',
+      options: ['RadixAttention', 'PagedAttention 帶來的高效 KV cache 管理與 continuous batching', 'TensorRT 編譯', 'MFMA'],
+      answer: 1,
+      explanation: 'PagedAttention (第 24 章) 是 vLLM 的核心, 底層 kernel 則按場景挑 FlashAttention/FlashInfer/AITER 等。',
+    },
+    {
+      question: 'TensorRT-LLM 相對 vLLM/SGLang 的取捨是?',
+      options: ['更慢但更彈性', '編譯式引擎可做極致的跨層 fusion 與 kernel 選擇, 代價是彈性低且只綁 NVIDIA', '不支援量化', '不需要 GPU'],
+      answer: 1,
+      explanation: '編譯換來 per-硬體的極致優化, 但改模型要重編、且不可攜; vLLM/SGLang 換來靈活與跨平台。',
+    },
+    {
+      question: 'vLLM 與 SGLang 的底層 kernel 棧高度重疊, 說明了什麼?',
+      options: ['其中一個抄襲另一個', 'attention/GEMM/量化 kernel 已成共享公共財, 引擎的差異化主要在排程與 cache 策略', 'kernel 不重要', '兩者其實是同一個專案'],
+      answer: 1,
+      explanation: 'FlashInfer、CUTLASS、AITER 等被多個引擎共用; 競爭轉移到 continuous batching、prefix cache 等系統層。',
+    },
+    {
+      question: '在 ROCm (MI300X) 上跑 vLLM/SGLang, attention 與量化 GEMM 常來自?',
+      options: ['cuBLAS', 'AITER / Composable Kernel (第 23 章)', 'TensorRT', 'cuDNN'],
+      answer: 1,
+      explanation: 'AMD 側由 AITER 與 CK 提供對應 kernel; serving 框架多半用一個開關 (如 VLLM_ROCM_USE_AITER) 接入。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention," in Proc. SOSP, 2023.', href: 'https://arxiv.org/abs/2309.06180' },
+    { citation: 'L. Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs," arXiv: 2312.07104, 2024.', href: 'https://arxiv.org/abs/2312.07104' },
+    { citation: 'NVIDIA Corporation, TensorRT-LLM Documentation, 2024.', href: 'https://nvidia.github.io/TensorRT-LLM/' },
+    { citation: 'vLLM Project, vLLM Documentation, 2024.', href: 'https://docs.vllm.ai/en/latest/' },
+  ]}
+/>

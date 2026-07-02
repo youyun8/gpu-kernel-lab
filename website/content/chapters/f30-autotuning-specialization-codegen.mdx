@@ -1,0 +1,143 @@
+# Autotuning、Specialization 與 Code Generation
+
+高效 kernel 很少只有一組最佳參數。 tile size、num warps、pipeline stages、vector width、unroll factor、shared memory layout、split-K、epilogue fusion 都會隨 GPU、dtype、shape 改變。 Autotuning 的目的不是追求漂亮抽象, 而是把這些選擇系統化。
+
+## 參數空間
+
+一個 GEMM 或 softmax kernel 可能有這些 knobs:
+
+- block tile: `BM × BN × BK`。
+- warp tile 和 thread tile。
+- `num_warps` / waves per workgroup。
+- `num_stages` 或 async pipeline depth。
+- vectorized load width, 例如 1、2、4、8 elements。
+- swizzle / padding / shared memory layout。
+- split-K、stream-K、CTA swizzle。
+- math mode, 例如 fp32、tf32、fp16、bf16、fp8。
+- epilogue fusion 選項。
+
+不要盲目全排列。 先用硬體限制剪枝: shared memory 上限、register 上限、alignment、MMA instruction shape、occupancy 下限。
+
+## Template Specialization
+
+C++ template 讓編譯器看到常數, 才能 unroll、消除 branch、分配靜態 shared memory:
+
+```cpp
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int STAGES>
+__global__ void matmulKernel(const half* A, const half* B, float* C,
+                             int m, int n, int k) {
+    static_assert(BLOCK_K % 16 == 0);
+    __shared__ half smem[STAGES][BLOCK_M * BLOCK_K + BLOCK_K * BLOCK_N];
+    // ...
+}
+```
+
+Runtime `if` 適合功能選擇; performance-critical tile shape 通常要 compile-time specialization。
+
+## Search Strategy
+
+實務 autotuner 需要控制時間:
+
+- **Rule-based seed**: 先放入已知可行的幾組 config。
+- **Constraint pruning**: 編譯前剔除超出 shared/register/alignment 的 config。
+- **Benchmark budget**: 每個 shape 只測有限 top candidates。
+- **Cache result**: key 包含 GPU 型號、driver/runtime、dtype、shape、layout、epilogue。
+- **Fallback**: tuner 失敗或新 shape 未命中時, 用 library 或保守 kernel。
+
+測量時要 warm up、固定 clock 或至少記錄環境、使用 GPU events、並檢查 correctness。 Autotuner 找到「最快錯誤答案」是常見事故。
+
+## Cost Model 與 Heuristics
+
+完整 benchmark 最準但昂貴。 Cost model 可先排序候選:
+
+- Roofline 預估 bandwidth-bound 或 compute-bound。
+- Global memory transaction 數量。
+- Shared memory bank conflict 風險。
+- Register pressure 和 occupancy。
+- MMA utilization。
+- Tail effect: tile 數是否能填滿 SM/CU。
+
+Library heuristic 也是 cost model。 cuBLASLt、hipBLASLt、CUTLASS profiler、CK profiler 都是在幫你搜尋和快取這個空間。
+
+## Code Generation 的時機
+
+當 template 組合爆炸或需要 Python shape metadata 時, codegen 會比手寫乾淨:
+
+- 產生多個 C++ template instantiation。
+- 產生 Triton `@triton.heuristics` / `@triton.jit` kernel variants。
+- 產生 dispatch table。
+- 根據 dtype/layout/shape 產生 epilogue。
+
+Codegen 的風險是可讀性和 build time。 保留一個最小 reference kernel, 並讓 generated code 可重建、可 diff、可單測。
+
+## Dispatch Table
+
+Production 系統常見結構:
+
+```cpp
+struct KernelKey {
+    int sm;
+    int dtype;
+    int m_bucket, n_bucket, k_bucket;
+    int layout;
+    int epilogue;
+};
+
+KernelFn pick_kernel(KernelKey key) {
+    if (auto* tuned = lookup_tuned_result(key)) return tuned->fn;
+    if (is_supported_by_library(key)) return library_fn;
+    return fallback_fn;
+}
+```
+
+Bucket 要小心: shape 差一點點可能讓 tail effect 完全不同。 小矩陣和 skinny 矩陣尤其不適合粗 bucket。
+
+## Autotuning 的陷阱
+
+- 只用單一 input distribution, 忽略 cache warmness 或 data-dependent branch。
+- benchmark batch 太短, 量到 clock ramp 或 launch overhead。
+- 沒把 correctness 納入每次 measurement。
+- 在開發機調到最快, 生產 GPU/driver 版本不同就退化。
+- tune cache 沒有版本化, kernel 改了卻沿用舊結果。
+
+<LabBox path="kernels/03-gemm">
+用 `sgemm_step2_register_tiling.cpp` 做小型 autotuner: 掃 `TM/TN`、block size、vector width。 每個 config 先做 correctness check, 再記錄 GFLOP/s、register count 和 achieved occupancy。 把最快 config 依矩陣 shape 寫入 JSON dispatch table。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼 tile size 常做成 compile-time template parameter?',
+      options: ['讓編譯器 unroll、配置靜態 shared memory 並消除分支', '讓 kernel 只能跑一個 GPU', '避免所有測試', '因為 runtime int 不能相加'],
+      answer: 0,
+      explanation: '性能關鍵常數若在編譯期可見, 編譯器才能產生專門化程式碼。',
+    },
+    {
+      question: 'Autotuner cache key 不應漏掉什麼?',
+      options: ['GPU 型號和 shape/dtype/layout 等會影響最佳 config 的資訊', 'README 字數', 'CPU 使用者名稱', '螢幕解析度'],
+      answer: 0,
+      explanation: '最佳 config 會隨硬體、dtype、shape、layout、epilogue 和軟體版本改變。',
+    },
+    {
+      question: 'Autotuning measurement 每次都應包含什麼?',
+      options: ['Correctness check', '隨機刪除 config', '只跑一次', 'CPU printf'],
+      answer: 0,
+      explanation: '最快但錯誤的 config 沒有價值, correctness 必須是 tuner loop 的一部分。',
+    },
+    {
+      question: 'Cost model 的用途是?',
+      options: ['取代所有 benchmark', '先排序和剪枝候選, 降低需要實測的 config 數量', '讓程式不能 fallback', '降低 HBM 容量'],
+      answer: 1,
+      explanation: 'Cost model 不必完美, 只要能減少昂貴的編譯和測量數量。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'P. Tillet, H.-T. Kung, and D. Cox, "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations," in Proc. MAPL, 2019', href: 'https://dl.acm.org/doi/10.1145/3315508.3329973' },
+    { citation: 'L. Zheng et al., "Ansor: Generating High-Performance Tensor Programs for Deep Learning," in Proc. OSDI, 2020', href: 'https://www.usenix.org/conference/osdi20/presentation/zheng' },
+    { citation: 'NVIDIA Corporation, "CUTLASS Profiler," CUTLASS Documentation, 2026', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/profiler.md' },
+    { citation: 'Advanced Micro Devices, Inc., hipBLASLt Documentation, 2026', href: 'https://rocm.docs.amd.com/projects/hipBLASLt/en/latest/' },
+  ]}
+/>

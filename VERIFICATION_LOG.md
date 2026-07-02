@@ -2,6 +2,36 @@
 
 每個階段的驗證結果與修復記錄 (依 prompt 的 Verification Gate 要求)。
 
+## 2026-07-02 Update (current container)
+
+- Current tools: Node.js v22.22.2, npm 10.9.7, `/usr/bin/g++` present.
+- Current missing tools: `cmake`, `hipcc`, and `nvcc` are not installed in this container, so the expanded kernel CMake build could not be executed here.
+- Curriculum expansion:
+  - Chapters now cover 32 total chapters across Track A-F.
+  - Existing chapters 1-25 were enriched with additional optimization techniques, design checklists, failure modes, profiling recipes, and concrete examples.
+  - Added Track F chapters 26-32: atomics/histograms, persistent kernels, stream/graph pipeline, low precision/quantization/layouts, autotuning/codegen, correctness/debugging, and a full optimization checklist.
+- Programming solutions added to matching directories:
+  - `kernels/04-reductions-softmax/histogram_atomics.cpp`.
+  - `kernels/05-advanced-scheduling/persistent_scheduler.cpp`.
+  - `kernels/05-advanced-scheduling/stream_pipeline.cpp`.
+  - `kernels/03-gemm/quantized_epilogue.cpp`.
+  - `kernels/03-gemm/autotune_register_tiling.cpp`.
+  - `kernels/exercises/ex_c_tail_correctness.cpp`.
+- Site/rendering updates:
+  - Chapter quizzes render as native `<details>` and are collapsed by default.
+  - References render in IEEE-style numbered form with title/source text, `[Online]`, `Available:`, and `Accessed: Jul. 2, 2026`.
+  - Markdown label issues with a trailing space before the closing bold marker were normalized, for example the Naive reduction label now renders as `**Naive:**`.
+  - Title casing and Chinese/English/punctuation spacing were normalized across visible chapter metadata and content.
+- Verification performed in this environment:
+  - `npm run typecheck`: passed.
+  - `npm run lint`: passed.
+  - `npm run build`: passed, generating 43 static pages.
+  - Static export check: 32 chapter pages produced under `website/out/chapters`.
+  - Quiz export check: 32 chapter pages contain `<details aria-label="章末測驗">`; 0 exported chapter pages contain an open quiz `<details>`.
+  - Reference export check: 64 exported chapter artifacts contain `Accessed: Jul. 2, 2026` in rendered citations.
+  - `git diff --check`: passed.
+  - Kernel build: blocked by missing `cmake` and GPU toolchains in the current container.
+
 ## 環境
 
 - Node.js v22、npm 10。
@@ -14,8 +44,8 @@
 
 - `npx tsc --noEmit`: 通過, 無 TypeScript 錯誤。
 - `npm run lint` (next lint): 通過, 無 warning / error。
-- `npm run build` (output: 'export'): 成功, 產生 26 個靜態頁 (首頁、roadmap、_not-found、21 章 + slug 索引)。以 `NEXT_PUBLIC_BASE_PATH=/gpu-kernel-lab` build 亦成功。
-- `out/` 檢查: 21 章頁面皆存在;asset 連結帶 `/gpu-kernel-lab` basePath 前綴;chapter 頁含互動元件 markup (Memory Coalescing Visualizer、平台程式碼切換、章末測驗);KaTeX 數學已 render。
+- `npm run build` (output: 'export'): 成功, 產生 26 個靜態頁 (首頁、roadmap、_not-found、21 章 + slug 索引)。 以 `NEXT_PUBLIC_BASE_PATH=/gpu-kernel-lab` build 亦成功。
+- `out/` 檢查: 21 章頁面皆存在; asset 連結帶 `/gpu-kernel-lab` basePath 前綴; chapter 頁含互動元件 markup (Memory Coalescing Visualizer、平台程式碼切換、章末測驗); KaTeX 數學已 render。
 - 修復記錄:
   - `PlatformTabs` 原設計用 JSX attribute 傳 fenced code, MDX 無法解析 → 改為 children/`<Platform>` API, 並重寫 6 章受影響檔案。
   - `c12` 內文的 `<5%` 被 MDX 當成 JSX 標籤 → 改寫為「不到 5%」。
@@ -31,7 +61,7 @@
 ## 互動元件
 
 - 7 個必做元件全部實作並在 build 輸出中 render: MemoryCoalescingVisualizer、OccupancyCalculator、TilingAnimator、RooflineChart、BenchmarkComparison、Quiz、PlatformTabs (另含 Callout / LabBox / FurtherReading 輔助元件)。
-- 皆有預設 props / 內建資料, 無 runtime 需求;鍵盤可操作 (radio、button、range、select、tablist role/aria)。
+- 皆有預設 props / 內建資料, 無 runtime 需求; 鍵盤可操作 (radio、button、range、select、tablist role/aria)。
 
 ## kernels
 
@@ -44,9 +74,9 @@
   - 03-gemm: sgemm_step0_naive、step1_shared、step2_register_tiling、step3_vectorized、step4_double_buffer
   - 04-reductions-softmax: reduction (shared / warp shuffle)、warp_reduce、softmax (three-pass / online, 含大值 overflow 測試)
   - 05-advanced-scheduling: split_k_gemm、cta_swizzle、async_pipeline
-- 觀察到的合理現象 (供讀者對照, 非承諾數字): stride 上升時 bandwidth 遞減;float4 copy 明顯快於 scalar;saxpy unroll4 快於 unroll1;split-K 在瘦長矩陣快於 plain;online softmax 快於 three-pass。
-- 命名規範: PascalCase (BenchResult / GemmBuffers)、camelCase (benchmarkKernel / warpReduceSum)、kCamelCase (kBlockSize / kTile)、snake_case (區域變數 / 參數)。註解全英文。
-- MDX 與 kernels 的一致性: 章節中的程式碼為對應 kernel 的節錄, 節錄處以註解標明 (例如 GEMM step2 標注 "full kernel in kernels/03-gemm/...");核心邏輯與檔案一致。
+- 觀察到的合理現象 (供讀者對照, 非承諾數字): stride 上升時 bandwidth 遞減; float4 copy 明顯快於 scalar; saxpy unroll4 快於 unroll1; split-K 在瘦長矩陣快於 plain; online softmax 快於 three-pass。
+- 命名規範: PascalCase (BenchResult / GemmBuffers)、camelCase (benchmarkKernel / warpReduceSum)、kCamelCase (kBlockSize / kTile)、snake_case (區域變數 / 參數)。 註解全英文。
+- MDX 與 kernels 的一致性: 章節中的程式碼為對應 kernel 的節錄, 節錄處以註解標明 (例如 GEMM step2 標注 "full kernel in kernels/03-gemm/..."); 核心邏輯與檔案一致。
 
 ## PyTorch 章節 (06)
 
@@ -66,9 +96,9 @@
 
 - 新增 Exercise / Solution 元件 (Solution 用原生 `<details>`, 預設收合、鍵盤可操作、無 JS 亦可運作), 併入 `mdx-components.tsx`。
 - 新增路由: `/exercises` 索引與 `/exercises/[slug]` 動態頁 (4 個 track), 於 header 與首頁加入連結。
-- 內容: Track A (8)、Track B (9)、Track C (8)、Track D (7), 共 32 題, 混合 paper-and-pencil 與 programming。每題附完整解答。
-- programming 參考解 kernels: `kernels/exercises/ex_a_saxpy`、`ex_b_block_reduce`, 已在 ROCm 實機 build + run, correctness check 全通過 (saxpy 誤差 1.19e-7;兩種 reduction 收尾皆通過)。其餘 programming 題複用既有 03-gemm / 05-advanced-scheduling / 06-pytorch-integration 目錄。
-- 驗證: website tsc / lint / build (含 basePath) 再次全通過, 靜態輸出新增 `/exercises` 與 4 個 track 頁面 (solution 以收合 `<details>` render);簡體字掃描 0 命中、placeholder 掃描 0 命中。
+- 內容: Track A (8)、Track B (9)、Track C (8)、Track D (7), 共 32 題, 混合 paper-and-pencil 與 programming。 每題附完整解答。
+- programming 參考解 kernels: `kernels/exercises/ex_a_saxpy`、`ex_b_block_reduce`, 已在 ROCm 實機 build + run, correctness check 全通過 (saxpy 誤差 1.19e-7; 兩種 reduction 收尾皆通過)。 其餘 programming 題複用既有 03-gemm / 05-advanced-scheduling / 06-pytorch-integration 目錄。
+- 驗證: website tsc / lint / build (含 basePath) 再次全通過, 靜態輸出新增 `/exercises` 與 4 個 track 頁面 (solution 以收合 `<details>` render); 簡體字掃描 0 命中、placeholder 掃描 0 命中。
 - 修復記錄: `track-c.mdx` 內文的 `<1%` 被 MDX 當成 JSX 標籤 → 以 inline code 包成 `` `<1%` ``。
 
 ### 原 Final Audit summary
@@ -77,7 +107,7 @@
 - PLAN.md 全項目已打勾且對應檔案存在 (21 章 + 7 元件 + 21 lab 目錄/檔案)。
 - 全 repo 簡體字掃描 0 命中、placeholder 掃描 0 命中、內部 chapter 連結與 lab 路徑全部有效。
 - 已知限制:
-  1. CUDA 路徑未實機編譯 (環境無 nvcc);以 HIP 實機驗證 + portability header/CMake 結構支援。
+  1. CUDA 路徑未實機編譯 (環境無 nvcc); 以 HIP 實機驗證 + portability header/CMake 結構支援。
   2. GEMM Step 5 (WMMA/MFMA) 與 library (cuBLAS/hipBLASLt) 比較不在預設 build, 提供實作指引於 kernels/03-gemm/README.md。
   3. PyTorch (06) 章節僅 py_compile 語法驗證, 未在 GPU + PyTorch 環境實跑。
   4. 網站 benchmark 預設資料為示意數據 (illustrative), 需以 scripts/bench_all.py 產生真實數據替換。

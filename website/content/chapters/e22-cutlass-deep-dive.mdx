@@ -1,0 +1,128 @@
+# CUTLASS 深入: 分層設計與 CuTe
+
+第 15 章把 CUTLASS 放上了生態地圖; 這一章打開引擎蓋。 CUTLASS 是 NVIDIA 開源的 GEMM/attention kernel template library — cuBLAS 的許多 kernel、PyTorch 的 fp8 GEMM、FlashAttention-3、vLLM 的量化 GEMM 都建立在它之上。 讀懂它的分層, 你就讀懂了現代 NVIDIA GPU 上「工業級 kernel」的標準結構。
+
+## 分層: 從 device 到指令
+
+CUTLASS 把一個 GEMM 拆成嵌套的層級, 每層對應第 12 章優化階梯的一站:
+
+| 層級 | 職責 | 對應本站章節 |
+| --- | --- | --- |
+| Device | kernel launch、grid 規劃、Split-K/Stream-K scheduler | 第 13 章 |
+| Kernel | CTA 的 persistent loop、prologue/epilogue 串接 | 第 13、14 章 |
+| Threadblock (CTA) | global → shared 的 tile 搬運、multi-stage pipeline | 第 12 章 Step 1/4 |
+| Warp / Warpgroup | shared → register、餵 MMA 指令 | 第 12 章 Step 2/5 |
+| Instruction | `mma` / `wgmma` 指令的封裝 | 第 12 章 Step 5 |
+| Epilogue | accumulator → bias/activation/dtype 轉換 → global | 第 12 章 epilogue |
+
+每一層都是可替換的 template 參數: 換 tile 尺寸、換 scheduler (Stream-K)、換 epilogue (bias + GELU)、換 dtype (fp8/int4), 底下其他層的優化原封不動 — 這就是「可組合」的意思, 也是它相對黑盒 cuBLAS 的根本差異。
+
+## CuTe: 3.x 的地基
+
+CUTLASS 3.x 重寫的核心是 **CuTe** — 一套描述「layout」的代數。`Layout = Shape : Stride`, 把「這塊資料在記憶體/register 裡怎麼擺」變成可組合、可運算的一等公民:
+
+```cpp
+// CuTe: a layout maps logical coordinates to memory offsets.
+// A 8x16 row-major tile:
+auto layout = make_layout(make_shape(Int<8>{}, Int<16>{}),
+                          make_stride(Int<16>{}, Int<1>{}));
+// Compose with a swizzle to avoid bank conflicts (ch. 7) while keeping the
+// logical view unchanged:
+auto swizzled = composition(Swizzle<3, 3, 3>{}, layout);
+// Partition the tile across a thread layout; each thread sees its slice:
+auto frag = local_partition(tensor, thr_layout, threadIdx.x);
+```
+
+第 7 章的 padding/XOR swizzle、第 12 章 MMA fragment 的怪異佈局, 在 CuTe 裡都是 layout 代數的一次 `composition`。 這解決了手寫 MMA kernel 最痛的部分: 佈局的正確性由型別系統保證, 而不是靠人肉推 index。
+
+## 實際用起來像什麼
+
+多數人不從零組裝, 而是實例化現成的 collective:
+
+```cpp
+// CUTLASS 3.x: declare a Hopper GEMM by composing policies, then run it.
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<
+    cutlass::gemm::kernel::GemmUniversal<
+        Shape<int, int, int>,                       // problem shape (M, N, K)
+        CollectiveMainloop,                         // TMA + wgmma pipeline
+        CollectiveEpilogue,                         // e.g., LinCombPerRowBias + GELU
+        cutlass::gemm::StreamKScheduler>>;          // tile scheduler (ch. 13)
+
+Gemm gemm;
+gemm.initialize(args, workspace);
+gemm.run(stream);
+```
+
+選 config 不用猜: **CUTLASS Profiler** (`cutlass_profiler --operation=gemm --m=4096 ...`) 會枚舉所有合法變體並實測 — 和第 13 章 cuBLASLt 的離線 tuning 是同一件事, 只是候選集是你自己編譯出來的。 Python 使用者另有 `cutlass` Python package 與 DSL, 能在 notebook 裡 JIT 實例化 GEMM。
+
+## 誰在用它
+
+- **PyTorch**: `torch._scaled_mm` (fp8 GEMM)、部分 quantized kernel、`scaled_dot_product_attention` 的 memory-efficient backend (源自 xFormers 的 CUTLASS attention)。
+- **FlashAttention-3**: 直接以 CUTLASS/CuTe 寫成, 使用 TMA + wgmma + warp specialization (第 14 章)。
+- **vLLM / TensorRT-LLM**: 量化 GEMM (fp8/int8/int4)、MoE grouped GEMM 等大量取自 CUTLASS 或其變體 (第 25 章)。
+- **DeepSeek DeepGEMM 等第三方**: 以 CuTe 為基礎的客製 GEMM 也越來越常見。
+
+<Callout variant="insight" title="學習路徑建議">
+不要從 CUTLASS 原始碼的最深處開始啃。 有效的順序: (1) 用 cutlass_profiler 感受 config 空間有多大; (2) 跑 examples/ 下的基本 GEMM, 改 tile 尺寸與 epilogue 觀察效能變化; (3) 讀 CuTe 的 layout 教學, 直到你能解釋第 7 章的 swizzle 如何被表達; (4) 這時再讀 mainloop 原始碼, 你會發現它就是第 12–14 章的組合。
+</Callout>
+
+## Customize Without Forking
+
+CUTLASS 的正確使用方式通常不是 fork 後手改 mainloop, 而是替換 extension points:
+
+- **Epilogue visitor**: bias、activation、scale、clamp、quantize 放在 epilogue tree。
+- **Scheduler**: standard、Split-K、Stream-K、persistent scheduler 按 shape 選。
+- **Tile shape**: 用 profiler 找候選, 再把少數最佳 config 編進 dispatch table。
+- **Layout**: 用 CuTe composition 表達 swizzle/prepack, 避免手寫 offset。
+- **Collective mainloop**: 只有當現有 pipeline 不支援你的資料流時才自訂。
+- **Manifest/dispatch**: production 應把 supported dtype/layout/arch 明確列出, fallback 到 cuBLASLt。
+
+這樣做能保留 upstream 更新的好處。 手改深層 pipeline 只有在你明確知道現有 collective 缺哪個硬體特性時才值得。
+
+<LabBox path="kernels/03-gemm">
+把你第 12 章的最佳手寫 kernel、`sgemm_cublas`, 以及 CUTLASS profiler 對同形狀枚舉出的最佳 GEMM 三方對照 (clone CUTLASS 後 `make cutlass_profiler -j`, 用 `--m --n --k` 指定你的形狀)。 觀察: profiler 選出的 tile 尺寸和你手調的差多少? Stream-K scheduler 在小矩陣形狀 (第 13 章) 下贏多少?
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'CUTLASS 分層設計的核心價值是?',
+      options: ['程式碼比較短', '每一層 (scheduler/mainloop/epilogue/指令) 都是可替換的 template 元件, 客製一層不必重寫其他層', '不需要編譯', '自動選擇 GPU'],
+      answer: 1,
+      explanation: '可組合性讓你在保留工業級 pipeline 的前提下, 只客製你需要的那一層 (如 epilogue fusion)。',
+    },
+    {
+      question: 'CuTe 的 Layout 抽象解決了什麼問題?',
+      options: ['kernel launch 語法', '把資料佈局 (shape: stride + swizzle) 變成可組合的代數, 由型別系統保證 MMA 佈局正確性', '自動微分', '記憶體配置'],
+      answer: 1,
+      explanation: 'MMA 指令的佈局要求是手寫 kernel 最易錯的部分; CuTe 用 layout 代數取代人肉 index 推導。',
+    },
+    {
+      question: 'CUTLASS Profiler 的角色相當於?',
+      options: ['Nsight Compute 的替代品', '對自家 kernel 變體做窮舉實測的離線 autotuner (類比 cuBLASLt 的 algo 搜索)', '除錯器', 'Python binding'],
+      answer: 1,
+      explanation: '它枚舉編譯出的所有合法 config 並 benchmark, 幫你為特定形狀挑最佳變體。',
+    },
+    {
+      question: '下列哪個不是建立在 CUTLASS/CuTe 之上?',
+      options: ['FlashAttention-3', 'PyTorch 的 fp8 _scaled_mm', 'vLLM 的量化 GEMM', 'AMD 的 rocprofv3'],
+      answer: 3,
+      explanation: 'rocprofv3 是 AMD 的 profiler 工具, 與 CUTLASS 無關; 前三者都直接使用 CUTLASS/CuTe。',
+    },
+    {
+      question: 'CUTLASS 的 epilogue 元件典型用途是?',
+      options: ['launch 前檢查參數', '在 accumulator 寫回 global 前融合 bias/activation/dtype 轉換, 省一次完整的輸出讀寫', '管理 L2 cache', '做 correctness check'],
+      answer: 1,
+      explanation: 'epilogue fusion 是 GEMM + elementwise 融合的標準機制 (第 12、19 章), CUTLASS 以 visitor tree 支援任意組合。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, CUTLASS: CUDA Templates for Linear Algebra Subroutines, 2024.', href: 'https://github.com/NVIDIA/cutlass' },
+    { citation: 'NVIDIA Corporation, "CuTe Layouts," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/01_layout.md' },
+    { citation: 'V. Thakkar et al., "CUTLASS 3.x: Orthogonal, Reusable, and Composable Abstractions for GEMM Kernel Design," GTC 2023.', href: 'https://www.nvidia.com/en-us/on-demand/session/gtcspring23-s51280/' },
+    { citation: 'J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao, "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision," arXiv: 2407.08608, 2024.', href: 'https://arxiv.org/abs/2407.08608' },
+  ]}
+/>

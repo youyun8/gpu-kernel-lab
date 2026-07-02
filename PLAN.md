@@ -1,6 +1,6 @@
 # PLAN
 
-site map、章節大綱與建置 checklist。完成的項目以 `- [x]` 標記。
+site map、章節大綱與建置 checklist。 完成的項目以 `- [x]` 標記。
 
 ## Site map
 

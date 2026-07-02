@@ -1,49 +1,53 @@
-# 案例研究: fused elementwise + reduction
+# 案例研究: Fused Elementwise + Reduction
 
-這一章把前面的東西串成一個真實案例: 一段 `bias → activation → 部分 reduction` 的 PyTorch 程式碼, 用原生 op 寫要讀寫 global memory 好幾趟。我們把它 fuse 成單一 kernel, 量 end-to-end speedup, 再和 `torch.compile` 產生的 Triton kernel 比一比。
+這一章把前面的東西串成一個真實案例: 一段 `bias → activation → 部分 reduction` 的 PyTorch 程式碼, 用原生 op 寫要讀寫 global memory 好幾趟。 我們把它 fuse 成單一 kernel, 量 end-to-end speedup, 再和 `torch.compile` 產生的 Triton kernel 比一比。
 
-## 起點: 三個 op, 三趟 memory
+## 起點: 三個 Op, 三趟 Memory
 
 ```python
 # Baseline: each op reads and writes the full tensor to global memory.
 def baseline(x, bias):
-    h = x + bias            # read x, bias; write h
+    h = x + bias                     # read x, bias; write h
     h = torch.nn.functional.gelu(h)  # read h; write h2
-    return h.sum(dim=-1)    # read h2; write reduced
+    return h.sum(dim=-1)             # read h2; write reduced
 ```
 
-`x` 被搬進搬出三次。這是典型的 memory-bound elementwise 鏈: arithmetic intensity 低, 時間幾乎全花在 global memory 往返 (第 5 章 roofline / 第 17 章的病徵)。
+`x` 被搬進搬出三次。 這是典型的 memory-bound elementwise 鏈: arithmetic intensity 低, 時間幾乎全花在 global memory 往返 (第 5 章 roofline / 第 17 章的病徵)。
 
-## fused kernel: 讀一次、算完、reduce 完
+先把帳算清楚 (第 17 章的紀律): 設 tensor 有 $R \times C$ 個 float。 baseline 的 traffic ≈ 讀 x + 寫 h + 讀 h + 寫 h2 + 讀 h2 = 5 次全張量 ≈ $20RC$ bytes; fused 版只讀 x 一次 + 寫 R 個 scalar ≈ $4RC$ bytes。 理論上限約 5×, 這值得動手。
 
-把 bias、gelu、row reduction 合進一個 kernel: 每個 block 負責一個 row, 讀進 register/shared memory, 做完 bias + gelu 後直接 warp/block reduce, 只寫出一個 scalar。global memory 往返從 3 趟降到 1 趟。
+## Fused Kernel: 讀一次、算完、Reduce 完
+
+把 bias、gelu、row reduction 合進一個 kernel: 每個 block 負責一個 row, 讀進 register/shared memory, 做完 bias + gelu 後直接 warp/block reduce, 只寫出一個 scalar。 global memory 往返從 3 趟降到 1 趟。
 
 ```cpp
 // One block per row: load once, apply bias+gelu in registers, then reduce.
 __global__ void fusedBiasGeluRowsum(const float* x, const float* bias,
                                     float* out, int rows, int cols) {
-  int row = blockIdx.x;
-  int tid = threadIdx.x;
-  float partial = 0.0f;
-  for (int c = tid; c < cols; c += blockDim.x) {
-    float v = x[row * cols + c] + bias[c];
-    // exact GELU using erff, computed in-register
-    v = 0.5f * v * (1.0f + erff(v * 0.7071067811865475f));
-    partial += v;
-  }
-  // block reduction (shared-memory tree + warp shuffle) omitted for brevity
-  float total = blockReduceSum(partial);
-  if (tid == 0) out[row] = total;
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    float partial = 0.0f;
+    for (int c = tid; c < cols; c += blockDim.x) {
+        float v = x[row * cols + c] + bias[c];
+        // exact GELU using erff, computed in-register
+        v = 0.5f * v * (1.0f + erff(v * 0.7071067811865475f));
+        partial += v;
+    }
+    // block reduction (shared-memory tree + warp shuffle) omitted for brevity
+    float total = blockReduceSum(partial);
+    if (tid == 0) out[row] = total;
 }
 ```
 
+注意這個 kernel 就是前面章節的組合: grid-stride 式的 row 掃描 (第 2 章)、coalesced 讀取 (第 6 章, 同 warp 的 `c` 連續)、block reduction 收尾 (第 10 章)。 cols 很大時還可以再加 `float4` 向量化讀取 (第 11 章) — lab 的版本兩種都有, 你可以量差距。
+
 <Callout variant="insight" title="為什麼會快">
-baseline 的瓶頸不是算 gelu, 而是把整個 tensor 在 global memory 進出三次。fused 版把中間結果留在 register / shared memory, 只付一次讀 + 一次 (極小的) 寫。對 memory-bound 的鏈, speedup 大致等於省下的往返次數比例。
+baseline 的瓶頸不是算 gelu, 而是把整個 tensor 在 global memory 進出三次。 fused 版把中間結果留在 register / shared memory, 只付一次讀 + 一次 (極小的) 寫。 對 memory-bound 的鏈, speedup 大致等於省下的往返次數比例。
 </Callout>
 
 ## 和 torch.compile 比較
 
-`torch.compile` 會把這條鏈自動 fuse 成 Triton kernel。你的手寫 kernel 該和它比:
+`torch.compile` 會把這條鏈自動 fuse 成 Triton kernel。 你的手寫 kernel 該和它比:
 
 ```python
 compiled = torch.compile(baseline)
@@ -51,10 +55,30 @@ compiled = torch.compile(baseline)
 # using torch.cuda.Event timing and warmup (see chapter 4).
 ```
 
-常見結果: `torch.compile` 幾乎追平手寫、且零維護成本。這正是本案例的誠實結論 — 手寫值得的時機, 是當 `torch.compile` 沒 fuse 好 (例如跨 op 的複雜相依、特殊 reduction 模式), 或你需要 online 演算法時。
+常見結果: `torch.compile` 幾乎追平手寫、且零維護成本。 這正是本案例的誠實結論 — 手寫值得的時機, 是當 `torch.compile` 沒 fuse 好 (例如跨 op 的複雜相依、特殊 reduction 模式), 或你需要 online 演算法時。
+
+## 驗收清單
+
+一個 fused kernel 要「畢業」, 三關都要過:
+
+1. **正確性**: 對 baseline 在多種 shape (含非對齊的 cols、極小與極大的 rows) 與 dtype 下比對, reduction 用相對誤差容忍 (第 10 章的浮點順序問題)。
+2. **效能**: end-to-end 計時 (warmup + events, 第 4 章), 對 baseline 與 `torch.compile` 三方比較; 再用 profiler 確認 fused 版的 DRAM traffic 真的降到估算值附近。
+3. **穩健性**: 邊界 shape (cols=1、rows=0)、非連續輸入、half 輸入 — 這些是上線後才爆的地方 (第 18 章)。
+
+## Fusion Patterns
+
+常見可 fuse 模式:
+
+- **Elementwise chain**: add、mul、activation、dropout mask、clamp。 通常一個 thread 處理多元素, vectorized load/store。
+- **Elementwise + row reduction**: bias + activation + sum/max/mean, 一個 block 或 warp 處理一 row。
+- **Normalize + affine**: layernorm/RMSNorm 把 mean/variance 或 rms reduction、scale、bias、cast 合在一起。
+- **GEMM epilogue**: accumulator 寫回前做 bias、activation、quantize, 避免 C tensor 再被讀一遍。
+- **Producer-consumer fusion**: op A 的輸出只被 op B 用一次, 且 B 不需要 library 黑盒, 可把 A 的中間值留在 register。
+
+不該 fuse 的訊號也要明確: 中間結果有多個 consumer、某段是高度優化 library kernel、fusion 後 register spill、或 fused kernel 破壞 copy/compute overlap。 fusion 是 memory traffic trade, 不是宗教。
 
 <LabBox path="kernels/06-pytorch-integration/load_inline">
-`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel, 對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時 (warmup + CUDA events), 印出各自時間與相對 speedup。跑一次, 看看在你的硬體上手寫贏 torch.compile 多少 (或輸多少)。
+`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel, 對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時 (warmup + CUDA events), 印出各自時間與相對 speedup。 跑一次, 看看在你的硬體上手寫贏 torch.compile 多少 (或輸多少)。
 </LabBox>
 
 <Quiz
@@ -76,6 +100,18 @@ compiled = torch.compile(baseline)
       options: ['手寫永遠大勝', 'torch.compile 常能自動 fuse 到接近手寫, 手寫留給它處理不好的情況', 'torch.compile 不能 fuse', '兩者完全相同'],
       answer: 1,
       explanation: 'torch.compile 的 Triton fusion 通常很強, 手寫的價值在它涵蓋不到的模式。',
+    },
+    {
+      question: '動手寫 fused kernel 前先估 traffic 比 (baseline ~5 次全張量 vs. fused ~1 次) 的意義是?',
+      options: ['決定 block size', '得到理論加速上限, 判斷值不值得投入', '算 FLOP', '滿足 profiler 需求'],
+      answer: 1,
+      explanation: 'memory-bound 時時間正比於 traffic; 上限太低或該鏈佔比太小, 就不值得手寫 (Amdahl)。',
+    },
+    {
+      question: 'fused reduction 的 correctness check 為什麼要用相對誤差而非 bit-exact?',
+      options: ['GPU 不準', '浮點加法順序與 baseline 不同, 結果有合法的微小差異', '測試框架限制', 'gelu 是近似的'],
+      answer: 1,
+      explanation: '平行 reduction 的求和順序和逐一累加不同, 浮點不符合結合律, bit-exact 比對必然誤報。',
     },
   ]}
 />

@@ -1,63 +1,103 @@
-# Reduction 與 softmax 優化系列
+# Reduction 與 Softmax 優化系列
 
-reduction 看起來是最簡單的 kernel — 把一堆數字加起來 — 卻是最能展現 GPU 優化層次的題目。從最天真的版本到接近頻寬上限, 中間有五、六個明確的台階。學會 reduction, 你就有了 softmax、layernorm、attention 的地基。
+Reduction 看起來是最簡單的 kernel — 把一堆數字加起來 — 卻是最能展現 GPU 優化層次的題目。 從最天真的版本到接近頻寬上限, 中間有五、六個明確的台階。 學會 reduction, 你就有了 softmax、layernorm、attention 的地基。
 
-## reduction 的優化階梯
+## Reduction 的優化階梯
 
-**Naive: ** 每個 thread atomicAdd 到一個全域累加器 — 嚴重 contention, 慢到不行。
+**Naive:** 每個 thread `atomicAdd` 到一個全域累加器 — 嚴重 contention, 慢到不行。
 
-**Tree reduction in shared memory: ** block 內用 shared memory 做二元樹相加。要小心兩件事: early 版本的 `if(tid % (2*s) == 0)` 造成 divergence 與 bank conflict;改成 `for(s = blockDim/2; s > 0; s >>= 1)` 的 sequential addressing 版本可同時解決兩者。
+**Tree reduction in shared memory:** block 內用 shared memory 做二元樹相加。 要小心兩件事: early 版本的 `if (tid % (2*s) == 0)` 造成 divergence 與 bank conflict; 改成 `for (s = blockDim/2; s > 0; s >>= 1)` 的 sequential addressing 版本可同時解決兩者。
 
-**Warp shuffle: ** 最後 32/64 個元素不必再進 shared memory, 直接用第 9 章的 `warpReduceSum` 收尾, 省掉多輪 `__syncthreads()`。
+**Warp shuffle:** 最後 32/64 個元素不必再進 shared memory, 直接用第 9 章的 `warpReduceSum` 收尾, 省掉多輪 `__syncthreads()`。
 
-**Vectorized loads + grid-stride: ** 每個 thread 用 `float4` 一次讀 4 個、並以 grid-stride loop 處理多筆, 提高每 thread 的工作量與 memory 效率。
+**Vectorized loads + grid-stride:** 每個 thread 用 `float4` 一次讀 4 個、並以 grid-stride loop 處理多筆, 提高每 thread 的工作量與 memory 效率。
 
 ```cpp
 // Block reduction: shared-memory tree down to one warp, then warp shuffle.
 __global__ void reduceSum(const float* in, float* out, int n) {
-  __shared__ float smem[256];
-  int tid = threadIdx.x;
-  float sum = 0.0f;
-  // grid-stride loop with vectorized-friendly accumulation
-  for (int i = blockIdx.x * blockDim.x + tid; i < n; i += blockDim.x * gridDim.x) {
-    sum += in[i];
-  }
-  smem[tid] = sum;
-  __syncthreads();
-  for (int s = blockDim.x / 2; s > warpSize; s >>= 1) {
-    if (tid < s) smem[tid] += smem[tid + s];
+    __shared__ float smem[256];
+    int tid = threadIdx.x;
+    float sum = 0.0f;
+    // grid-stride loop with vectorized-friendly accumulation
+    for (int i = blockIdx.x * blockDim.x + tid; i < n; i += blockDim.x * gridDim.x) {
+        sum += in[i];
+    }
+    smem[tid] = sum;
     __syncthreads();
-  }
-  if (tid < warpSize) {
-    float v = smem[tid];
-    for (int o = warpSize / 2; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffff, v, o);
-    if (tid == 0) out[blockIdx.x] = v;
-  }
+    for (int s = blockDim.x / 2; s > warpSize; s >>= 1) {
+        if (tid < s) smem[tid] += smem[tid + s];
+        __syncthreads();
+    }
+    if (tid < warpSize) {
+        float v = smem[tid];
+        for (int o = warpSize / 2; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffff, v, o);
+        if (tid == 0) out[blockIdx.x] = v;
+    }
 }
 ```
 
-## softmax 與 numerical stability
+## 最後一哩: 跨 block 的合併
 
-softmax 需要兩個 reduction: max 與 sum-of-exp。直接算 $e^{x_i}$ 會 overflow, 所以要先減掉 max:
+每個 block 產出一個 partial sum 之後, 還要合併成一個值。 三種做法各有取捨:
+
+- **兩段式 kernel**: 第一個 kernel 產出 `gridDim.x` 個 partial, 第二個 kernel (單 block) 收尾。 簡單、確定性強, 是預設選擇。
+- **`atomicAdd` 收尾**: 每個 block 的 thread 0 直接 `atomicAdd(out, v)`。 省一次 launch, block 數不多時 contention 可忽略; 代價是浮點加法順序不定, 結果在 run 之間可能有 bit-level 差異 (對測試的容忍度設計有影響)。
+- **單 kernel + grid 同步**: 用 cooperative launch 的 grid-wide barrier。 限制多 (grid 必須全駐留), 特定場景才值得。
+
+<Callout variant="warn" title="浮點 reduction 的順序問題">
+浮點加法不符合結合律, 不同的 reduce 順序給出略不同的結果。 GPU reduction 的求和順序本來就和 CPU 逐一累加不同, 所以 correctness check 一定要用相對誤差容忍, 不能 bit-exact 比對; 而 atomic 版本連 run 對 run 都不保證一致 — 需要「可重現」時選兩段式。
+</Callout>
+
+## Softmax 與 numerical stability
+
+Softmax 需要兩個 reduction: max 與 sum-of-exp。 直接算 $e^{x_i}$ 會 overflow, 所以要先減掉 max:
 
 $$
 \text{softmax}(x_i) = \frac{e^{x_i - \max_j x_j}}{\sum_k e^{x_k - \max_j x_j}}
 $$
 
-## online softmax: 一次掃描搞定
+實作上就是把本章的 reduction 用兩次 (max 一次、sum 一次), 再做一次 elementwise 正規化 — naive 版本共掃三遍資料。 row 夠短時一個 warp/block 處理一個 row, 中間值全程留在 register, 這正是 fused softmax kernel 的形狀 (第 20 章用 Triton 重寫的就是它)。
 
-naive softmax 掃三遍 (找 max、算分母、正規化)。**online softmax** 只掃一遍: 邊走邊維護 running max 與 running sum, 遇到更大的 max 就用修正因子 rescale 之前的 sum。這正是 FlashAttention 的核心技巧 — 讓 softmax 不必物化整個 row。
+## Online softmax: 一次掃描搞定
+
+Naive softmax 掃三遍 (找 max、算分母、正規化)。 **Online softmax** 只掃一遍: 邊走邊維護 running max 與 running sum, 遇到更大的 max 就用修正因子 rescale 之前的 sum。 這正是 FlashAttention 的核心技巧 — 讓 softmax 不必物化整個 row。
 
 $$
 m_{new} = \max (m_{old}, x_i), \quad d_{new} = d_{old} \cdot e^{m_{old} - m_{new}} + e^{x_i - m_{new}}
 $$
 
+```cpp
+// Single-pass (online) softmax normalizer: one read per element.
+float m = -INFINITY, d = 0.0f;
+for (int i = 0; i < n; ++i) {
+    float x = row[i];
+    float mNew = fmaxf(m, x);
+    d = d * expf(m - mNew) + expf(x - mNew); // rescale old sum, add new term
+    m = mNew;
+}
+// softmax(x_i) = exp(row[i] - m) / d  (one more pass, or fuse into consumer)
+```
+
+兩個 (m, d) pair 還可以用同樣的 rescale 規則合併 — 這讓 online softmax 能平行化: 每個 thread/warp 各自維護局部的 (m, d), 最後樹狀合併, 與本章的 reduction 階梯完全同構。
+
 <Callout variant="insight" title="為什麼 online softmax 重要">
-它把 softmax 的 memory 需求從「整個 row」降到「幾個 scalar」, 讓 attention 可以 tile、可以 fuse、可以省下對長序列中間結果的往返。理解這一步, 你就摸到了現代 attention kernel 的門。
+它把 softmax 的 memory 需求從「整個 row」降到「幾個 scalar」, 讓 attention 可以 tile、可以 fuse、可以省下對長序列中間結果的往返。 理解這一步, 你就摸到了現代 attention kernel 的門 — FlashAttention (第 24 章) 就是 online softmax + tiling 的組合。
 </Callout>
 
+## 更多 Reduction Variants
+
+Reduction 家族很大, 實務上會依 shape 選不同版本:
+
+- **Warp-per-row**: row 長度 `<= warpSize` 時, 一個 warp 處理一列, 用 shuffle all-reduce, 適合小 softmax/layernorm。
+- **Block-per-row**: row 較長時, 一個 block 處理一列, 每 thread 多元素 grid-stride, shared memory 合併 warp partials。
+- **Multi-block per row**: row 很長時, 多 blocks 處理同一列並輸出 partial, 第二階段再 reduce。
+- **Persistent reduction**: 大量短 row 且長度不均時, persistent scheduler 動態取 row, 減少 tail effect。
+- **Segmented reduction**: key/value 已排序或有 segment offsets 時, 每段各自 reduce。 histogram、embedding gradient、sparse ops 常用。
+
+數值上也要選策略: 普通 sum 可用 tree reduction; 長向量或精度敏感可用 pairwise/Kahan 類補償, 但會增加 FLOP 和 register。 softmax 則應優先用 max-subtraction 或 online normalizer, 不要靠 `expf` 之後再補救 overflow。
+
 <LabBox path="kernels/04-reductions-softmax">
-`reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。依序跑, 觀察 reduction 逐步逼近頻寬上限。
+`reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。 依序跑, 觀察 reduction 逐步逼近頻寬上限。
 </LabBox>
 
 <Quiz
@@ -79,6 +119,24 @@ $$
       options: ['精度更高', '只需一次掃描並維護 running max/sum, memory 需求大減 (FlashAttention 基礎)', 'FLOP 更少', '不需要 exp'],
       answer: 1,
       explanation: '邊掃邊 rescale, 避免物化整個 row, 讓 softmax 可 tile 與 fuse。',
+    },
+    {
+      question: '用 atomicAdd 收尾跨 block 的 reduction, 主要代價是?',
+      options: ['一定比較慢', '浮點加法順序不定, 結果在 run 之間可能不完全一致 (不可重現)', '需要兩倍記憶體', '不支援 float'],
+      answer: 1,
+      explanation: '浮點加法不符合結合律, atomic 的完成順序每次不同; 需要可重現結果時用固定順序的兩段式 reduce。',
+    },
+    {
+      question: 'tree reduction 用 `if(tid % (2*s) == 0)` 的寫法差在哪?',
+      options: ['結果錯誤', '活躍 thread 分散在整個 block, 造成 divergence 與 strided 的 shared memory 存取', '用太多 register', '不能配 shuffle'],
+      answer: 1,
+      explanation: 'interleaved addressing 讓每輪的工作 thread 稀疏分佈; sequential addressing (tid < s) 讓活躍 thread 連續, 消除 divergence。',
+    },
+    {
+      question: '兩組 online softmax 的局部 (m, d) 能合併嗎?',
+      options: ['不能, 必須序列掃描', '能: 用同樣的 rescale 規則合併, 因此可平行化並樹狀 reduce', '只有 m 能合併', '要先排序'],
+      answer: 1,
+      explanation: '(m, d) 的合併運算符合結合律結構, 局部結果可像一般 reduction 一樣樹狀合併 — 這是它能上 GPU 的關鍵。',
     },
   ]}
 />

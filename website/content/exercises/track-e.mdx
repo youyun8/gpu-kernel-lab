@@ -1,0 +1,113 @@
+# Track E 練習: CUTLASS、AMD 生態、Attention、推論引擎
+
+對應第 22–25 章。 這一組多為觀念題與推導題, 目的是把前面所有 kernel 技巧接到生產級 library 與推論引擎。 除非另外標明, 沿用 warp = 32、`float` = 4 bytes 的假設。
+
+<Exercise id="E1" title="CUTLASS 分層對應優化階梯" kind="paper" level="進階">
+CUTLASS 把 GEMM 拆成 device / kernel / threadblock / warp / instruction / epilogue 六層。 把下列第 12–14 章的優化技巧各歸到最貼切的一層: (a) shared memory tiling; (b) 每 thread 的 register micro-tile; (c) Split-K / Stream-K 排程; (d) bias + GELU 融合; (e) wgmma / MFMA 指令。
+
+<Solution>
+(a) shared memory tiling → **threadblock (CTA)** 層: CTA 協力把 tile 搬進 shared memory。
+
+(b) register micro-tile → **warp** 層: warp 內每 thread 從 shared memory 取片段到 register 餵 MMA。
+
+(c) Split-K / Stream-K → **device / kernel** 層: 屬於 tile scheduler 的職責 (第 13 章)。
+
+(d) bias + GELU 融合 → **epilogue** 層: accumulator 寫回前的 elementwise 融合 (第 12、19 章)。
+
+(e) wgmma / MFMA → **instruction** 層: 單一矩陣乘加指令的封裝 (第 12 章 Step 5)。
+
+這正是「可組合」的意義: 換其中一層 (例如把 scheduler 換成 Stream-K), 其他層不動。
+</Solution>
+</Exercise>
+
+<Exercise id="E2" title="CuTe layout 讀寫" kind="paper" level="挑戰">
+CuTe 的 layout 是 `Shape : Stride`, 把邏輯座標 ` (i, j)` 映射到記憶體 offset `i*stride_0 + j*stride_1`。 給定一個 ` (4, 8)` 的 tile: (a) row-major 的 stride 是多少? (b) col-major 呢? (c) 為什麼「用 layout 代數 + swizzle 表達佈局」比手寫 index 更不容易在 MMA kernel 出錯?
+
+<Solution>
+(a) row-major ` (4, 8) : (8, 1)` — 同一 row 相鄰 (stride 1), 換 row 跳 8。
+
+(b) col-major ` (4, 8) : (1, 4)` — 同一 column 相鄰 (stride 1), 換 column 跳 4。
+
+(c) MMA 指令要求 fragment 在 register/shared memory 有特定 (且不直觀) 的佈局, 手寫 index 極易錯且錯了只表現為數值錯誤。 CuTe 把佈局變成可組合的型別: swizzle (第 7 章) 是一次 `composition`, partition 到 thread 是一次運算, 正確性由型別系統與代數規則保證, 而非人肉推導。 這是 CUTLASS 3.x 能可靠支援眾多 tile/指令組合的關鍵。
+</Solution>
+</Exercise>
+
+<Exercise id="E3" title="NVIDIA↔AMD 生態對照" kind="paper" level="入門">
+把下列 NVIDIA 元件對應到 AMD 的等價物: (a) CUTLASS; (b) cuBLASLt; (c) wmma fragment API; (d) Tensor Core; (e) 針對 LLM 的高階 kernel 集合。
+
+<Solution>
+(a) CUTLASS → **Composable Kernel (CK)** (以 coordinate transformation 描述佈局, 封裝 MFMA)。
+
+(b) cuBLASLt → **hipBLASLt** (kernel 由 Tensile 生成, heuristic + 離線 tuning)。
+
+(c) wmma fragment API → **rocWMMA**。
+
+(d) Tensor Core → **Matrix Core (MFMA)**。
+
+(e) LLM 高階 kernel 集合 → **AITER** (NVIDIA 側對應 cuDNN / TensorRT-LLM kernels)。
+
+移植時語法可鏡像, 但 wavefront=64、LDS bank、MFMA tile shape、fp8 格式 (e4m3fnuz vs. e4m3fn) 等效能與數值假設要逐條重驗 (第 9、23 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="E4" title="hipBLASLt / TunableOp tuning 決策" kind="paper" level="進階">
+你的 ROCm 推論服務有一組固定的 GEMM 形狀 (模型結構固定), 但 hipBLASLt 的預設 heuristic 對其中幾個形狀選的 kernel 明顯次優。 (a) 該用什麼機制改善? (b) 這個機制的一次性成本與長期收益各是什麼? (c) 若形狀每個 request 都在變 (batch 動態), 這個策略還適用嗎?
+
+<Solution>
+(a) 用 **TunableOp** (`PYTORCH_TUNABLEOP_ENABLED=1`) 或 `hipblaslt-bench --algo_method all` 對這些固定形狀離線枚舉並實測所有候選 algo, 記錄最快者 (落成 CSV / solution)。
+
+(b) 一次性成本: 首次搜索所有候選的時間 (每形狀數秒到數十秒)。 長期收益: 之後每次執行直接命中最佳 kernel, 對次優形狀常拿回 10–30%。
+
+(c) 形狀高度動態時, 純查表會頻繁 miss、觸發重複搜索, 收益下降; 此時 continuous batching 應盡量把形狀量化到少數 bucket (padding 到固定尺寸), 或退回 heuristic。 tuning 的甜蜜點是「形狀集合小且固定」 (第 13、23 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="E5" title="FlashAttention 的 HBM traffic" kind="paper" level="挑戰">
+序列長度 $N$、head 維度 $d$, 單 head。 (a) naive attention 物化分數矩陣 $S = QK^\top$, 它的大小與 HBM traffic 量級是多少? (b) FlashAttention 不物化 $S$, HBM traffic 降到什麼量級? (c) 用第 5 章 roofline 的語言, 說明這個改變如何把 attention 從 memory-bound 推向 compute-bound。
+
+<Solution>
+(a) $S$ 是 $N \times N$, 大小 $O (N^2)$。 naive 要把 $S$ 寫回 HBM 再讀回來做 softmax, HBM traffic 是 $O (N^2)$。
+
+(b) FlashAttention 把 $S$ 切成 block, 每個 $S_{ij}$ tile 只在 shared memory/register 存活、從不寫 HBM; 進出 HBM 的只有 $Q, K, V, O$, traffic 降到 $O (Nd)$ (對固定 $d$ 即 $O (N)$)。
+
+(c) HBM traffic 從 $O (N^2)$ 降到 $O (N)$, 而 FLOP 仍是 $O (N^2 d)$ → arithmetic intensity 大幅上升, roofline 上的點從 bandwidth 斜線往右推向 compute 屋頂。 演算法沒變, 變的是 IO — 這正是 "IO-awareness" 的意義 (第 24 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="E6" title="online softmax 是 FlashAttention 的哪一塊" kind="paper" level="進階">
+FlashAttention 的內迴圈維護 running max `m`、running denominator `l`、running output `acc`。 (a) 這三者對應第 10 章 online softmax 的哪些量? (b) 為什麼每遇到新的 K/V block 要對 `l` 與 `acc` 同乘 `exp(m_old - m_new)`? (c) 這說明了什麼關於「頂尖 kernel」的觀點?
+
+<Solution>
+(a) `m` = online softmax 的 running max;`l` = running denominator (sum of exp);`acc` = 額外多維護的 running 加權輸出 (naive softmax 沒有, 因為 attention 要的是 $PV$ 而非只有機率)。
+
+(b) 舊的 `l` 與 `acc` 是以舊 max `m_old` 為基準累加的; 新 block 帶來更大的 max 時, 必須把舊基準 rescale 到新基準, 乘 `exp(m_old - m_new)` 才能與新 block 的貢獻正確相加, 同時保持 `exp` 輸入 ≤ 0 避免 overflow (第 10 章 B7)。
+
+(c) FlashAttention 不引入新原語: 它是 online softmax (第 10 章) + tiling (第 7、12 章) + memory 階層意識 (第 3、5 章) 的深度組合。 頂尖 kernel 是基礎技巧的極致組合, 不是魔法。
+</Solution>
+</Exercise>
+
+<Exercise id="E7" title="Prefill vs. decode 的 bound 判讀" kind="paper" level="進階">
+一個 LLM serving 系統。 (a) prefill (處理長 prompt) 的 attention 與 GEMM 各偏 compute-bound 還是 memory-bound? (b) decode (batch=1, 生成一個 token) 呢? (c) 為什麼 fp8 KV cache 對 decode 特別有效, 對 prefill 效果較小?
+
+<Solution>
+(a) prefill 一次算很多 token: GEMM 是大矩陣 (compute-bound), attention 也是大 tile (compute-bound, 吃 Tensor Core/MFMA)。
+
+(b) decode 每步只算一個 token: GEMM 退化成 GEMV (memory-bound, 讀 weight 主導), attention 讀整個 KV cache 只算一步 (memory-bound)。
+
+(c) decode 的瓶頸是搬 KV cache 與 weight; fp8 KV cache 把該 memory traffic 減半, 直接加速 memory-bound 的 decode。 prefill 是 compute-bound, 減 memory traffic 幫助有限, 反而要注意 fp8 對精度的影響。 這說明「同一模型的不同 phase 要用不同優化策略」 (第 24、25 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="E8" title="為推論引擎 timeline 分類 kernel" kind="code" level="挑戰">
+裝一個 vLLM 或 SGLang (CUDA 或 ROCm 版), 對一次 `generate` 用 `torch.profiler` 或 Nsight Systems 抓 timeline。 回報: (a) 你能認出哪些 attention kernel、GEMM、以及 fused 的 norm/RoPE kernel? (b) 哪些屬於 prefill、哪些屬於 decode? (c) decode 階段 GPU 使用率如何? 符合本 track 對 decode 是 memory-bound 的預期嗎?
+
+<Solution>
+這是開放式考古題, 沒有唯一答案, 重點是把第 17 章的 trace 分析用在真實推論引擎上。 典型觀察:
+
+(a) attention kernel 常見名字含 `flash`/`paged`/`flashinfer`; GEMM 是 cutlass/cublas/hipblaslt 的 kernel; norm/RoPE/activation 多為 Triton 或 vendor fused kernel。
+
+(b) prefill 通常是開頭一段密集的大 kernel (處理整個 prompt); decode 是之後一長串重複的短 kernel 序列 (每 token 一輪), 兩者形狀與時長明顯不同。
+
+(c) decode 階段單一 kernel 的 compute 使用率通常不高、memory/GEMV 主導, 且可能看到 launch 密集 — 符合 memory-bound + 潛在 launch overhead 的預期 (第 24、25 章)。 若開了 CUDA Graph, decode 的 launch 空檔會明顯減少。 實際數字依模型、batch、硬體而異。
+</Solution>
+</Exercise>

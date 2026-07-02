@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fix Chinese/English prose typography: spaces around (), and after , / : . Skip fenced code."""
+"""Fix Chinese/English prose typography. Skip fenced code and inline code."""
 
 from __future__ import annotations
 
@@ -39,26 +39,43 @@ def fix_prose_parens(text: str) -> str:
     return text
 
 
-# Colon/comma followed by text (CJK, Latin, digits, quotes, etc.).
-TEXT_AFTER_COLON_COMMA = re.compile(
-    r"([,，]|(?<!:)[：:])(?=[\u4e00-\u9fffA-Za-z0-9「『(（*])"
+# Punctuation followed by text (CJK, Latin, digits, quotes, etc.).
+TEXT_AFTER_PUNCT = re.compile(
+    r"([,，;；!?！？。]|(?<!:)[：:])(?=[\u4e00-\u9fffA-Za-z0-9「『(（*])"
 )
 
 # URL scheme, C++ scope, known host:port patterns.
 SKIP_COLON = re.compile(r":(?=/|$)|::|(?:localhost|127\.0\.0\.1):\d{2,5}")
 
-
 # Thousands separator in numbers (e.g. 1,000).
 SKIP_COMMA = re.compile(r"(?<=\d),(?=\d)")
 
+URL = re.compile(r"https?://[^\s'\"<>)}]+")
 
-def fix_prose_colon_comma(text: str) -> str:
+
+def inside_url(text: str, pos: int) -> bool:
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    rel = pos - line_start
+    return any(match.start() <= rel < match.end() for match in URL.finditer(line))
+
+
+def fix_bold_colon_spacing(text: str) -> str:
+    return re.sub(r"\*\*([^*\n]+?:)\s+\*\*", r"**\1**", text)
+
+
+def fix_prose_punctuation(text: str) -> str:
     def repl(match: re.Match[str]) -> str:
         punct = match.group(1)
+        pos = match.start()
+        if inside_url(text, pos):
+            return punct
         if punct in ",，" and SKIP_COMMA.match(text, match.start()):
             return punct
         if punct in ":：":
-            pos = match.start()
             snippet = text[max(0, pos - 16) : min(len(text), pos + 6)]
             if SKIP_COLON.search(snippet):
                 return punct
@@ -67,7 +84,7 @@ def fix_prose_colon_comma(text: str) -> str:
     prev = None
     while prev != text:
         prev = text
-        text = TEXT_AFTER_COLON_COMMA.sub(repl, text)
+        text = TEXT_AFTER_PUNCT.sub(repl, text)
     return text
 
 
@@ -189,11 +206,12 @@ def fix_backtick_adjacency(content: str) -> str:
 
 def process_text_chunk(content: str) -> str:
     content = fix_backtick_adjacency(content)
+    content = fix_bold_colon_spacing(content)
     out: list[str] = []
     for kind, chunk in split_inline_math(content):
         if kind == "prose":
             chunk = fix_prose_parens(chunk)
-            out.append(fix_prose_colon_comma(chunk))
+            out.append(fix_prose_punctuation(chunk))
         elif kind == "inline":
             if chunk.startswith("<code>") and chunk.endswith("</code>"):
                 out.append(

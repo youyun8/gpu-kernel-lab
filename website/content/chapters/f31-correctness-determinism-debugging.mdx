@@ -1,0 +1,133 @@
+# Correctness、Determinism 與 Debugging
+
+高效 kernel 必須先是正確 kernel。 GPU bug 的麻煩在於它們常常只在某些 shape、某些 alignment、某些 driver、某些 timing 下出現。 這一章整理 kernel correctness 的基本防線: reference、sanitizer、race detection、determinism、numerical tolerance 和 CI。
+
+## Reference First
+
+每個 optimized kernel 都要有慢但清楚的 reference:
+
+- CPU reference 適合小 shape 和精確檢查。
+- Library reference 適合 GEMM、conv、softmax 等成熟 op。
+- Naive GPU reference 適合比較 memory layout 或 device-only path。
+- Property test 適合 reduction、scan、sort、top-k 等有不變量的 op。
+
+Reference 要覆蓋 tail shape: 0、1、31、32、33、warpSize ± 1、tileSize ± 1、prime sizes、misaligned pointer、non-contiguous stride。
+
+## Error Checking
+
+所有 launch 都應在 debug/test 模式檢查:
+
+```cpp
+#define CUDA_CHECK(call) do {                                  \
+    cudaError_t err = (call);                                  \
+    if (err != cudaSuccess) abort();                           \
+} while (0)
+
+kernel<<<grid, block, smem, stream>>>(args...);
+CUDA_CHECK(cudaGetLastError());
+CUDA_CHECK(cudaStreamSynchronize(stream));
+```
+
+`cudaGetLastError` / `hipGetLastError` 抓 launch configuration 和非法參數; stream synchronize 才能抓 kernel 執行中發生的 illegal memory access。 Benchmark hot path 可移除同步, 但測試不能省。
+
+## Sanitizer 與 Race Detection
+
+常用工具:
+
+- **Compute Sanitizer memcheck**: out-of-bounds、misaligned access、illegal address。
+- **Compute Sanitizer racecheck**: shared memory race。
+- **Compute Sanitizer initcheck**: 未初始化 global memory 讀取。
+- **ROCm rocprof / debugger / sanitizer 工具鏈**: 對 HIP kernel 做對應檢查。
+- **Device-side assert**: 針對 invariants, 但會讓 kernel abort, 只放 debug build。
+
+Sanitizer 很慢, 但應該跑小 shape CI。 很多 tail bug 用大型 benchmark 反而不容易觸發。
+
+## Synchronization Bug 清單
+
+最常見錯誤包括:
+
+- `__syncthreads()` 放在 divergent branch 中, 不是所有 block threads 都到達。
+- Warp-synchronous 假設沒有配合 `__syncwarp()` 或正確 mask。
+- Shared memory double buffer 覆蓋太早, consumer 還沒讀完。
+- Async copy pipeline 忘記 wait group 或 barrier。
+- Cross-block communication 缺 fence 或使用錯誤 memory scope。
+- Atomic counter publish 早於 payload 寫入。
+
+每次加 pipeline 或 queue, 都要畫出 producer/consumer 的 happens-before 關係。
+
+## Determinism 與 Reproducibility
+
+GPU 結果不一定 bit-exact:
+
+- Floating-point reduction 順序不同會改變低位。
+- Atomic add 完成順序不固定。
+- Tensor Core math mode 可能使用 tf32 或其他近似格式。
+- Library autotuner 可能選到不同 algorithm。
+
+若產品需要 reproducible result, 要固定 algorithm、關閉非決定性路徑、避免 atomic reduction, 並用固定 reduction tree。 若只需要 numerical equivalence, 測試應使用合理 tolerance, 並記錄 dtype 和 math mode。
+
+## Tolerance 設計
+
+不要只寫一個 `1e-5` 到處用。 Tolerance 應依據:
+
+- dtype: fp32、tf32、fp16、bf16、fp8、int8。
+- operation: elementwise、reduction、GEMM、softmax。
+- problem size: reduction 長度越長, 誤差界越大。
+- reference math mode: CPU fp64 reference 和 library fp32 reference 不同。
+
+常用組合是 max absolute error、relative error、以及少量元素的詳細 dump。 Softmax 還要檢查 row sum 接近 1, 且沒有 NaN/Inf。
+
+## CI 與 Regression Benchmark
+
+Production kernel 至少有兩條 CI:
+
+- **Correctness CI**: 多 shape、多 dtype、多 stride、sanitizer 小測、determinism 選項。
+- **Performance CI**: 固定機器或受控 runner 上記錄 latency/GFLOP/s/bandwidth, 設 regression threshold。
+
+Performance CI 要避免太敏感。 記錄中位數、p90、環境資訊、driver/runtime 版本和 GPU clock policy。 若無固定 GPU runner, 至少保存 benchmark script 和基準 JSON, 讓回歸可重現。
+
+<Callout variant="insight" title="Debug 順序">
+先縮小 shape, 固定 seed, 關閉 fusion/autotune, 和 naive reference 比對。 確認 correctness 後再打開 fast math、vectorization、async pipeline、Tensor Core 和 autotuned dispatch。 一次只打開一個變因。
+</Callout>
+
+<LabBox path="kernels/exercises">
+把每個 exercise 加上 tail-shape test: `n = 0, 1, 31, 32, 33, 255, 256, 257`。 再用 sanitizer 跑最小 shape, 確認 out-of-bounds 和 race 能被抓到。 最後為 reduction 設計 deterministic 與 atomic 兩個版本的 tolerance。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼 kernel launch 後只呼叫 `cudaGetLastError` 還不夠?',
+      options: ['它只能抓部分 launch 錯誤, kernel 執行期錯誤通常要同步後才浮現', '它會降低 clock', '它只能用於 CPU', '它會自動修正 race'],
+      answer: 0,
+      explanation: '非法記憶體存取等執行期錯誤是非同步發生的, 測試中需要 stream/device synchronize。',
+    },
+    {
+      question: '`__syncthreads()` 最大的使用限制是?',
+      options: ['只能放在 for loop 外', '同一 block 所有 threads 必須到達同一個 barrier', '只能搭配 int', '不能和 shared memory 同用'],
+      answer: 1,
+      explanation: '若 barrier 位於 divergent branch 且不是所有 threads 到達, kernel 可能 deadlock 或行為未定。',
+    },
+    {
+      question: 'Atomic floating-point reduction 為什麼可能不 deterministic?',
+      options: ['atomic 不保證完成順序, 浮點加法又不具結合律', 'atomic 會改變 exponent', '只有 CPU 有這問題', '因為 L2 cache 關閉'],
+      answer: 0,
+      explanation: '不同執行順序會產生低位不同的浮點結果, run-to-run 也可能改變。',
+    },
+    {
+      question: 'Tolerance 設計應考慮什麼?',
+      options: ['dtype、operation、problem size 和 reference math mode', '檔名長度', 'GPU 風扇速度', '註解行數'],
+      answer: 0,
+      explanation: '不同精度和運算的誤差界不同, 單一固定 tolerance 會太鬆或太嚴。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, Compute Sanitizer User Manual, 2026', href: 'https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html' },
+    { citation: 'NVIDIA Corporation, "Floating Point and IEEE 754 Compliance for NVIDIA GPUs," CUDA Documentation, 2026', href: 'https://docs.nvidia.com/cuda/floating-point/index.html' },
+    { citation: 'NVIDIA Corporation, "Synchronization Functions," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#synchronization-functions' },
+    { citation: 'PyTorch Foundation, "Numerical Accuracy," in PyTorch Documentation, 2026', href: 'https://pytorch.org/docs/stable/notes/numerical_accuracy.html' },
+  ]}
+/>

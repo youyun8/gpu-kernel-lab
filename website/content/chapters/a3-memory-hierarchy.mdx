@@ -1,6 +1,6 @@
-# Memory hierarchy 全景圖
+# Memory Hierarchy 全景圖
 
-同一筆資料放在 register 或放在 global memory, 存取速度差了兩到三個數量級。GPU 優化很大一部分就是「把熱資料往上搬」的遊戲。這一章畫出完整的 memory 階層, 建立你對每一層 latency 與 bandwidth 的數量級直覺。
+同一筆資料放在 register 或放在 global memory, 存取速度差了兩到三個數量級。 GPU 優化很大一部分就是「把熱資料往上搬」的遊戲。 這一章畫出完整的 memory 階層, 建立你對每一層 latency 與 bandwidth 的數量級直覺。
 
 ## 由快到慢的階層
 
@@ -13,25 +13,57 @@
 | Global memory (HBM) | 整張卡 | ~400–800 cycles | 受 pin 限制 | 程式設計師 (配置) |
 
 <Callout variant="insight" title="先給直覺">
-數字會因架構而異, 但數量級的排序永遠成立。優化的本質就是: 把被重複使用的資料從 global memory 拉進 shared memory 或 register, 用一次昂貴的 load 換來多次便宜的存取。GEMM 的整條優化路線 (第 12 章) 就是這句話的極致演繹。
+數字會因架構而異, 但數量級的排序永遠成立。 優化的本質就是: 把被重複使用的資料從 global memory 拉進 shared memory 或 register, 用一次昂貴的 load 換來多次便宜的存取。 GEMM 的整條優化路線 (第 12 章) 就是這句話的極致演繹。
 </Callout>
 
 ## 每一層的性格
 
-**Registers** 最快但最稀缺。每個 SM/CU 的 register file 固定, 用得越兇, 能同時在飛的 warp 越少 (occupancy 下降, 第 8 章詳談)。
+**Registers** 最快但最稀缺。 每個 SM/CU 的 register file 固定, 用得越兇, 能同時在飛的 warp 越少 (occupancy 下降, 第 8 章詳談)。 用超過硬體上限時, 編譯器會把變數「spill」到 local memory — 名字聽起來近, 實際上住在 global memory, 是效能的隱形殺手。
 
-**Shared memory / LDS** 由你手動管理, 是 block 內 threads 交換資料的地方。它被切成多個 bank, 存取模式不當會產生 bank conflict (第 7 章)。
+**Shared memory / LDS** 由你手動管理, 是 block 內 threads 交換資料的地方。 它被切成多個 bank, 存取模式不當會產生 bank conflict (第 7 章)。 許多架構上它和 L1 共用同一塊實體 SRAM, 可設定兩者的分配比例 (carveout)。
 
-**L1 / L2 cache** 由硬體自動管理。L2 是全晶片共用, 對於有 locality 的存取 (例如 GEMM 的 tile、CTA swizzling 帶來的 reuse) 特別重要。
+**L1 / L2 cache** 由硬體自動管理。 L1 每 SM/CU 一份; L2 全晶片共用, 對於有 locality 的存取 (例如 GEMM 的 tile、CTA swizzling 帶來的 reuse) 特別重要。 近代 GPU 的 L2 已經到數十 MB (H100 為 50 MB, MI300X 甚至外加 256 MB 的 Infinity Cache), 「讓工作集落在 L2」本身就是一種優化策略。
 
-**Global memory (HBM) ** 容量最大、latency 最高。它的有效頻寬高度依賴 memory coalescing (第 6 章)。理論頻寬算法:
+**Global memory (HBM)** 容量最大、latency 最高。 它的有效頻寬高度依賴 memory coalescing (第 6 章)。 理論頻寬算法:
 
 $$
 \text{peak BW} = \text{memory clock} \times \text{bus width} \times \text{data rate factor}
 $$
 
+## 容易被忽略的兩層: Host Memory 與 PCIe
+
+資料在進 HBM 之前, 先住在 host 的 DRAM, 中間隔著 PCIe (或 NVLink / Infinity Fabric)。 PCIe Gen4 x16 只有 ~32 GB/s — 比 HBM 慢了 50 倍。 兩個實務結論:
+
+- **搬一次, 用很久**: 盡量讓資料留在 device 上跨多個 kernel 使用, 不要每個 kernel 前後都 host↔device 搬運。
+- **Pinned memory**: 用 `cudaMallocHost` / `hipHostMalloc` 配置不可分頁的 host memory, 傳輸更快且可與計算重疊 (async copy + stream)。
+
+另外還有 **unified memory** (`cudaMallocManaged`): 讓 host/device 共用一個指標, 由驅動自動搬頁。 原型開發方便, 但效能敏感的程式仍偏好顯式管理 — 你比 page-fault 機制更清楚資料何時在哪。
+
+## 把階層讀成一張優化地圖
+
+每一層對應一組本站後面的章節:
+
+- Global memory 的有效頻寬 → coalescing (第 6 章)。
+- Shared memory 的吞吐 → bank conflict 與 tiling (第 7 章)。
+- Register 與 occupancy 的拉鋸 → 第 8 章。
+- L2 locality → CTA swizzling (第 13 章)。
+- 把資料一路留在 register/shared memory 的極致 → GEMM (第 12 章) 與 fusion (第 19 章)。
+
+## Placement Examples
+
+優化時可以把每一筆資料問一遍「它應該住哪裡」:
+
+- **Thread-local scalar**: loop index、partial sum、micro-tile accumulator 放 register。 若 accumulator 太多導致 spill, 就縮小 tile 或拆階段。
+- **Block-reused tile**: GEMM 的 A/B tile、transpose tile、stencil halo 放 shared memory/LDS。 載入時要 coalesced, 讀取時要避開 bank conflict。
+- **Warp-shared value**: reduction 的最後 32/64 個值、softmax row 的局部 sum 用 shuffle 留在 register, 不必寫 shared memory。
+- **Read-mostly broadcast**: 小型常數表、scale、bias 若所有 lanes 讀相同或相近位置, 可考慮 constant/read-only cache 或讓一個 lane load 後 broadcast。
+- **Cross-block reuse**: 相鄰 CTA 會用到的 tile, 靠 CTA swizzle 和合適 tile order 提高 L2 hit rate。
+- **Host-device staging**: streaming input 用 pinned buffers 和 async copy, 讓 PCIe/NVLink copy 和 kernel 重疊。
+
+這個 placement 問題比「哪種記憶體最快」更重要。 最快的 register 若造成 spill 就會變最慢; shared memory 若沒有 reuse 或有 32-way bank conflict, 也只是昂貴的中轉站。
+
 <LabBox path="kernels/02-memory">
-執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬。這個實驗讓你「看見」cache 與 global memory 的分界。
+執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。 小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬。 這個實驗讓你「看見」cache 與 global memory 的分界。
 </LabBox>
 
 <Quiz
@@ -54,6 +86,18 @@ $$
       answer: 1,
       explanation: '小 buffer 整個放得進 cache, 存取沒真的打到 HBM, 因此看起來超過 HBM 頻寬。',
     },
+    {
+      question: 'register spill 的實際代價是?',
+      options: ['沒有代價, 只是換個名字', '變數被放到 local memory, 實體上住在 global memory, 存取慢數百倍', '編譯直接失敗', '會觸發 bank conflict'],
+      answer: 1,
+      explanation: 'spill 到 local memory 的變數每次存取都可能打到 global memory (L1/L2 可緩解), 是高 register 壓力 kernel 的隱形成本。',
+    },
+    {
+      question: '為什麼要盡量避免每個 kernel 前後都做 host↔device 傳輸?',
+      options: ['會清空 shared memory', 'PCIe 頻寬比 HBM 低一到兩個數量級, 傳輸會主宰總時間', '會降低 occupancy', 'driver 不允許'],
+      answer: 1,
+      explanation: 'PCIe Gen4 x16 約 32 GB/s, HBM 動輒 1–3 TB/s; 資料應留在 device 上跨 kernel 重複使用。',
+    },
   ]}
 />
 
@@ -61,5 +105,6 @@ $$
   links={[
     { citation: 'NVIDIA Corporation, "Memory Hierarchy," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#memory-hierarchy' },
     { citation: 'Advanced Micro Devices, Inc., "AMD CDNA Architecture," white paper, 2024.', href: 'https://www.amd.com/en/technologies/cdna.html' },
+    { citation: 'Z. Jia, M. Maggioni, B. Staiger, and D. P. Scarpazza, "Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking," arXiv: 1804.06826, 2018.', href: 'https://arxiv.org/abs/1804.06826' },
   ]}
 />

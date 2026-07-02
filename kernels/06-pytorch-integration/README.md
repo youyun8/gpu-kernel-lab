@@ -1,6 +1,6 @@
 # 06-pytorch-integration — PyTorch 實戰
 
-對應網站 Track D (第 17–21 章)。這裡的範例需要安裝 PyTorch (CUDA 或 ROCm 版)。無 GPU 時仍可閱讀程式碼並做語法檢查。
+對應網站 Track D (第 17–21 章)。 這裡的範例需要安裝 PyTorch (CUDA 或 ROCm 版)。 無 GPU 時仍可閱讀程式碼並做語法檢查。
 
 ## 目錄
 
@@ -24,4 +24,4 @@ python custom_op_autograd/test_custom_op.py
 
 ## 驗證狀態
 
-這些是 Python 範例, 以 `python -m py_compile` 做語法驗證 (見 `VERIFICATION_LOG.md`)。實際執行需要對應的 GPU + PyTorch 環境。
+這些是 Python 範例, 以 `python -m py_compile` 做語法驗證 (見 `VERIFICATION_LOG.md`)。 實際執行需要對應的 GPU + PyTorch 環境。

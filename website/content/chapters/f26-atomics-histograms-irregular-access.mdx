@@ -1,0 +1,145 @@
+# Atomics、Histograms 與 Irregular Access
+
+前面的章節大多假設每個 thread 寫自己的輸出位置。 真實 kernel 常常不是這樣: histogram、embedding gradient、top-k、routing、graph traversal、sparse update 都會讓很多 thread 搶同一個地址。 這一章處理「不可避免的衝突」: 先把衝突縮小, 再把剩下的 atomic 放到最便宜的位置。
+
+<Callout variant="insight" title="核心判斷">
+Atomic 不是同步的萬用答案, 而是硬體幫你序列化某個地址上的 read-modify-write。 優化 atomic kernel 的方向通常不是「找更快的 atomic」, 而是減少同一個地址被多少 lane、warp、block 同時更新。
+</Callout>
+
+## Atomic Contention 的形狀
+
+同樣是 `atomicAdd`, 效能差異可以是數十倍:
+
+- **Uniform addresses**: 每個 thread 更新不同位置, atomic 幾乎只是一般 store 加上一點 ordering 成本。
+- **Moderate skew**: 熱點地址少量重複, L2 atomic pipeline 開始排隊, 但還可以靠 warp aggregation 改善。
+- **Single hot counter**: 全 grid 搶同一個地址, throughput 變成單一計數器的序列化速度, 通常是錯誤設計。
+
+先用 profiler 看 `atomic_transactions`、L2 atomic throughput、stall reason。 若時間集中在 atomic, 不要先調 block size; 先問「哪些 thread 寫到同一個 key?」
+
+## Warp-Aggregated Atomics
+
+如果同一個 warp 中有多個 lane 更新同一個 key, 先在 warp 內合併, 只讓一個 lane 做 atomic:
+
+```cpp
+// All lanes with the same key contribute to one atomicAdd.
+unsigned mask = __match_any_sync(0xffffffff, key);
+int leader = __ffs(mask) - 1;
+float local = value;
+for (int offset = 16; offset > 0; offset >>= 1) {
+    int other_key = __shfl_down_sync(mask, key, offset);
+    float other = __shfl_down_sync(mask, local, offset);
+    if (other_key == key) local += other;
+}
+if ((threadIdx.x & 31) == leader) {
+    atomicAdd(&out[key], local);
+}
+```
+
+實務上要用 `__match_any_sync` 或 ballot 將相同 key 的 lane 分組, 再用 shuffle 做 group reduction。 這個技巧特別適合 histogram、embedding bag、Mixture-of-Experts routing counter。
+
+## Block-Private Accumulation
+
+若 key 空間不大, 讓每個 block 先在 shared memory / LDS 建 local histogram, block 結束時再把 local bins flush 到 global:
+
+```cpp
+extern __shared__ unsigned bins[];
+
+for (int i = threadIdx.x; i < num_bins; i += blockDim.x) bins[i] = 0;
+__syncthreads();
+
+for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
+    atomicAdd(&bins[input[i]], 1u);
+}
+__syncthreads();
+
+for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+    if (bins[i] != 0) atomicAdd(&global_bins[i], bins[i]);
+}
+```
+
+這把 global atomic 數量從「每筆資料一次」降到「每個 block 每個非零 bin 一次」。 代價是 shared memory 使用量、shared atomic contention、以及初始化 local bins 的成本。 當 `num_bins` 很大或 key 很稀疏時, 改用排序、分段 reduce 或 hash table 會更合理。
+
+## Privatization 層級
+
+選 privatization 層級時, 從便宜到昂貴評估:
+
+- **Per-lane register**: 同一 lane 多次累加同 key, 最便宜。
+- **Per-warp shared row**: 每個 warp 一份小 histogram, 降低 shared bank conflict。
+- **Per-block shared table**: global atomic 最少, 但 shared memory 佔用高。
+- **Per-CTA global scratch**: key 空間太大放不進 shared memory 時使用, 後續再做第二階段 reduce。
+- **Sort and reduce**: 極度 skew 或 key 很多時, 先排序讓同 key 連續, 再 segment reduce。
+
+## Scatter、Gather 與 Coalescing Trade-Off
+
+Irregular kernel 往往無法同時讓讀和寫都 coalesced。 優先順序通常是:
+
+1. 讓資料量較大的方向 coalesced。
+2. 將隨機讀改成 texture / read-only cache 路徑或依 key 排序提升 locality。
+3. 將隨機寫改成 append buffer + compact, 或兩階段 scatter。
+4. 若必須 atomic scatter, 先做 warp/block aggregation。
+
+例如 graph BFS 的 frontier expansion 可先為每個 vertex 計算 degree prefix sum, 再把 edge output 寫到已分配好的連續區間; 這比每條 edge 直接 atomic append 到 global queue 穩定得多。
+
+## Memory Ordering 與 Scope
+
+Atomic 只保證對同一個地址的 read-modify-write 原子性, 不等於全域 barrier。 跨 block 生產與消費資料時, 要明確處理 ordering:
+
+- 同一 kernel 內跨 block 無一般性的 grid barrier, 除非使用 cooperative groups 並滿足全 grid residency。
+- Producer 寫資料後再寫 flag, consumer 讀 flag 後讀資料時, 需要合適的 memory fence / acquire-release 語意。
+- 在 multi-GPU 或 host-visible memory 上, atomic scope 必須和資料可見範圍一致, 否則 correctness 只是在本機上碰巧成立。
+
+<Callout variant="warn" title="常見錯誤">
+`atomicAdd(counter, 1)` 能安全分配 index, 但不能保證你在同一段程式寫入的 payload 已經對其他 block 可見。 需要 queue、work stealing 或跨 block producer-consumer 時, 優先使用成熟 library 或 cooperative groups 模式, 不要把 atomic counter 當成完整同步原語。
+</Callout>
+
+## Histogram 優化範例
+
+一個 256-bin byte histogram 的優化順序通常是:
+
+1. Naive: 每個 byte 對 global bin 做 `atomicAdd`。
+2. Per-block shared bins: 將 global atomic 壓到 `blocks × 256` 次。
+3. Per-warp bins: shared array 改成 `[warps_per_block][256 + padding]`, 降低同 bank 熱點。
+4. Vectorized input: 每個 thread 讀 `uchar4` 或 `uint32_t`, 用 bit operation 拆 byte。
+5. Two-phase merge: 第一階段寫 partial histogram, 第二階段合併, 避免單 kernel 尾端 global contention。
+
+<LabBox path="kernels/04-reductions-softmax">
+本章可從 reduction lab 延伸: 將 `atomicAdd` 收尾版本改成 warp-aggregated atomic, 再造一個 256-bin histogram microbenchmark。 輸入分成 uniform、Zipf skew、single-hot 三種分佈, 比較 global atomic、block-private、warp-private 三條曲線。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Atomic kernel 最先該診斷的是什麼?',
+      options: ['block size 是否為 1024', '同一個地址被多少 thread 同時更新', '是否用了 fast math', 'L1 cache 是否開啟'],
+      answer: 1,
+      explanation: 'Atomic 的主要成本來自同地址序列化, 所以 key skew 和 hot counter 比 block size 更關鍵。',
+    },
+    {
+      question: 'Warp-aggregated atomic 的主要收益是?',
+      options: ['讓 atomic 變成非同步', '把同 warp 中相同 key 的多次更新合併成一次 atomic', '避免所有 memory fence', '提高 clock rate'],
+      answer: 1,
+      explanation: '先用 shuffle/ballot 在 warp 內合併貢獻, 再由 leader lane 發出一個 atomic。',
+    },
+    {
+      question: 'Block-private histogram 不適合哪種情況?',
+      options: ['bin 數很小', 'key 空間巨大且稀疏', 'global atomic contention 很高', '每個 block 能重複使用 bins'],
+      answer: 1,
+      explanation: 'key 空間太大會吃光 shared memory, 初始化和 flush 成本也會壓過收益。',
+    },
+    {
+      question: 'Atomic counter 可以取代跨 block barrier 嗎?',
+      options: ['可以, atomic 本身就是 barrier', '不可以, atomic 只保證特定地址的原子更新, ordering 仍需明確處理', '只有 int 可以', '只有 AMD 可以'],
+      answer: 1,
+      explanation: '跨 block producer-consumer 需要 fence、scope 或 cooperative groups, 單一 counter 不保證 payload 可見性。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Atomic Functions," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions' },
+    { citation: 'NVIDIA Corporation, "Memory Fence Functions," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#memory-fence-functions' },
+    { citation: 'NVIDIA Corporation, "CUDA Pro Tip: Optimized Filtering with Warp-Aggregated Atomics," NVIDIA Technical Blog, 2017', href: 'https://developer.nvidia.com/blog/cuda-pro-tip-optimized-filtering-warp-aggregated-atomics/' },
+    { citation: 'Advanced Micro Devices, Inc., "HIP C++ Language Extensions," in HIP Documentation, 2026', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_cpp_language_extensions.html' },
+  ]}
+/>

@@ -1,10 +1,10 @@
-# 第一個 kernel
+# 第一個 Kernel
 
-我們來寫第一個真正在 GPU 上跑的程式: vector add,$C = A + B$。它簡單到沒有任何優化空間, 正好讓你把注意力放在「一段程式碼如何被幾千個 thread 同時執行」這件事上。
+我們來寫第一個真正在 GPU 上跑的程式: vector add,$C = A + B$。 它簡單到沒有任何優化空間, 正好讓你把注意力放在「一段程式碼如何被幾千個 thread 同時執行」這件事上。
 
-## thread / block / grid hierarchy
+## Thread / Block / Grid Hierarchy
 
-GPU 的並行度用三層結構描述。最小單位是 thread;threads 組成 block (同一 block 的 threads 能共用 shared memory、能 `__syncthreads()`);blocks 組成 grid。你在 launch kernel 時指定 grid 與 block 的維度, 硬體再把它們排到 SM/CU 上。
+GPU 的並行度用三層結構描述。 最小單位是 thread; threads 組成 block (同一 block 的 threads 能共用 shared memory、能 `__syncthreads()`); blocks 組成 grid。 你在 launch kernel 時指定 grid 與 block 的維度, 硬體再把它們排到 SM/CU 上。
 
 每個 thread 用內建變數算出「我負責哪一筆資料」:
 
@@ -12,7 +12,11 @@ $$
 i = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}
 $$
 
-## vector add
+三層各有明確的角色: thread 是計算的單位、block 是「協作」的單位 (同步與 shared memory 的邊界)、grid 是「一次 launch 的全部工作」。 block 大小通常選 128–512 且為 warp size 的倍數; 本站的範例慣用 256。
+
+## 完整流程: 配置、搬運、launch、取回
+
+寫 GPU 程式的 host 端固定有四拍: 在 device 上配置記憶體 → 把輸入從 host 複製過去 → launch kernel → 把結果複製回來。
 
 <PlatformTabs>
 <Platform name="CUDA">
@@ -20,15 +24,27 @@ $$
 ```cpp
 // One thread per element. The grid is sized to cover n with a boundary guard.
 __global__ void vectorAdd(const float* a, const float* b, float* c, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) c[i] = a[i] + b[i];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) c[i] = a[i] + b[i];
 }
 
-void launch(const float* a, const float* b, float* c, int n) {
-  constexpr int kBlock = 256;
-  int grid = (n + kBlock - 1) / kBlock; // ceil-div so every element is covered
-  vectorAdd<<<grid, kBlock>>>(a, b, c, n);
-  cudaDeviceSynchronize();
+void run(const float* hostA, const float* hostB, float* hostC, int n) {
+    float *a, *b, *c;
+    size_t bytes = n * sizeof(float);
+    cudaMalloc(&a, bytes);
+    cudaMalloc(&b, bytes);
+    cudaMalloc(&c, bytes);
+    cudaMemcpy(a, hostA, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(b, hostB, bytes, cudaMemcpyHostToDevice);
+
+    constexpr int kBlock = 256;
+    int grid = (n + kBlock - 1) / kBlock; // ceil-div so every element is covered
+    vectorAdd<<<grid, kBlock>>>(a, b, c, n);
+
+    cudaMemcpy(hostC, c, bytes, cudaMemcpyDeviceToHost); // implicit sync
+    cudaFree(a);
+    cudaFree(b);
+    cudaFree(c);
 }
 ```
 
@@ -40,15 +56,27 @@ void launch(const float* a, const float* b, float* c, int n) {
 #include <hip/hip_runtime.h>
 
 __global__ void vectorAdd(const float* a, const float* b, float* c, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) c[i] = a[i] + b[i];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) c[i] = a[i] + b[i];
 }
 
-void launch(const float* a, const float* b, float* c, int n) {
-  constexpr int kBlock = 256;
-  int grid = (n + kBlock - 1) / kBlock;
-  hipLaunchKernelGGL(vectorAdd, dim3(grid), dim3(kBlock), 0, 0, a, b, c, n);
-  hipDeviceSynchronize();
+void run(const float* hostA, const float* hostB, float* hostC, int n) {
+    float *a, *b, *c;
+    size_t bytes = n * sizeof(float);
+    hipMalloc(&a, bytes);
+    hipMalloc(&b, bytes);
+    hipMalloc(&c, bytes);
+    hipMemcpy(a, hostA, bytes, hipMemcpyHostToDevice);
+    hipMemcpy(b, hostB, bytes, hipMemcpyHostToDevice);
+
+    constexpr int kBlock = 256;
+    int grid = (n + kBlock - 1) / kBlock;
+    vectorAdd<<<grid, kBlock>>>(a, b, c, n);
+
+    hipMemcpy(hostC, c, bytes, hipMemcpyDeviceToHost);
+    hipFree(a);
+    hipFree(b);
+    hipFree(c);
 }
 ```
 
@@ -56,12 +84,52 @@ void launch(const float* a, const float* b, float* c, int n) {
 </PlatformTabs>
 
 <Callout variant="info" title="那個 if (i < n) 不是裝飾">
-grid 用 ceil-div 算出來, 最後一個 block 幾乎一定會有超出 n 的 thread。少了邊界檢查, 這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
+grid 用 ceil-div 算出來, 最後一個 block 幾乎一定會有超出 n 的 thread。 少了邊界檢查, 這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
 </Callout>
 
-## compile 流程
+## 錯誤檢查: 不要裸奔
 
-CUDA 用 `nvcc`, HIP 用 `hipcc`。兩者都會把 host 程式碼交給系統 C++ 編譯器, 把 device 程式碼編成中介表示 (PTX / GCN-CDNA ISA), 最後在載入時 JIT 或 AOT 成實際 GPU 指令。
+Kernel launch 不會回傳錯誤; 錯誤要等到下一次同步才浮現。 養成兩個習慣: 每個 runtime API 呼叫都檢查回傳值, launch 後用 `cudaGetLastError()` 抓 launch 本身的問題 (例如 block size 超過上限)。 實務上用一個 macro 包起來:
+
+```cpp
+// Wrap every runtime call; report file:line on failure and abort.
+#define GPU_CHECK(call)                                                    \
+    do {                                                                   \
+        auto err = (call);                                                 \
+        if (err != cudaSuccess) {                                          \
+            fprintf(stderr, "GPU error %s at %s:%d\n",                     \
+                    cudaGetErrorString(err), __FILE__, __LINE__);          \
+            abort();                                                       \
+        }                                                                  \
+    } while (0)
+
+GPU_CHECK(cudaMalloc(&a, bytes));
+vectorAdd<<<grid, kBlock>>>(a, b, c, n);
+GPU_CHECK(cudaGetLastError());       // catches bad launch configuration
+GPU_CHECK(cudaDeviceSynchronize());  // catches errors raised during execution
+```
+
+Debug 神器再補一個: `compute-sanitizer` (CUDA) 或 HIP 的 sanitizer 工具能抓越界存取與 race condition, 比肉眼快得多。
+
+## Grid-stride loop: 更有彈性的寫法
+
+「一個 thread 處理一個元素」要求 grid 隨資料大小變動。 另一個常見寫法是 grid-stride loop: launch 固定數量的 threads, 每個 thread 以整個 grid 的大小為步幅處理多個元素:
+
+```cpp
+// Works for any n with a fixed grid; each thread strides over the array.
+__global__ void vectorAddStride(const float* a, const float* b, float* c, int n) {
+    int stride = blockDim.x * gridDim.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        c[i] = a[i] + b[i];
+    }
+}
+```
+
+好處: grid 大小與資料大小解耦 (可依硬體選擇)、天然處理任意 n、每 thread 有多筆工作可提高指令層級平行度。 後面的 reduction (第 10 章) 會大量使用這個 pattern。
+
+## Compile 流程
+
+CUDA 用 `nvcc`, HIP 用 `hipcc`。 兩者都會把 host 程式碼交給系統 C++ 編譯器, 把 device 程式碼編成中介表示 (PTX / GCN-CDNA ISA), 最後在載入時 JIT 或 AOT 成實際 GPU 指令。
 
 ```bash
 # CUDA
@@ -71,10 +139,22 @@ nvcc -O3 -arch=sm_80 vector_add.cu -o vector_add
 hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 ```
 
-本站的 kernels 用 CMake 包起來, 自動偵測平台並帶入正確的 arch flag, 你不必手記這些參數。
+`-arch=sm_80` / `--offload-arch=gfx90a` 指定目標架構 (A100 / MI200)。 編給錯的架構, CUDA 可能靠 PTX JIT 救回來 (變慢), ROCm 則直接跑不起來 — 查你的卡: `nvidia-smi --query-gpu=compute_cap --format=csv` 或 `rocminfo | grep gfx`。 本站的 kernels 用 CMake 包起來, 自動偵測平台並帶入正確的 arch flag, 你不必手記這些參數。
+
+## Kernel Shape Patterns
+
+第一個 kernel 學完後, 立刻把索引模式整理成幾個模板:
+
+- **1D contiguous**: vector add、SAXPY、layernorm epilogue。 用 `i = blockIdx.x * blockDim.x + threadIdx.x`, 加 bounds check。
+- **2D row/column**: image、matrix、attention row。 用 `row = blockIdx.y * blockDim.y + threadIdx.y`, `col = blockIdx.x * blockDim.x + threadIdx.x`, 並確認 row-major 寫回是 coalesced。
+- **Grid-stride**: 資料量大或想固定 launch size 時使用。 每 thread 處理多筆資料, 也方便在 benchmark 中用同一個 grid 比較不同 `n`。
+- **One block per logical unit**: 一個 block 處理一列 softmax、一個 tile、一個 histogram shard。 這讓 block 內可用 shared memory 和 `__syncthreads()` 協作。
+- **One warp per small unit**: 短 row reduction、小 softmax、top-k 小段落。 用 warp shuffle 取代 shared memory, 降低同步成本。
+
+還有兩個習慣要從第一天建立: pointer 可標 `const` 和 `__restrict__` 時就標, 讓編譯器知道 aliasing 較少; 所有 kernel launch 在 debug/test 模式都要接 `cudaGetLastError()` / `hipGetLastError()` 和一次同步, 否則錯誤會延後到無關 API 才爆出來。
 
 <LabBox path="kernels/01-basics">
-編譯並執行 `vector_add`。它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
+編譯並執行 `vector_add`。 它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。 vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
 </LabBox>
 
 <Quiz
@@ -89,7 +169,7 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
       question: '為什麼 grid size 要用 ceil-div ` (n + block - 1) / block`?',
       options: ['為了對齊 cache line', '確保 thread 總數 ≥ n, 不漏掉任何元素', '為了提高 occupancy', '為了避免 bank conflict'],
       answer: 1,
-      explanation: 'n 不一定整除 block size, ceil-div 保證覆蓋所有元素;多出來的 thread 靠邊界檢查擋掉。',
+      explanation: 'n 不一定整除 block size, ceil-div 保證覆蓋所有元素; 多出來的 thread 靠邊界檢查擋掉。',
     },
     {
       question: 'vector add 屬於哪一類 kernel?',
@@ -97,12 +177,26 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
       answer: 1,
       explanation: '每個元素只做一次加法卻要讀兩個、寫一個 float, arithmetic intensity 極低, 受限於 memory bandwidth。',
     },
+    {
+      question: 'kernel launch 後立刻呼叫 `cudaGetLastError()` 的目的是?',
+      options: ['同步 device', '抓 launch configuration 本身的錯誤 (如 block size 超限)', '清空 L2 cache', '回收記憶體'],
+      answer: 1,
+      explanation: 'launch 是非同步且不回傳錯誤, launch 參數不合法只能靠 cudaGetLastError 抓; 執行期錯誤則要等同步點。',
+    },
+    {
+      question: 'grid-stride loop 相對「一 thread 一元素」的好處是?',
+      options: ['自動消除邊界檢查', 'grid 大小與資料大小解耦, 任意 n 都能用固定 grid 處理', '提高精度', '免去 kernel launch'],
+      answer: 1,
+      explanation: '每個 thread 以 grid 總 thread 數為步幅掃過陣列, 同一個 launch 配置可服務任何資料量, 每 thread 也有更多獨立工作。',
+    },
   ]}
 />
 
 <FurtherReading
   links={[
     { citation: 'NVIDIA Corporation, "Kernels," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#kernels' },
+    { citation: 'M. Harris, "CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops," NVIDIA Technical Blog, 2013.', href: 'https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/' },
     { citation: 'Advanced Micro Devices, Inc., "HIP Porting Guide," in HIP Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_porting_guide.html' },
+    { citation: 'NVIDIA Corporation, Compute Sanitizer Documentation, 2024.', href: 'https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html' },
   ]}
 />

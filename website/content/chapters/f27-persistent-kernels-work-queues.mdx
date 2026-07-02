@@ -1,0 +1,133 @@
+# Persistent Kernels 與 Work Queues
+
+一般 kernel 的思路是「每個 output 對應一個 thread/block」。 Persistent kernel 反過來: 啟動剛好足夠常駐 SM/CU 的 blocks, 每個 block 從 global queue 反覆拿工作直到清空。 當工作大小不均、launch overhead 很高、或需要跨 tile 動態排程時, persistent execution 會比靜態 grid 更穩。
+
+## 為什麼需要 Persistent Kernel
+
+靜態 grid 在三種情況容易浪費:
+
+- **工作不均**: 某些 tile 特別慢, 其他 SM 已經空了, 最後只剩少數 blocks 拖尾。
+- **工作粒度小**: 每個 task 太小, 多次 launch 的固定成本超過實際運算。
+- **動態產生工作**: graph traversal、ray tracing、decode serving、MoE routing 的下一批工作取決於本批結果。
+
+Persistent kernel 的代價是你必須自己管理 queue、termination、fairness 與 memory ordering。 它不是預設選項, 但在 tail effect 嚴重時很有力。
+
+## Grid-Stride Loop 到 Work Queue
+
+Grid-stride loop 是最簡單的 persistent 思維: thread 在同一個 kernel 中處理多筆資料。 Work queue 則把靜態 stride 改成動態取號:
+
+```cpp
+__global__ void persistentTiles(const Task* tasks, int num_tasks, float* out) {
+    while (true) {
+        int task_id = atomicAdd(&g_next_task, 1);
+        if (task_id >= num_tasks) break;
+        Task task = tasks[task_id];
+        run_tile(task, out);
+    }
+}
+```
+
+這段程式只適合 task 成本差異很大時。 若每個 task 成本均一, `atomicAdd` 取號反而只是額外 overhead。
+
+## Launch Sizing
+
+Persistent kernel 通常不啟動 `num_tasks` 個 blocks, 而是啟動 `SM_count × blocks_per_SM`:
+
+```cpp
+int sm_count = 0;
+cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+int blocks = sm_count * 2;      // tune: 1-4 resident CTAs per SM
+persistentTiles<<<blocks, 256>>>(tasks, num_tasks, out);
+```
+
+`blocks_per_SM` 要與 register、shared memory、barrier 使用量一起調。 若每個 block 很重, 一個 SM 一個 block 就夠; 若 block 常等 memory, 每個 SM 兩到四個 block 可提高 latency hiding。
+
+## Work Stealing 與 Chunking
+
+每次只取一個 task 會放大 atomic overhead。 常見做法是每次取一段:
+
+```cpp
+constexpr int kChunk = 8;
+while (true) {
+    int begin = atomicAdd(&g_next_task, kChunk);
+    if (begin >= num_tasks) break;
+    int end = min(begin + kChunk, num_tasks);
+    for (int task_id = begin; task_id < end; ++task_id) {
+        run_tile(tasks[task_id], out);
+    }
+}
+```
+
+Chunk 太小會增加 atomic; chunk 太大又會回到 tail effect。 最佳值通常靠 profiling 或 autotuning 決定。
+
+## Persistent GEMM、Split-K 與 Stream-K
+
+GEMM 中 persistent scheduling 常用來處理小矩陣、skinny 矩陣或 batch shape 很不均的情況:
+
+- **Persistent tile scheduler**: 常駐 blocks 從 tile queue 取 `(m_tile, n_tile, k_tile)`。
+- **Split-K**: 多個 blocks 分攤同一個 output tile 的 K 維度, 再 reduce partials。
+- **Stream-K**: 以 work-centric 的方式把 K 維工作切成連續 stream, 讓所有 SM 在尾端仍有工作。
+- **CTA swizzle**: 改變 tile 取用順序, 在 L2 locality 與 load balance 之間折衷。
+
+這些技巧的共同點是: 不再相信二維 grid 天然均衡, 而是把「下一個 tile 是誰」變成可設計的 scheduler。
+
+## Producer-Consumer Queue
+
+動態 queue 要處理三件事:
+
+- **Capacity**: ring buffer 滿了怎麼辦? Spin wait 會浪費 SM, 太小會限制 parallelism。
+- **Ordering**: payload 必須先寫完, 再 publish head/tail。 consumer 看到 index 後才能讀 payload。
+- **Termination**: 所有 producer 都完成且 queue 為空時, consumer 才能退出。 這通常比看起來難。
+
+若問題可以拆成幾個固定階段, 多個 kernel launch 加上 CUDA Graph/HIP Graph 往往更簡單且更可靠。 Persistent queue 留給真正需要單 kernel 動態排程的情況。
+
+## Occupancy 不再只是越高越好
+
+Persistent kernel 常用較少 blocks 長時間常駐, 因此要更注意:
+
+- 每個 SM 至少有足夠 warp 隱藏 memory latency。
+- 不要讓一個長 task 佔住整個 block 太久, 導致 block 內其他 threads 閒置。
+- 若使用 spin wait, 要插入 backoff 或拆階段, 避免整張 GPU 忙等。
+- Watchdog 環境下長 kernel 可能被 OS 終止, 開發機上尤其要小心。
+
+<LabBox path="kernels/05-advanced-scheduling">
+以 `split_k_gemm.cpp` 和 `cta_swizzle.cpp` 為起點, 加一個 persistent tile scheduler: 固定啟動 `SM_count × 2` 個 CTAs, 用 global counter 分配 tile。 比較規則 shape、skinny shape、batch shape 不均三種情況的 tail latency。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Persistent kernel 最適合解決哪個問題?',
+      options: ['所有 elementwise kernel', '工作時間不均造成的 tail effect 和動態排程', '提高 fp64 精度', '取代 shared memory'],
+      answer: 1,
+      explanation: '常駐 blocks 動態取工作, 能讓先完成的 SM 繼續偷工作, 減少尾端只剩少數 blocks 的浪費。',
+    },
+    {
+      question: 'Work queue 每次取一個 task 的主要代價是?',
+      options: ['無法 coalescing', '取號 atomic overhead 可能太高', '不能使用 register', '必定降低 occupancy 到 0'],
+      answer: 1,
+      explanation: 'task 很小或成本均一時, atomic counter 的成本會壓過動態排程收益。',
+    },
+    {
+      question: 'Persistent launch 的 blocks 數通常如何設定?',
+      options: ['等於元素數', '約為 SM/CU 數乘上每 SM/CU 常駐 CTA 數', '固定 1 個 block', '固定 65535 個 block'],
+      answer: 1,
+      explanation: 'persistent kernel 讓 blocks 長時間常駐, 通常只啟動足夠填滿硬體的 CTAs。',
+    },
+    {
+      question: 'Producer-consumer queue 中 publish index 前必須先處理什麼?',
+      options: ['提高 clock rate', '確保 payload 已寫入且 memory ordering 正確', '把所有資料排序', '關閉 L2'],
+      answer: 1,
+      explanation: 'consumer 看到 index 後會讀 payload, 因此 producer 必須先完成資料寫入並使用正確 fence/scope。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'M. Osama, D. Merrill, C. Cecka, M. Garland, and J. D. Owens, "Stream-K: Work-Centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU," arXiv: 2301.03598, 2023', href: 'https://arxiv.org/abs/2301.03598' },
+    { citation: 'NVIDIA Corporation, "Cooperative Groups," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cooperative-groups' },
+    { citation: 'NVIDIA Corporation, "CUDA Occupancy Calculator," in CUDA C++ Programming Guide, 2026', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#occupancy-calculator' },
+    { citation: 'Advanced Micro Devices, Inc., "Kernel Language," in HIP Documentation, 2026', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_cpp_language_extensions.html' },
+  ]}
+/>

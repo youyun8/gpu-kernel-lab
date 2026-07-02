@@ -1,12 +1,12 @@
 # 如何測量效能
 
-「我改了 kernel, 快了 30%!」— 真的嗎, 還是你量到的是 kernel launch overhead、cold cache, 或第一次跑的 JIT 編譯?在優化之前, 你得先能正確、可重現地測量。這一章給你一套可信的測量方法, 以及第一次使用 profiler。
+「我改了 kernel, 快了 30%!」— 真的嗎, 還是你量到的是 kernel launch overhead、cold cache, 或第一次跑的 JIT 編譯? 在優化之前, 你得先能正確、可重現地測量。 這一章給你一套可信的測量方法, 以及第一次使用 profiler。
 
 ## 正確計時的三個要素
 
-**用 GPU event, 不要用 CPU 的 wall clock 包 launch。** kernel launch 是非同步的, `cudaEventRecord` / `hipEventRecord` 才能量到 device 上的實際執行時間。
+**用 GPU event, 不要用 CPU 的 wall clock 包 launch。** Kernel launch 是非同步的, `cudaEventRecord` / `hipEventRecord` 才能量到 device 上的實際執行時間。
 
-**Warmup。** 第一次執行包含 context 初始化、JIT、cold cache。丟掉前幾次, 再開始計時。
+**Warmup。** 第一次執行包含 context 初始化、JIT、cold cache。 丟掉前幾次, 再開始計時。
 
 **多次 iteration 取代單次。** 跑數十到數百次取平均 (或中位數), 避免被單次雜訊誤導。
 
@@ -58,29 +58,58 @@ $$
 \text{GFLOP/s} = \frac{\text{FLOP count}}{\text{time (s)} \times 10^9}
 $$
 
-接著算 **% of peak** — 這就是 speed-of-light 分析: 你的 kernel 相對硬體上限跑到幾成?一個 memory-bound kernel 若已達 peak bandwidth 的 85%, 再怎麼改 compute 也沒用;該做的是換演算法或減少資料搬移。
+接著算 **% of peak** — 這就是 speed-of-light 分析: 你的 kernel 相對硬體上限跑到幾成? 一個 memory-bound kernel 若已達 peak bandwidth 的 85%, 再怎麼改 compute 也沒用; 該做的是換演算法或減少資料搬移。
 
 <Callout variant="warn" title="別把 overhead 當 kernel 時間">
-對極小的 workload, kernel launch overhead (數 μs) 可能比 kernel 本身還久。若你的 op 很小又被呼叫很多次, launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
+對極小的 workload, kernel launch overhead (數 μs) 可能比 kernel 本身還久。 若你的 op 很小又被呼叫很多次, launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
 </Callout>
+
+## 讓數字可重現: 環境也要控制
+
+同一個 kernel 在同一張卡上, 兩次量測差 10% 是常態 — 除非你控制環境:
+
+- **時脈會浮動**: GPU 有 boost 與熱節流。 嚴謹的 benchmark 先鎖定時脈 (`nvidia-smi -lgc <min>,<max>` 或 `rocm-smi --setperfdeterminism`), 至少也要記錄當時的時脈與溫度。
+- **卡上有沒有別人**: 共用機器上其他 process 會搶 SM 與頻寬。 量測前用 `nvidia-smi` / `rocm-smi` 確認卡是空的。
+- **報中位數而非平均**: 中位數對偶發的抖動 (OS 排程、ECC scrub) 更穩健; 更好的做法是同時報告 p10/p50/p90, 讓分佈說話。
+- **資料內容也可能影響時間**: 例如含大量 denormal 的浮點運算會慢。 用貼近真實的輸入分佈。
 
 ## 第一次使用 profiler
 
-手算 bandwidth 只能告訴你「多快」, profiler 告訴你「為什麼」。
+手算 bandwidth 只能告訴你「多快」, profiler 告訴你「為什麼」。 兩類工具分工不同:
+
+- **Timeline profiler** (Nsight Systems / rocprofv3 的 trace 模式): 看整個程式的時間軸 — kernel 之間有沒有空隙、copy 與 compute 有沒有重疊。 回答「時間花在哪個 kernel」。
+- **Kernel profiler** (Nsight Compute / omniperf): 深入單一 kernel 的硬體 metric。 回答「這個 kernel 為什麼慢」。
 
 ```bash
-# NVIDIA Nsight Compute: 收集 speed-of-light section
+# NVIDIA: timeline first, then zoom into one kernel
+nsys profile -o timeline ./vector_add
 ncu --set basic ./vector_add
 
-# AMD: rocprofv3 / omniperf
+# AMD: rocprofv3 for traces/stats, omniperf for per-kernel analysis
 rocprofv3 --stats -- ./vector_add
 omniperf profile -n vadd -- ./vector_add
 ```
 
-第一次看重點放在 speed-of-light / roofline section: 它直接告訴你這個 kernel 是 memory-bound 還是 compute-bound, 以及離 peak 有多遠。細部 metric 導讀留到第 16 章。
+第一次看重點放在 speed-of-light / roofline section: 它直接告訴你這個 kernel 是 memory-bound 還是 compute-bound, 以及離 peak 有多遠。 細部 metric 導讀留到第 16 章。
+
+<Callout variant="insight" title="先 timeline, 再 kernel">
+新手常直接對單一 kernel 開 Nsight Compute, 卻沒先確認那個 kernel 值不值得看。 正確順序: 先用 timeline 找出「時間都花在哪」, 確定目標 kernel 佔比夠大, 再深入分析。 優化一個只佔 2% 時間的 kernel, 再成功也只省 2% — 這就是 Amdahl 定律。
+</Callout>
+
+## Measurement Recipes
+
+不同問題要用不同量測方式:
+
+- **Single-kernel throughput**: 用 GPU events 包住多次 launch, 報 median/average、GB/s、GFLOP/s、% peak。
+- **End-to-end latency**: 用 timeline 或 CPU wall clock 包住整個 pipeline, 包含 H2D/D2H、launch gap、framework overhead 和同步。
+- **Transfer overlap**: 在 timeline 看 copy engine 和 compute stream 是否重疊。 只有 kernel event 很快不代表 pipeline 快。
+- **Small-kernel overhead**: 將同一小 op 重複 1、10、100、1000 次, 看時間是否線性成長。 若固定成本主導, 優先考慮 fusion 或 graph replay。
+- **Regression benchmark**: 固定 input seed、shape set、clock/environment, 記錄 p50/p90。 production kernel 不只要最快一次, 還要穩定。
+
+一個常用 sanity check: 把問題大小加倍。 若時間幾乎不變, 你量到的是 launch overhead 或同步; 若時間約加倍, 你量到的是 throughput path; 若時間超線性增加, cache、TLB、L2 residency 或 memory capacity 可能變成新瓶頸。
 
 <LabBox path="kernels/02-memory">
-`kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。用它跑 `bandwidth_probe`, 再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling, 對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。
+`kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。 用它跑 `bandwidth_probe`, 再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling, 對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。
 </LabBox>
 
 <Quiz
@@ -95,7 +124,7 @@ omniperf profile -n vadd -- ./vector_add
       question: '量 kernel 執行時間應優先用哪種計時?',
       options: ['CPU 的 std::chrono 包住 launch', 'GPU event (cudaEvent/hipEvent)', 'nvidia-smi 的功耗', '編譯時間'],
       answer: 1,
-      explanation: 'launch 非同步, CPU 計時會量到錯誤區間;GPU event 記錄 device 上的實際起訖。',
+      explanation: 'launch 非同步, CPU 計時會量到錯誤區間; GPU event 記錄 device 上的實際起訖。',
     },
     {
       question: 'speed-of-light 分析的目的是?',
@@ -103,12 +132,25 @@ omniperf profile -n vadd -- ./vector_add
       answer: 1,
       explanation: '% of peak 讓你知道瓶頸在 memory 還是 compute, 以及是否已接近上限、不值得再調。',
     },
+    {
+      question: '為什麼嚴謹的 benchmark 要鎖定 (或至少記錄) GPU 時脈?',
+      options: ['避免燒壞 GPU', 'boost 與熱節流讓時脈浮動, 同一 kernel 兩次量測可能差異顯著', '提高精度', 'profiler 才能運作'],
+      answer: 1,
+      explanation: '時脈不固定時, 你量到的差異可能來自溫度而非程式碼改動; 鎖頻或記錄環境才能公平比較。',
+    },
+    {
+      question: 'timeline profiler (nsys) 和 kernel profiler (ncu) 的分工是?',
+      options: ['兩者相同', 'timeline 找出時間花在哪個 kernel; kernel profiler 解釋單一 kernel 為什麼慢', 'ncu 只能看 CPU', 'nsys 只能看記憶體'],
+      answer: 1,
+      explanation: '先用 timeline 確認目標 kernel 佔比夠大 (Amdahl 定律), 再用 kernel profiler 深入 — 順序反了會浪費力氣。',
+    },
   ]}
 />
 
 <FurtherReading
   links={[
     { citation: 'NVIDIA Corporation, Nsight Compute Documentation, 2024.', href: 'https://docs.nvidia.com/nsight-compute/' },
+    { citation: 'NVIDIA Corporation, Nsight Systems Documentation, 2024.', href: 'https://docs.nvidia.com/nsight-systems/' },
     { citation: 'Advanced Micro Devices, Inc., Omniperf Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/omniperf/en/latest/' },
     { citation: 'Advanced Micro Devices, Inc., ROCProfiler Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/rocprofiler/en/latest/' },
   ]}
