@@ -23,3 +23,6 @@ kernels/06-pytorch-integration/**/*.so
 
 # OS
 .DS_Store
+
+# Agent / tooling state
+.codex/
