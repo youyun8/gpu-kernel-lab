@@ -1,14 +1,14 @@
 # Warp-level programming
 
-要把一個 warp 內 32 個值加起來,你會怎麼做?寫進 shared memory 再 reduce?其實同一個 warp 的 threads 可以直接交換 register,完全不碰 shared memory。這一章介紹 warp-level primitives,以及它們在 CUDA 與 AMD 之間最容易踩的可攜性陷阱。
+要把一個 warp 內 32 個值加起來, 你會怎麼做?寫進 shared memory 再 reduce?其實同一個 warp 的 threads 可以直接交換 register, 完全不碰 shared memory。這一章介紹 warp-level primitives, 以及它們在 CUDA 與 AMD 之間最容易踩的可攜性陷阱。
 
 ## 為什麼要在 warp 層級思考
 
-同一個 warp 的 threads 是 lockstep 執行的,硬體提供指令讓它們直接互相讀 register,省掉 shared memory 的來回與 `__syncthreads ()`。這對 reduction、scan、broadcast 特別有用。
+同一個 warp 的 threads 是 lockstep 執行的, 硬體提供指令讓它們直接互相讀 register, 省掉 shared memory 的來回與 `__syncthreads()`。這對 reduction、scan、broadcast 特別有用。
 
-## shuffle:threads 之間直接傳 register
+## shuffle: threads 之間直接傳 register
 
-`__shfl_down_sync` 讓 lane 讀取另一個 lane 的 register 值,是 warp reduce 的基礎:
+`__shfl_down_sync` 讓 lane 讀取另一個 lane 的 register 值, 是 warp reduce 的基礎:
 
 <PlatformTabs>
 <Platform name="CUDA">
@@ -40,45 +40,45 @@ __device__ float warpReduceSum(float val) {
 </Platform>
 </PlatformTabs>
 
-## ballot / vote:warp 層級的投票
+## ballot / vote: warp 層級的投票
 
-`__ballot_sync` 讓每個 lane 提交一個 predicate,回傳一個 bitmask 代表哪些 lane 為真;`__any_sync` / `__all_sync` 則回傳布林。常用於 stream compaction、動態決定分支、計算 active lane 數。
+`__ballot_sync` 讓每個 lane 提交一個 predicate, 回傳一個 bitmask 代表哪些 lane 為真;`__any_sync` / `__all_sync` 則回傳布林。常用於 stream compaction、動態決定分支、計算 active lane 數。
 
-## 可攜性陷阱:32 vs. 64
+## 可攜性陷阱: 32 vs. 64
 
 這是 CUDA 程式移植到 AMD 最常爆的地方:
 
-- **warp size**:CUDA 恆為 32;AMD CDNA 為 64,RDNA 可 32 或 64。永遠用內建的 `warpSize`,不要寫死 `32`。
-- **mask 參數**:CUDA 的 `*_sync` 版本要求明確的 32-bit mask;AMD 的對應 API 語意不同(64 lanes 需要 64-bit 概念)。跨平台時用 portability wrapper 隔離差異。
-- **reduction 步數**:`log2 (warpSize)` 而非固定 5 步。寫死步數在 wavefront=64 會少 reduce 一輪。
+- **warp size**: CUDA 恆為 32;AMD CDNA 為 64, RDNA 可 32 或 64。永遠用內建的 `warpSize`, 不要寫死 `32`。
+- **mask 參數**: CUDA 的 `*_sync` 版本要求明確的 32-bit mask;AMD 的對應 API 語意不同 (64 lanes 需要 64-bit 概念)。跨平台時用 portability wrapper 隔離差異。
+- **reduction 步數**: `log2(warpSize)` 而非固定 5 步。寫死步數在 wavefront=64 會少 reduce 一輪。
 
 <Callout variant="warn" title="最常見的移植 bug">
-`for (int o = 16; o > 0; o >>= 1)` 這種寫死 16 (= 32/2)的 warp reduce,在 AMD 上只 reduce 了前 32 個 lane,結果錯一半卻不會 crash。永遠寫 `warpSize / 2`。
+`for(int o = 16; o > 0; o >>= 1)` 這種寫死 16 (= 32/2) 的 warp reduce, 在 AMD 上只 reduce 了前 32 個 lane, 結果錯一半卻不會 crash。永遠寫 `warpSize / 2`。
 </Callout>
 
 <LabBox path="kernels/04-reductions-softmax">
-`warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總,並和 shared-memory 版本比較速度與正確性。它用 `warpSize` 而非寫死常數,因此在 CUDA (32)與 HIP (64)都正確。跑跑看,確認兩平台結果都通過 correctness check。
+`warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總, 並和 shared-memory 版本比較速度與正確性。它用 `warpSize` 而非寫死常數, 因此在 CUDA (32) 與 HIP (64) 都正確。跑跑看, 確認兩平台結果都通過 correctness check。
 </LabBox>
 
 <Quiz
   questions={[
     {
-      question: 'warp shuffle (如 __shfl_down_sync)的主要好處是?',
-      options: ['增加 occupancy', '讓同一 warp 的 threads 直接交換 register,免用 shared memory 與同步', '提高 memory bandwidth', '啟用 Tensor Core'],
+      question: 'warp shuffle (如 __shfl_down_sync) 的主要好處是?',
+      options: ['增加 occupancy', '讓同一 warp 的 threads 直接交換 register, 免用 shared memory 與同步', '提高 memory bandwidth', '啟用 Tensor Core'],
       answer: 1,
-      explanation: 'shuffle 在 register 層級交換資料,省掉 shared memory 來回與 __syncthreads,降低 latency。',
+      explanation: 'shuffle 在 register 層級交換資料, 省掉 shared memory 來回與 __syncthreads, 降低 latency。',
     },
     {
-      question: '把 CUDA 的 warp reduce 移到 AMD CDNA,最需要注意?',
-      options: ['FLOP 數', 'warp size 從 32 變 64,步數與 mask 都要跟著調(用 warpSize)', 'register 命名', 'kernel launch 語法'],
+      question: '把 CUDA 的 warp reduce 移到 AMD CDNA, 最需要注意?',
+      options: ['FLOP 數', 'warp size 從 32 變 64, 步數與 mask 都要跟著調 (用 warpSize)', 'register 命名', 'kernel launch 語法'],
       answer: 1,
-      explanation: 'wavefront=64,寫死 32/16 會漏掉一半 lane;應一律用 warpSize 推導。',
+      explanation: 'wavefront=64, 寫死 32/16 會漏掉一半 lane;應一律用 warpSize 推導。',
     },
     {
       question: '__ballot_sync 回傳的是?',
-      options: ['一個浮點總和', '一個 bitmask,標示哪些 lane 的 predicate 為真', '最大值', 'warp 數量'],
+      options: ['一個浮點總和', '一個 bitmask, 標示哪些 lane 的 predicate 為真', '最大值', 'warp 數量'],
       answer: 1,
-      explanation: 'ballot 收集每個 lane 的 predicate 成 bitmask,常用於 compaction 與 active lane 計數。',
+      explanation: 'ballot 收集每個 lane 的 predicate 成 bitmask, 常用於 compaction 與 active lane 計數。',
     },
   ]}
 />

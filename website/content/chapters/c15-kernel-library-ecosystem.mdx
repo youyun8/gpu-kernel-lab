@@ -1,53 +1,53 @@
 # 認識 kernel library 生態
 
-讀到這裡你已經能手寫相當快的 GEMM。但殘酷的事實是:你花一個月寫的 kernel,cuBLAS 一行呼叫就打平甚至超越。那學這些還有意義嗎?有 — 但你得知道什麼時候該收手、把工作交給 library。這一章畫出生態地圖,幫你做這個決定。
+讀到這裡你已經能手寫相當快的 GEMM。但殘酷的事實是: 你花一個月寫的 kernel, cuBLAS 一行呼叫就打平甚至超越。那學這些還有意義嗎?有 — 但你得知道什麼時候該收手、把工作交給 library。這一章畫出生態地圖, 幫你做這個決定。
 
 ## 三種抽象層次
 
-**CUTLASS (NVIDIA)** 是一套 C++ template library,把 GEMM/conv 拆成分層的可組合元件:device → kernel → threadblock → warp → instruction (MMA)。你可以在任一層插入自訂 epilogue、fusion、data type,同時複用底層高度優化的 pipeline。它是「我要 library 級效能,但需要客製」的答案。AMD 的對應是 **Composable Kernel (CK)**,同樣走 template 分層、可組合的路線。
+**CUTLASS (NVIDIA) ** 是一套 C++ template library, 把 GEMM/conv 拆成分層的可組合元件: device → kernel → threadblock → warp → instruction (MMA)。你可以在任一層插入自訂 epilogue、fusion、data type, 同時複用底層高度優化的 pipeline。它是「我要 library 級效能, 但需要客製」的答案。AMD 的對應是 **Composable Kernel (CK) **, 同樣走 template 分層、可組合的路線。
 
-**Triton** 是一個 Python DSL:你用類似 NumPy 的 block-level 語法寫 kernel,compiler 幫你處理 shared memory 配置、coalescing、pipelining。生產力極高,可攜性好(同一份 Triton 可跑 NVIDIA 與 AMD),峰值效能通常略低於手調 CUTLASS 但常常「夠好」。
+**Triton** 是一個 Python DSL: 你用類似 NumPy 的 block-level 語法寫 kernel, compiler 幫你處理 shared memory 配置、coalescing、pipelining。生產力極高, 可攜性好 (同一份 Triton 可跑 NVIDIA 與 AMD), 峰值效能通常略低於手調 CUTLASS 但常常「夠好」。
 
-**cuBLAS / hipBLASLt** 是黑盒 BLAS:最省事、對標準 GEMM 通常最快,但無法客製 fusion、也看不到內部。
+**cuBLAS / hipBLASLt** 是黑盒 BLAS: 最省事、對標準 GEMM 通常最快, 但無法客製 fusion、也看不到內部。
 
 | 需求 | 建議 |
 | --- | --- |
-| 標準 GEMM,要最快、最省事 | cuBLAS / hipBLASLt |
-| 需要客製 epilogue / fusion / 非標準 dtype,且要接近 peak | CUTLASS / Composable Kernel |
+| 標準 GEMM, 要最快、最省事 | cuBLAS / hipBLASLt |
+| 需要客製 epilogue / fusion / 非標準 dtype, 且要接近 peak | CUTLASS / Composable Kernel |
 | 快速原型、可攜性優先、團隊用 Python | Triton |
 | 學習、教學、極端客製的研究 | 手寫 kernel |
 
-## 什麼時候該自己寫,什麼時候該用 library
+## 什麼時候該自己寫, 什麼時候該用 library
 
 <Callout variant="insight" title="決策原則">
-先量測:如果 cuBLAS/hipBLASLt 已經佔了你 kernel 時間的大宗且接近 roofline,別重寫,把精力放在別處。當你需要的是「library 不提供的 fusion」或「奇特的 shape/dtype」,才輪到 CUTLASS/CK 或手寫。手寫 from scratch 的價值主要在學習與研究,以及 library 完全沒覆蓋的場景。
+先量測: 如果 cuBLAS/hipBLASLt 已經佔了你 kernel 時間的大宗且接近 roofline, 別重寫, 把精力放在別處。當你需要的是「library 不提供的 fusion」或「奇特的 shape/dtype」, 才輪到 CUTLASS/CK 或手寫。手寫 from scratch 的價值主要在學習與研究, 以及 library 完全沒覆蓋的場景。
 </Callout>
 
 ## autotune 的角色
 
-同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。library (cuBLASLt、CK、Triton 的 autotuner)會在候選 config 中搜尋最佳解。你自己寫的 kernel 若要對多種 shape 都快,也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工,也是 library 真正的價值所在。
+同一個 GEMM 在不同 shape、不同 GPU 上的最佳 tile size / stage 數 / swizzle 都不同。library (cuBLASLt、CK、Triton 的 autotuner) 會在候選 config 中搜尋最佳解。你自己寫的 kernel 若要對多種 shape 都快, 也得建立類似的 autotune 機制 — 這通常比寫單一 kernel 更費工, 也是 library 真正的價值所在。
 
 <LabBox path="kernels/03-gemm">
-`sgemm_cublas`(CUDA)/ `sgemm_hipblaslt`(HIP)把你手寫的最佳版本和 library 並排 benchmark,印出兩者的 GFLOP/s 與比值。跑一遍,誠實面對差距 — 然後想想:剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
+`sgemm_cublas` (CUDA)/ `sgemm_hipblaslt` (HIP) 把你手寫的最佳版本和 library 並排 benchmark, 印出兩者的 GFLOP/s 與比值。跑一遍, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
 </LabBox>
 
 <Quiz
   questions={[
     {
       question: 'CUTLASS 的核心定位是?',
-      options: ['黑盒 BLAS', '分層、可組合的 C++ template library,可客製 epilogue/fusion 同時複用優化 pipeline', 'Python DSL', 'profiler'],
+      options: ['黑盒 BLAS', '分層、可組合的 C++ template library, 可客製 epilogue/fusion 同時複用優化 pipeline', 'Python DSL', 'profiler'],
       answer: 1,
-      explanation: 'CUTLASS 讓你在保有 library 級底層效能的同時,於各層注入客製邏輯。',
+      explanation: 'CUTLASS 讓你在保有 library 級底層效能的同時, 於各層注入客製邏輯。',
     },
     {
       question: 'Triton 的主要賣點?',
-      options: ['永遠比 CUTLASS 快', '用 Python block-level DSL 高生產力地寫 kernel,且跨 NVIDIA/AMD 可攜', '只支援 fp64', '不需要 GPU'],
+      options: ['永遠比 CUTLASS 快', '用 Python block-level DSL 高生產力地寫 kernel, 且跨 NVIDIA/AMD 可攜', '只支援 fp64', '不需要 GPU'],
       answer: 1,
-      explanation: 'Triton 把 coalescing、shared memory、pipelining 交給 compiler,峰值略低但開發極快、可攜。',
+      explanation: 'Triton 把 coalescing、shared memory、pipelining 交給 compiler, 峰值略低但開發極快、可攜。',
     },
     {
       question: '什麼情況最該直接用 cuBLAS/hipBLASLt?',
-      options: ['需要奇特的 fusion', '標準 GEMM 且已接近 roofline,追求省事與最快', '教學示範', '需要看內部實作'],
+      options: ['需要奇特的 fusion', '標準 GEMM 且已接近 roofline, 追求省事與最快', '教學示範', '需要看內部實作'],
       answer: 1,
       explanation: '標準形狀下 library 通常最快且零維護成本;沒有客製需求就不必重造輪子。',
     },

@@ -1,16 +1,16 @@
 # Reduction 與 softmax 優化系列
 
-reduction 看起來是最簡單的 kernel — 把一堆數字加起來 — 卻是最能展現 GPU 優化層次的題目。從最天真的版本到接近頻寬上限,中間有五、六個明確的台階。學會 reduction,你就有了 softmax、layernorm、attention 的地基。
+reduction 看起來是最簡單的 kernel — 把一堆數字加起來 — 卻是最能展現 GPU 優化層次的題目。從最天真的版本到接近頻寬上限, 中間有五、六個明確的台階。學會 reduction, 你就有了 softmax、layernorm、attention 的地基。
 
 ## reduction 的優化階梯
 
-**Naive:** 每個 thread atomicAdd 到一個全域累加器 — 嚴重 contention,慢到不行。
+**Naive: ** 每個 thread atomicAdd 到一個全域累加器 — 嚴重 contention, 慢到不行。
 
-**Tree reduction in shared memory:** block 內用 shared memory 做二元樹相加。要小心兩件事:early 版本的 `if (tid % (2*s) == 0)` 造成 divergence 與 bank conflict;改成 `for (s = blockDim/2; s > 0; s >>= 1)` 的 sequential addressing 版本可同時解決兩者。
+**Tree reduction in shared memory: ** block 內用 shared memory 做二元樹相加。要小心兩件事: early 版本的 `if(tid % (2*s) == 0)` 造成 divergence 與 bank conflict;改成 `for(s = blockDim/2; s > 0; s >>= 1)` 的 sequential addressing 版本可同時解決兩者。
 
-**Warp shuffle:** 最後 32/64 個元素不必再進 shared memory,直接用第 9 章的 `warpReduceSum` 收尾,省掉多輪 `__syncthreads ()`。
+**Warp shuffle: ** 最後 32/64 個元素不必再進 shared memory, 直接用第 9 章的 `warpReduceSum` 收尾, 省掉多輪 `__syncthreads()`。
 
-**Vectorized loads + grid-stride:** 每個 thread 用 `float4` 一次讀 4 個、並以 grid-stride loop 處理多筆,提高每 thread 的工作量與 memory 效率。
+**Vectorized loads + grid-stride: ** 每個 thread 用 `float4` 一次讀 4 個、並以 grid-stride loop 處理多筆, 提高每 thread 的工作量與 memory 效率。
 
 ```cpp
 // Block reduction: shared-memory tree down to one warp, then warp shuffle.
@@ -38,47 +38,47 @@ __global__ void reduceSum(const float* in, float* out, int n) {
 
 ## softmax 與 numerical stability
 
-softmax 需要兩個 reduction:max 與 sum-of-exp。直接算 $e^{x_i}$ 會 overflow,所以要先減掉 max:
+softmax 需要兩個 reduction: max 與 sum-of-exp。直接算 $e^{x_i}$ 會 overflow, 所以要先減掉 max:
 
 $$
 \text{softmax}(x_i) = \frac{e^{x_i - \max_j x_j}}{\sum_k e^{x_k - \max_j x_j}}
 $$
 
-## online softmax:一次掃描搞定
+## online softmax: 一次掃描搞定
 
-naive softmax 掃三遍(找 max、算分母、正規化)。**online softmax** 只掃一遍:邊走邊維護 running max 與 running sum,遇到更大的 max 就用修正因子 rescale 之前的 sum。這正是 FlashAttention 的核心技巧 — 讓 softmax 不必物化整個 row。
+naive softmax 掃三遍 (找 max、算分母、正規化)。**online softmax** 只掃一遍: 邊走邊維護 running max 與 running sum, 遇到更大的 max 就用修正因子 rescale 之前的 sum。這正是 FlashAttention 的核心技巧 — 讓 softmax 不必物化整個 row。
 
 $$
 m_{new} = \max (m_{old}, x_i), \quad d_{new} = d_{old} \cdot e^{m_{old} - m_{new}} + e^{x_i - m_{new}}
 $$
 
 <Callout variant="insight" title="為什麼 online softmax 重要">
-它把 softmax 的 memory 需求從「整個 row」降到「幾個 scalar」,讓 attention 可以 tile、可以 fuse、可以省下對長序列中間結果的往返。理解這一步,你就摸到了現代 attention kernel 的門。
+它把 softmax 的 memory 需求從「整個 row」降到「幾個 scalar」, 讓 attention 可以 tile、可以 fuse、可以省下對長序列中間結果的往返。理解這一步, 你就摸到了現代 attention kernel 的門。
 </Callout>
 
 <LabBox path="kernels/04-reductions-softmax">
-`reduction` target 內含 naive → shared tree → warp shuffle 三個版本,各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本,並對 CPU reference 做數值正確性檢查(含大值 overflow 測試)。依序跑,觀察 reduction 逐步逼近頻寬上限。
+`reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。依序跑, 觀察 reduction 逐步逼近頻寬上限。
 </LabBox>
 
 <Quiz
   questions={[
     {
       question: '為什麼 softmax 要先減去 max?',
-      options: ['加快速度', '避免 exp overflow,維持 numerical stability', '減少 register', '提高 occupancy'],
+      options: ['加快速度', '避免 exp overflow, 維持 numerical stability', '減少 register', '提高 occupancy'],
       answer: 1,
-      explanation: '減 max 讓指數的輸入 ≤ 0,e^(x-max) ≤ 1,避免溢位,結果數學上不變。',
+      explanation: '減 max 讓指數的輸入 ≤ 0, e^(x-max) ≤ 1, 避免溢位, 結果數學上不變。',
     },
     {
       question: 'reduction 最後階段改用 warp shuffle 的好處?',
       options: ['增加 FLOP', '省掉多輪 shared memory 存取與 __syncthreads', '提高數值精度', '減少 grid 大小'],
       answer: 1,
-      explanation: '最後一個 warp 內用 shuffle 交換 register,不必再進 shared memory 也不必同步。',
+      explanation: '最後一個 warp 內用 shuffle 交換 register, 不必再進 shared memory 也不必同步。',
     },
     {
       question: 'online softmax 相對 three-pass 的關鍵優勢?',
-      options: ['精度更高', '只需一次掃描並維護 running max/sum,memory 需求大減(FlashAttention 基礎)', 'FLOP 更少', '不需要 exp'],
+      options: ['精度更高', '只需一次掃描並維護 running max/sum, memory 需求大減 (FlashAttention 基礎)', 'FLOP 更少', '不需要 exp'],
       answer: 1,
-      explanation: '邊掃邊 rescale,避免物化整個 row,讓 softmax 可 tile 與 fuse。',
+      explanation: '邊掃邊 rescale, 避免物化整個 row, 讓 softmax 可 tile 與 fuse。',
     },
   ]}
 />
@@ -86,7 +86,7 @@ $$
 <FurtherReading
   links={[
     { citation: 'M. Harris, "Optimizing Parallel Reduction in CUDA," NVIDIA Developer Technology, 2007.', href: 'https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf' },
-    { citation: 'M. Milakov and N. Gimelshein, "Online Normalizer Calculation for Softmax," arXiv:1805.02867, 2018.', href: 'https://arxiv.org/abs/1805.02867' },
-    { citation: 'T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré, "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness," arXiv:2205.14135, 2022.', href: 'https://arxiv.org/abs/2205.14135' },
+    { citation: 'M. Milakov and N. Gimelshein, "Online Normalizer Calculation for Softmax," arXiv: 1805.02867, 2018.', href: 'https://arxiv.org/abs/1805.02867' },
+    { citation: 'T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré, "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness," arXiv: 2205.14135, 2022.', href: 'https://arxiv.org/abs/2205.14135' },
   ]}
 />

@@ -1,10 +1,10 @@
 # 在 PyTorch 中找到值得優化的 kernel
 
-你想加速一個 PyTorch 模型,第一直覺是去優化那個「看起來最複雜」的 layer。多半是錯的。真正的時間常常花在一堆不起眼的 elementwise op、或大量微小 kernel 的 launch overhead 上。優化的第一步永遠是量測,不是猜。
+你想加速一個 PyTorch 模型, 第一直覺是去優化那個「看起來最複雜」的 layer。多半是錯的。真正的時間常常花在一堆不起眼的 elementwise op、或大量微小 kernel 的 launch overhead 上。優化的第一步永遠是量測, 不是猜。
 
 ## 用 torch.profiler 找熱點
 
-`torch.profiler` 能同時記錄 CPU 與 CUDA/ROCm 活動,告訴你時間真正花在哪:
+`torch.profiler` 能同時記錄 CPU 與 CUDA/ROCm 活動, 告訴你時間真正花在哪:
 
 ```python
 import torch
@@ -21,45 +21,45 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
 prof.export_chrome_trace("trace.json")  # open in chrome://tracing or Perfetto
 ```
 
-把 trace 丟進 Perfetto 或 `chrome://tracing`,你會看到一條時間軸:哪些 kernel 佔最久、GPU 有沒有空檔(gap = 被 CPU 或 launch 卡住)。
+把 trace 丟進 Perfetto 或 `chrome://tracing`, 你會看到一條時間軸: 哪些 kernel 佔最久、GPU 有沒有空檔 (gap = 被 CPU 或 launch 卡住)。
 
 ## 兩種典型病徵
 
-**launch overhead 主導:** timeline 上是「一大排很短的 kernel,彼此間有 CPU 空檔」。每個 kernel 只跑幾 μs,launch 本身卻要幾 μs — GPU 大半時間在等下一個 launch。解法是 fuse (合併成少數大 kernel)或用 CUDA Graph 消 launch 成本。
+**launch overhead 主導: ** timeline 上是「一大排很短的 kernel, 彼此間有 CPU 空檔」。每個 kernel 只跑幾 μs, launch 本身卻要幾 μs — GPU 大半時間在等下一個 launch。解法是 fuse (合併成少數大 kernel) 或用 CUDA Graph 消 launch 成本。
 
-**memory-bound elementwise 鏈:** 一連串 `add`、`mul`、`gelu`、`layernorm` 各自讀寫一次 global memory。單看每個都不慢,但同一份 tensor 被反覆讀寫,bandwidth 全浪費在中間結果上。解法是把整條鏈 fuse 成一個 kernel,只讀一次、只寫一次。
+**memory-bound elementwise 鏈: ** 一連串 `add`、`mul`、`gelu`、`layernorm` 各自讀寫一次 global memory。單看每個都不慢, 但同一份 tensor 被反覆讀寫, bandwidth 全浪費在中間結果上。解法是把整條鏈 fuse 成一個 kernel, 只讀一次、只寫一次。
 
 <Callout variant="insight" title="哪種 op 值得 fuse">
-值得 fuse 的訊號:(1) 連續、彼此相接的 elementwise / reduction op;(2) 每個都是 memory-bound (低 arithmetic intensity);(3) 中間結果只被下一個 op 用一次。把它們合併,就能把 N 次 global memory 往返壓成 1 次。
+值得 fuse 的訊號: (1) 連續、彼此相接的 elementwise / reduction op;(2) 每個都是 memory-bound (低 arithmetic intensity);(3) 中間結果只被下一個 op 用一次。把它們合併, 就能把 N 次 global memory 往返壓成 1 次。
 </Callout>
 
 ## 別忘了先用內建工具
 
-在動手寫 custom kernel 前,先試 `torch.compile` — 它會自動 fuse 很多 elementwise 鏈成 Triton kernel,常常不費力就拿到大半好處。custom kernel 留給 `torch.compile` 沒 fuse 好、或需要特殊演算法(如 online softmax)的地方。
+在動手寫 custom kernel 前, 先試 `torch.compile` — 它會自動 fuse 很多 elementwise 鏈成 Triton kernel, 常常不費力就拿到大半好處。custom kernel 留給 `torch.compile` 沒 fuse 好、或需要特殊演算法 (如 online softmax) 的地方。
 
 <LabBox path="kernels/06-pytorch-integration">
-`kernels/06-pytorch-integration/profile_model.py` 提供一個含 elementwise 鏈的小模型與 `torch.profiler` 樣板,印出 top kernel 表並匯出 trace。跑一次,找出佔時最多的 op,作為後續章節要 fuse 的目標。
+`kernels/06-pytorch-integration/profile_model.py` 提供一個含 elementwise 鏈的小模型與 `torch.profiler` 樣板, 印出 top kernel 表並匯出 trace。跑一次, 找出佔時最多的 op, 作為後續章節要 fuse 的目標。
 </LabBox>
 
 <Quiz
   questions={[
     {
       question: '優化 PyTorch 模型的正確第一步?',
-      options: ['直接重寫最複雜的 layer', '用 torch.profiler 量測,找出真正佔時間的 op', '把 batch size 加倍', '換更大的 GPU'],
+      options: ['直接重寫最複雜的 layer', '用 torch.profiler 量測, 找出真正佔時間的 op', '把 batch size 加倍', '換更大的 GPU'],
       answer: 1,
-      explanation: '瓶頸常不在直覺以為的地方,先量測才能對症下藥。',
+      explanation: '瓶頸常不在直覺以為的地方, 先量測才能對症下藥。',
     },
     {
       question: 'timeline 上「一大排極短 kernel + CPU 空檔」代表?',
-      options: ['compute-bound', 'launch overhead 主導,應 fuse 或用 CUDA Graph', 'bank conflict', '數值不穩'],
+      options: ['compute-bound', 'launch overhead 主導, 應 fuse 或用 CUDA Graph', 'bank conflict', '數值不穩'],
       answer: 1,
-      explanation: '每個 kernel 太小,launch 成本佔比過高,GPU 在等下一次 launch。',
+      explanation: '每個 kernel 太小, launch 成本佔比過高, GPU 在等下一次 launch。',
     },
     {
       question: '哪種 op 鏈最值得 fuse?',
       options: ['彼此獨立的大型 GEMM', '連續、memory-bound、中間結果只用一次的 elementwise/reduction 鏈', 'fp64 科學計算', '單一超大 kernel'],
       answer: 1,
-      explanation: 'fuse 能把多次 global memory 往返併成一次,對 memory-bound 的相接 op 收益最大。',
+      explanation: 'fuse 能把多次 global memory 往返併成一次, 對 memory-bound 的相接 op 收益最大。',
     },
   ]}
 />

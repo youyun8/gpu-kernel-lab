@@ -1,80 +1,80 @@
-# Track A 練習:GPU 基礎與效能測量
+# Track A 練習: GPU 基礎與效能測量
 
-這組練習對應第 1–5 章。paper-and-pencil 題請先自己算,再展開解答對照;programming 題的參考解在 <code>kernels/exercises/</code>,可直接編譯執行。除非題目另外標明,假設 warp = 32、一個 memory transaction 覆蓋 128 bytes、`float` 為 4 bytes。
+這組練習對應第 1–5 章。paper-and-pencil 題請先自己算, 再展開解答對照;programming 題的參考解在 <code>kernels/exercises/</code>, 可直接編譯執行。除非題目另外標明, 假設 warp = 32、一個 memory transaction 覆蓋 128 bytes、`float` 為 4 bytes。
 
 <Exercise id="A1" title="SIMT 與 divergence" kind="paper" level="入門">
-一個 kernel 內有 `if (threadIdx.x % 2 == 0) heavy (); else light ();`,其中 `heavy ()` 需 100 cycles、`light ()` 需 10 cycles。假設一個 warp 32 個 threads lockstep 執行,忽略其他 overhead。
+一個 kernel 內有 `if(threadIdx.x % 2 == 0) heavy(); else light();`, 其中 `heavy()` 需 100 cycles、`light()` 需 10 cycles。假設一個 warp 32 個 threads lockstep 執行, 忽略其他 overhead。
 
-(a) 這個 warp 執行這段 if-else 大約需要多少 cycles?(b) 若把資料重排,讓同一 warp 的 threads 全走同一分支,最好情況是多少 cycles?
+(a) 這個 warp 執行這段 if-else 大約需要多少 cycles?(b) 若把資料重排, 讓同一 warp 的 threads 全走同一分支, 最好情況是多少 cycles?
 
 <Solution>
-(a) warp 內同時有偶數與奇數 lane,兩條路徑都被觸發,SIMT 必須序列化:約 `100 + 10 = 110` cycles (兩分支各跑一遍,期間非該分支的 lane 被 mask 掉)。
+(a) warp 內同時有偶數與奇數 lane, 兩條路徑都被觸發, SIMT 必須序列化: 約 `100 + 10 = 110` cycles (兩分支各跑一遍, 期間非該分支的 lane 被 mask 掉)。
 
-(b) 若整個 warp 都走 `heavy ()`,只需 100 cycles;都走 `light ()` 則 10 cycles。重排資料消除 divergence,把該 warp 的成本從 110 降到單一分支的成本。這說明 branch divergence 的代價是「兩條路徑相加」而非「取最大」。
+(b) 若整個 warp 都走 `heavy()`, 只需 100 cycles;都走 `light()` 則 10 cycles。重排資料消除 divergence, 把該 warp 的成本從 110 降到單一分支的成本。這說明 branch divergence 的代價是「兩條路徑相加」而非「取最大」。
 </Solution>
 </Exercise>
 
 <Exercise id="A2" title="Global thread index" kind="paper" level="入門">
-kernel 以 `grid = 8 blocks`、`block = 128 threads` 啟動。請寫出 `blockIdx.x = 5`、`threadIdx.x = 20` 這個 thread 的 global index,並說明 grid 總共覆蓋幾個元素、若要處理 `n = 1000` 個元素為何仍需邊界檢查。
+kernel 以 `grid = 8 blocks`、`block = 128 threads` 啟動。請寫出 `blockIdx.x = 5`、`threadIdx.x = 20` 這個 thread 的 global index, 並說明 grid 總共覆蓋幾個元素、若要處理 `n = 1000` 個元素為何仍需邊界檢查。
 
 <Solution>
 global index = `blockIdx.x * blockDim.x + threadIdx.x = 5 * 128 + 20 = 660`。
 
-grid 總共有 `8 * 128 = 1024` 個 threads。處理 `n = 1000` 時,index 1000–1023 的 24 個 threads 超出範圍,必須用 `if (i < n)` 擋掉,否則越界存取造成 undefined behavior / silent corruption。
+grid 總共有 `8 * 128 = 1024` 個 threads。處理 `n = 1000` 時, index 1000–1023 的 24 個 threads 超出範圍, 必須用 `if(i < n)` 擋掉, 否則越界存取造成 undefined behavior / silent corruption。
 </Solution>
 </Exercise>
 
 <Exercise id="A3" title="Memory hierarchy latency 直覺" kind="paper" level="入門">
-把下列存取依 latency 由小到大排序,並各給一個數量級(cycles)的粗估:register、global memory (HBM)、L2 cache、shared memory/LDS。為什麼一個把熱資料留在 register 的 kernel 通常比反覆讀 global memory 的版本快很多?
+把下列存取依 latency 由小到大排序, 並各給一個數量級 (cycles) 的粗估: register、global memory (HBM)、L2 cache、shared memory/LDS。為什麼一個把熱資料留在 register 的 kernel 通常比反覆讀 global memory 的版本快很多?
 
 <Solution>
-由快到慢:register (~1 cycle)< shared memory/LDS (~20–30 cycles)< L2 cache (~200 cycles)< global memory/HBM (~400–800 cycles)。
+由快到慢: register (~1 cycle)< shared memory/LDS (~20–30 cycles)< L2 cache (~200 cycles)< global memory/HBM (~400–800 cycles)。
 
-把重複使用的資料留在 register,等於用一次昂貴的 global load 換來多次近乎免費的存取;反覆打 global memory 則讓每次使用都付數百 cycles 的 latency,且更容易變成 bandwidth-bound。這正是 tiling 與 register blocking 的動機。
+把重複使用的資料留在 register, 等於用一次昂貴的 global load 換來多次近乎免費的存取;反覆打 global memory 則讓每次使用都付數百 cycles 的 latency, 且更容易變成 bandwidth-bound。這正是 tiling 與 register blocking 的動機。
 </Solution>
 </Exercise>
 
 <Exercise id="A4" title="Achieved bandwidth 計算" kind="paper" level="入門">
-一個 vector add `c = a + b` 處理 `n = 2^24` 個 float,量到的 kernel 時間是 0.75 ms。(a) 計算實際搬移的 bytes;(b) 換算 achieved bandwidth (GB/s);(c) 若硬體 peak 是 1555 GB/s,這是 peak 的幾 %?
+一個 vector add `c = a + b` 處理 `n = 2^24` 個 float, 量到的 kernel 時間是 0.75 ms。(a) 計算實際搬移的 bytes;(b) 換算 achieved bandwidth (GB/s);(c) 若硬體 peak 是 1555 GB/s, 這是 peak 的幾 %?
 
 <Solution>
-(a) 讀 a、讀 b、寫 c 共 3 個陣列:`3 * 2^24 * 4 bytes = 3 * 16,777,216 * 4 ≈ 2.01e8 bytes ≈ 0.201 GB`。
+(a) 讀 a、讀 b、寫 c 共 3 個陣列: `3 * 2^24 * 4 bytes = 3 * 16,777,216 * 4 ≈ 2.01e8 bytes ≈ 0.201 GB`。
 
-(b) `bandwidth = 0.201 GB / 0.75e-3 s ≈ 268 GB/s`(用 `2.01e8 / 0.75e-3 / 1e9`)。
+(b) `bandwidth = 0.201 GB / 0.75e-3 s ≈ 268 GB/s` (用 `2.01e8 / 0.75e-3 / 1e9`)。
 
-(c) `268 / 1555 ≈ 17.3%`。vector add 是 memory-bound,GFLOP/s 很低是正常的;真正該看的是這個 bandwidth 百分比。
+(c) `268 / 1555 ≈ 17.3%`。vector add 是 memory-bound, GFLOP/s 很低是正常的;真正該看的是這個 bandwidth 百分比。
 </Solution>
 </Exercise>
 
 <Exercise id="A5" title="Arithmetic intensity 與 roofline" kind="paper" level="進階">
-某 kernel 做 `n` 個元素、每個元素 1 次 FMA (2 FLOP),讀 1 個 float、寫 1 個 float。(a) 算 arithmetic intensity (FLOP/byte);(b) 在 peak = 19500 GFLOP/s、BW = 1555 GB/s 的機器上,它是 bandwidth-bound 還是 compute-bound?(c) 它的可達效能上限約多少 GFLOP/s?
+某 kernel 做 `n` 個元素、每個元素 1 次 FMA (2 FLOP), 讀 1 個 float、寫 1 個 float。(a) 算 arithmetic intensity (FLOP/byte);(b) 在 peak = 19500 GFLOP/s、BW = 1555 GB/s 的機器上, 它是 bandwidth-bound 還是 compute-bound?(c) 它的可達效能上限約多少 GFLOP/s?
 
 <Solution>
 (a) AI = `2 FLOP / (2 * 4 bytes) = 2 / 8 = 0.25 FLOP/byte`。
 
-(b) ridge point = `peak / BW = 19500 / 1555 ≈ 12.5 FLOP/byte`。0.25 遠小於 12.5,落在 ridge point 左邊 → **bandwidth-bound**。
+(b) ridge point = `peak / BW = 19500 / 1555 ≈ 12.5 FLOP/byte`。0.25 遠小於 12.5, 落在 ridge point 左邊 → **bandwidth-bound**。
 
-(c) 上限 = `BW * AI = 1555 * 0.25 ≈ 389 GFLOP/s`。要突破這條線,必須提高 AI (更多 reuse),而不是優化 compute。
+(c) 上限 = `BW * AI = 1555 * 0.25 ≈ 389 GFLOP/s`。要突破這條線, 必須提高 AI (更多 reuse), 而不是優化 compute。
 </Solution>
 </Exercise>
 
 <Exercise id="A6" title="計時方法的陷阱" kind="paper" level="進階">
-同事用 `t0 = time (); kernel<<<...>>>(); t1 = time ();` 量出 kernel 只花 5 μs,興奮地說超快。請指出兩個方法學錯誤,並說明正確做法。
+同事用 `t0 = time(); kernel<<<...>>>(); t1 = time();` 量出 kernel 只花 5 μs, 興奮地說超快。請指出兩個方法學錯誤, 並說明正確做法。
 
 <Solution>
-錯誤一:kernel launch 是**非同步**的,CPU 的 `time ()` 只量到 launch 呼叫返回的時間,不是 kernel 實際執行時間(少了一個 `cudaDeviceSynchronize ()` 或用 event)。
+錯誤一: kernel launch 是**非同步**的, CPU 的 `time()` 只量到 launch 呼叫返回的時間, 不是 kernel 實際執行時間 (少了一個 `cudaDeviceSynchronize()` 或用 event)。
 
-錯誤二:沒有 **warmup** 也沒有多次 iteration,第一次執行含 context 初始化 / JIT / cold cache,單次量測不可靠。
+錯誤二: 沒有 **warmup** 也沒有多次 iteration, 第一次執行含 context 初始化 / JIT / cold cache, 單次量測不可靠。
 
-正確做法:warmup 數次 → 用 `cudaEvent`/`hipEvent` 記錄 device 上的起訖 → 跑數十到數百次取平均或中位數(見第 4 章)。
+正確做法: warmup 數次 → 用 `cudaEvent`/`hipEvent` 記錄 device 上的起訖 → 跑數十到數百次取平均或中位數 (見第 4 章)。
 </Solution>
 </Exercise>
 
 <Exercise id="A7" title="實作 SAXPY 並量測 bandwidth" kind="code" level="入門">
-以 `kernels/01-basics/vector_add.cpp` 為範本,實作 SAXPY:`y = a * x + y`。要求:(1) 每個 element 一個 thread、加邊界檢查;(2) 對 CPU reference 做 correctness check;(3) 用 `gklab::benchmarkKernel` 報告 achieved bandwidth。想想每個 element 搬了幾個 float (用來算 `bytesMoved`)。
+以 `kernels/01-basics/vector_add.cpp` 為範本, 實作 SAXPY: `y = a * x + y`。要求: (1) 每個 element 一個 thread、加邊界檢查;(2) 對 CPU reference 做 correctness check;(3) 用 `gklab::benchmarkKernel` 報告 achieved bandwidth。想想每個 element 搬了幾個 float (用來算 `bytesMoved`)。
 
 <Solution>
-SAXPY 每個 element 讀 `x`、讀 `y`、寫 `y`,共 3 次存取,所以 `bytesMoved = 3 * n * sizeof (float)`;FLOP = `2 * n`(一次乘一次加)。參考解在 <code>kernels/exercises/ex_a_saxpy.cpp</code>,核心為:
+SAXPY 每個 element 讀 `x`、讀 `y`、寫 `y`, 共 3 次存取, 所以 `bytesMoved = 3 * n * sizeof(float)`;FLOP = `2 * n` (一次乘一次加)。參考解在 <code>kernels/exercises/ex_a_saxpy.cpp</code>, 核心為:
 
 ```cpp
 __global__ void saxpy(const float* x, float* y, float a, int n) {
@@ -83,18 +83,18 @@ __global__ void saxpy(const float* x, float* y, float a, int n) {
 }
 ```
 
-編譯執行:`cmake --build build -j && ./build/exercises/ex_a_saxpy`。它應和 vector add 一樣是 memory-bound,bandwidth 落在同一個量級。
+編譯執行: `cmake --build build -j && ./build/exercises/ex_a_saxpy`。它應和 vector add 一樣是 memory-bound, bandwidth 落在同一個量級。
 </Solution>
 </Exercise>
 
 <Exercise id="A8" title="用 roofline_probe 驗證天花板" kind="code" level="進階">
-編譯並執行 `kernels/02-memory/roofline_probe`。觀察隨著每元素 FMA 次數增加(AI 上升),GB/s 與 GFLOP/s 各如何變化?用一句話解釋為什麼低 AI 的點 GB/s 高但 GFLOP/s 低,高 AI 的點相反。
+編譯並執行 `kernels/02-memory/roofline_probe`。觀察隨著每元素 FMA 次數增加 (AI 上升), GB/s 與 GFLOP/s 各如何變化?用一句話解釋為什麼低 AI 的點 GB/s 高但 GFLOP/s 低, 高 AI 的點相反。
 
 <Solution>
-低 AI:kernel 幾乎只在搬資料,memory 系統飽和 → GB/s 接近上限,但每 byte 只做少量 FLOP → GFLOP/s 低(貼在 bandwidth roof)。
+低 AI: kernel 幾乎只在搬資料, memory 系統飽和 → GB/s 接近上限, 但每 byte 只做少量 FLOP → GFLOP/s 低 (貼在 bandwidth roof)。
 
-高 AI:每筆資料被重複計算很多次,memory 系統閒置 → GB/s 下降,但算術單元被餵飽 → GFLOP/s 上升(逼近 compute roof)。
+高 AI: 每筆資料被重複計算很多次, memory 系統閒置 → GB/s 下降, 但算術單元被餵飽 → GFLOP/s 上升 (逼近 compute roof)。
 
-這正是 roofline 的兩段屋頂:同一份 code,改變 AI 就在圖上左右移動。實測數字依硬體而異,但趨勢一致。
+這正是 roofline 的兩段屋頂: 同一份 code, 改變 AI 就在圖上左右移動。實測數字依硬體而異, 但趨勢一致。
 </Solution>
 </Exercise>

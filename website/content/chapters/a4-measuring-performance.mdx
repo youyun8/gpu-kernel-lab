@@ -1,14 +1,14 @@
 # 如何測量效能
 
-「我改了 kernel,快了 30%!」— 真的嗎,還是你量到的是 kernel launch overhead、cold cache,或第一次跑的 JIT 編譯?在優化之前,你得先能正確、可重現地測量。這一章給你一套可信的測量方法,以及第一次使用 profiler。
+「我改了 kernel, 快了 30%!」— 真的嗎, 還是你量到的是 kernel launch overhead、cold cache, 或第一次跑的 JIT 編譯?在優化之前, 你得先能正確、可重現地測量。這一章給你一套可信的測量方法, 以及第一次使用 profiler。
 
 ## 正確計時的三個要素
 
-**用 GPU event,不要用 CPU 的 wall clock 包 launch。** kernel launch 是非同步的,`cudaEventRecord` / `hipEventRecord` 才能量到 device 上的實際執行時間。
+**用 GPU event, 不要用 CPU 的 wall clock 包 launch。** kernel launch 是非同步的, `cudaEventRecord` / `hipEventRecord` 才能量到 device 上的實際執行時間。
 
-**Warmup。** 第一次執行包含 context 初始化、JIT、cold cache。丟掉前幾次,再開始計時。
+**Warmup。** 第一次執行包含 context 初始化、JIT、cold cache。丟掉前幾次, 再開始計時。
 
-**多次 iteration 取代單次。** 跑數十到數百次取平均(或中位數),避免被單次雜訊誤導。
+**多次 iteration 取代單次。** 跑數十到數百次取平均 (或中位數), 避免被單次雜訊誤導。
 
 <PlatformTabs>
 <Platform name="CUDA">
@@ -51,22 +51,22 @@ float avgMs = ms / kIters;
 
 ## 從時間換算成有意義的數字
 
-光有毫秒沒用,要換成 achieved bandwidth 或 throughput,才能和硬體 peak 比較:
+光有毫秒沒用, 要換成 achieved bandwidth 或 throughput, 才能和硬體 peak 比較:
 
 $$
 \text{GB/s} = \frac{\text{bytes read} + \text{bytes written}}{\text{time (s)} \times 10^9}, \qquad
 \text{GFLOP/s} = \frac{\text{FLOP count}}{\text{time (s)} \times 10^9}
 $$
 
-接著算 **% of peak** — 這就是 speed-of-light 分析:你的 kernel 相對硬體上限跑到幾成?一個 memory-bound kernel 若已達 peak bandwidth 的 85%,再怎麼改 compute 也沒用;該做的是換演算法或減少資料搬移。
+接著算 **% of peak** — 這就是 speed-of-light 分析: 你的 kernel 相對硬體上限跑到幾成?一個 memory-bound kernel 若已達 peak bandwidth 的 85%, 再怎麼改 compute 也沒用;該做的是換演算法或減少資料搬移。
 
 <Callout variant="warn" title="別把 overhead 當 kernel 時間">
-對極小的 workload,kernel launch overhead (數 μs)可能比 kernel 本身還久。若你的 op 很小又被呼叫很多次,launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
+對極小的 workload, kernel launch overhead (數 μs) 可能比 kernel 本身還久。若你的 op 很小又被呼叫很多次, launch overhead 才是真正的瓶頸 — 這正是第 17 章要在 PyTorch 裡抓的東西。
 </Callout>
 
 ## 第一次使用 profiler
 
-手算 bandwidth 只能告訴你「多快」,profiler 告訴你「為什麼」。
+手算 bandwidth 只能告訴你「多快」, profiler 告訴你「為什麼」。
 
 ```bash
 # NVIDIA Nsight Compute: 收集 speed-of-light section
@@ -77,10 +77,10 @@ rocprofv3 --stats -- ./vector_add
 omniperf profile -n vadd -- ./vector_add
 ```
 
-第一次看重點放在 speed-of-light / roofline section:它直接告訴你這個 kernel 是 memory-bound 還是 compute-bound,以及離 peak 有多遠。細部 metric 導讀留到第 16 章。
+第一次看重點放在 speed-of-light / roofline section: 它直接告訴你這個 kernel 是 memory-bound 還是 compute-bound, 以及離 peak 有多遠。細部 metric 導讀留到第 16 章。
 
 <LabBox path="kernels/02-memory">
-`kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。用它跑 `bandwidth_probe`,再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling,對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。
+`kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。用它跑 `bandwidth_probe`, 再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling, 對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。
 </LabBox>
 
 <Quiz
@@ -89,19 +89,19 @@ omniperf profile -n vadd -- ./vector_add
       question: '為什麼要先做 warmup 再計時?',
       options: ['讓 GPU 升溫', '排除 context 初始化、JIT 與 cold cache 對第一次執行的影響', '增加 occupancy', '避免 bank conflict'],
       answer: 1,
-      explanation: '首次執行含一次性開銷,warmup 後計時才反映穩態效能。',
+      explanation: '首次執行含一次性開銷, warmup 後計時才反映穩態效能。',
     },
     {
       question: '量 kernel 執行時間應優先用哪種計時?',
       options: ['CPU 的 std::chrono 包住 launch', 'GPU event (cudaEvent/hipEvent)', 'nvidia-smi 的功耗', '編譯時間'],
       answer: 1,
-      explanation: 'launch 非同步,CPU 計時會量到錯誤區間;GPU event 記錄 device 上的實際起訖。',
+      explanation: 'launch 非同步, CPU 計時會量到錯誤區間;GPU event 記錄 device 上的實際起訖。',
     },
     {
       question: 'speed-of-light 分析的目的是?',
-      options: ['測光速', '算出 kernel 相對硬體 peak 的百分比,判斷還有多少優化空間', '計算 register 數量', '偵測 divergence'],
+      options: ['測光速', '算出 kernel 相對硬體 peak 的百分比, 判斷還有多少優化空間', '計算 register 數量', '偵測 divergence'],
       answer: 1,
-      explanation: '% of peak 讓你知道瓶頸在 memory 還是 compute,以及是否已接近上限、不值得再調。',
+      explanation: '% of peak 讓你知道瓶頸在 memory 還是 compute, 以及是否已接近上限、不值得再調。',
     },
   ]}
 />

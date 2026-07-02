@@ -1,6 +1,6 @@
 # Memory hierarchy 全景圖
 
-同一筆資料放在 register 或放在 global memory,存取速度差了兩到三個數量級。GPU 優化很大一部分就是「把熱資料往上搬」的遊戲。這一章畫出完整的 memory 階層,建立你對每一層 latency 與 bandwidth 的數量級直覺。
+同一筆資料放在 register 或放在 global memory, 存取速度差了兩到三個數量級。GPU 優化很大一部分就是「把熱資料往上搬」的遊戲。這一章畫出完整的 memory 階層, 建立你對每一層 latency 與 bandwidth 的數量級直覺。
 
 ## 由快到慢的階層
 
@@ -10,28 +10,28 @@
 | Shared memory / LDS | 每 block 共用 | ~20–30 cycles | 很高 | 程式設計師 |
 | L1 cache | 每 SM/CU | ~30 cycles | 高 | 硬體 |
 | L2 cache | 全晶片共用 | ~200 cycles | 中 | 硬體 |
-| Global memory (HBM) | 整張卡 | ~400–800 cycles | 受 pin 限制 | 程式設計師(配置) |
+| Global memory (HBM) | 整張卡 | ~400–800 cycles | 受 pin 限制 | 程式設計師 (配置) |
 
 <Callout variant="insight" title="先給直覺">
-數字會因架構而異,但數量級的排序永遠成立。優化的本質就是:把被重複使用的資料從 global memory 拉進 shared memory 或 register,用一次昂貴的 load 換來多次便宜的存取。GEMM 的整條優化路線(第 12 章)就是這句話的極致演繹。
+數字會因架構而異, 但數量級的排序永遠成立。優化的本質就是: 把被重複使用的資料從 global memory 拉進 shared memory 或 register, 用一次昂貴的 load 換來多次便宜的存取。GEMM 的整條優化路線 (第 12 章) 就是這句話的極致演繹。
 </Callout>
 
 ## 每一層的性格
 
-**Registers** 最快但最稀缺。每個 SM/CU 的 register file 固定,用得越兇,能同時在飛的 warp 越少(occupancy 下降,第 8 章詳談)。
+**Registers** 最快但最稀缺。每個 SM/CU 的 register file 固定, 用得越兇, 能同時在飛的 warp 越少 (occupancy 下降, 第 8 章詳談)。
 
-**Shared memory / LDS** 由你手動管理,是 block 內 threads 交換資料的地方。它被切成多個 bank,存取模式不當會產生 bank conflict (第 7 章)。
+**Shared memory / LDS** 由你手動管理, 是 block 內 threads 交換資料的地方。它被切成多個 bank, 存取模式不當會產生 bank conflict (第 7 章)。
 
-**L1 / L2 cache** 由硬體自動管理。L2 是全晶片共用,對於有 locality 的存取(例如 GEMM 的 tile、CTA swizzling 帶來的 reuse)特別重要。
+**L1 / L2 cache** 由硬體自動管理。L2 是全晶片共用, 對於有 locality 的存取 (例如 GEMM 的 tile、CTA swizzling 帶來的 reuse) 特別重要。
 
-**Global memory (HBM)** 容量最大、latency 最高。它的有效頻寬高度依賴 memory coalescing (第 6 章)。理論頻寬算法:
+**Global memory (HBM) ** 容量最大、latency 最高。它的有效頻寬高度依賴 memory coalescing (第 6 章)。理論頻寬算法:
 
 $$
 \text{peak BW} = \text{memory clock} \times \text{bus width} \times \text{data rate factor}
 $$
 
 <LabBox path="kernels/02-memory">
-執行 `bandwidth_probe`:它對不同大小的 buffer 做 streaming copy,量測 achieved bandwidth。小 buffer 會落在 cache 內(看起來超過 HBM 頻寬),大 buffer 才反映真實 HBM 頻寬。這個實驗讓你「看見」cache 與 global memory 的分界。
+執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬。這個實驗讓你「看見」cache 與 global memory 的分界。
 </LabBox>
 
 <Quiz
@@ -40,19 +40,19 @@ $$
       question: '下列哪個記憶體層由程式設計師手動管理且為 block 內共用?',
       options: ['registers', 'shared memory / LDS', 'L2 cache', 'HBM'],
       answer: 1,
-      explanation: 'shared memory / LDS 由程式明確配置與存取,是 block 內 threads 協作的關鍵。',
+      explanation: 'shared memory / LDS 由程式明確配置與存取, 是 block 內 threads 協作的關鍵。',
     },
     {
       question: '為什麼用太多 registers per thread 可能反而降低整體效能?',
-      options: ['register 會變慢', '會壓低 occupancy,減少可用來 latency hiding 的 warp', '會觸發 bank conflict', '會關閉 L1'],
+      options: ['register 會變慢', '會壓低 occupancy, 減少可用來 latency hiding 的 warp', '會觸發 bank conflict', '會關閉 L1'],
       answer: 1,
-      explanation: 'register file 固定,每 thread 用越多,能同時活躍的 warp 越少,latency hiding 的能力下降。',
+      explanation: 'register file 固定, 每 thread 用越多, 能同時活躍的 warp 越少, latency hiding 的能力下降。',
     },
     {
-      question: '對一個小 buffer 的 copy,量到的 bandwidth 超過 HBM 理論頻寬,最可能的原因是?',
+      question: '對一個小 buffer 的 copy, 量到的 bandwidth 超過 HBM 理論頻寬, 最可能的原因是?',
       options: ['量測錯誤', '資料命中 L1/L2 cache', 'HBM 超頻', 'coalescing 100%'],
       answer: 1,
-      explanation: '小 buffer 整個放得進 cache,存取沒真的打到 HBM,因此看起來超過 HBM 頻寬。',
+      explanation: '小 buffer 整個放得進 cache, 存取沒真的打到 HBM, 因此看起來超過 HBM 頻寬。',
     },
   ]}
 />

@@ -1,8 +1,8 @@
-# 案例研究:fused elementwise + reduction
+# 案例研究: fused elementwise + reduction
 
-這一章把前面的東西串成一個真實案例:一段 `bias → activation → 部分 reduction` 的 PyTorch 程式碼,用原生 op 寫要讀寫 global memory 好幾趟。我們把它 fuse 成單一 kernel,量 end-to-end speedup,再和 `torch.compile` 產生的 Triton kernel 比一比。
+這一章把前面的東西串成一個真實案例: 一段 `bias → activation → 部分 reduction` 的 PyTorch 程式碼, 用原生 op 寫要讀寫 global memory 好幾趟。我們把它 fuse 成單一 kernel, 量 end-to-end speedup, 再和 `torch.compile` 產生的 Triton kernel 比一比。
 
-## 起點:三個 op,三趟 memory
+## 起點: 三個 op, 三趟 memory
 
 ```python
 # Baseline: each op reads and writes the full tensor to global memory.
@@ -12,11 +12,11 @@ def baseline(x, bias):
     return h.sum(dim=-1)    # read h2; write reduced
 ```
 
-`x` 被搬進搬出三次。這是典型的 memory-bound elementwise 鏈:arithmetic intensity 低,時間幾乎全花在 global memory 往返(第 5 章 roofline / 第 17 章的病徵)。
+`x` 被搬進搬出三次。這是典型的 memory-bound elementwise 鏈: arithmetic intensity 低, 時間幾乎全花在 global memory 往返 (第 5 章 roofline / 第 17 章的病徵)。
 
-## fused kernel:讀一次、算完、reduce 完
+## fused kernel: 讀一次、算完、reduce 完
 
-把 bias、gelu、row reduction 合進一個 kernel:每個 block 負責一個 row,讀進 register/shared memory,做完 bias + gelu 後直接 warp/block reduce,只寫出一個 scalar。global memory 往返從 3 趟降到 1 趟。
+把 bias、gelu、row reduction 合進一個 kernel: 每個 block 負責一個 row, 讀進 register/shared memory, 做完 bias + gelu 後直接 warp/block reduce, 只寫出一個 scalar。global memory 往返從 3 趟降到 1 趟。
 
 ```cpp
 // One block per row: load once, apply bias+gelu in registers, then reduce.
@@ -38,7 +38,7 @@ __global__ void fusedBiasGeluRowsum(const float* x, const float* bias,
 ```
 
 <Callout variant="insight" title="為什麼會快">
-baseline 的瓶頸不是算 gelu,而是把整個 tensor 在 global memory 進出三次。fused 版把中間結果留在 register / shared memory,只付一次讀 + 一次(極小的)寫。對 memory-bound 的鏈,speedup 大致等於省下的往返次數比例。
+baseline 的瓶頸不是算 gelu, 而是把整個 tensor 在 global memory 進出三次。fused 版把中間結果留在 register / shared memory, 只付一次讀 + 一次 (極小的) 寫。對 memory-bound 的鏈, speedup 大致等於省下的往返次數比例。
 </Callout>
 
 ## 和 torch.compile 比較
@@ -51,31 +51,31 @@ compiled = torch.compile(baseline)
 # using torch.cuda.Event timing and warmup (see chapter 4).
 ```
 
-常見結果:`torch.compile` 幾乎追平手寫、且零維護成本。這正是本案例的誠實結論 — 手寫值得的時機,是當 `torch.compile` 沒 fuse 好(例如跨 op 的複雜相依、特殊 reduction 模式),或你需要 online 演算法時。
+常見結果: `torch.compile` 幾乎追平手寫、且零維護成本。這正是本案例的誠實結論 — 手寫值得的時機, 是當 `torch.compile` 沒 fuse 好 (例如跨 op 的複雜相依、特殊 reduction 模式), 或你需要 online 演算法時。
 
 <LabBox path="kernels/06-pytorch-integration/load_inline">
-`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel,對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時(warmup + CUDA events),印出各自時間與相對 speedup。跑一次,看看在你的硬體上手寫贏 torch.compile 多少(或輸多少)。
+`load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel, 對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時 (warmup + CUDA events), 印出各自時間與相對 speedup。跑一次, 看看在你的硬體上手寫贏 torch.compile 多少 (或輸多少)。
 </LabBox>
 
 <Quiz
   questions={[
     {
-      question: 'baseline (add → gelu → sum)慢的主因?',
-      options: ['gelu 的 exp 太貴', '整個 tensor 在 global memory 進出多趟,memory-bound', 'register 不足', 'divergence'],
+      question: 'baseline (add → gelu → sum) 慢的主因?',
+      options: ['gelu 的 exp 太貴', '整個 tensor 在 global memory 進出多趟, memory-bound', 'register 不足', 'divergence'],
       answer: 1,
-      explanation: '每個 op 各讀寫一次 global memory,中間結果的往返主宰了時間。',
+      explanation: '每個 op 各讀寫一次 global memory, 中間結果的往返主宰了時間。',
     },
     {
       question: 'fuse 這條鏈的核心收益?',
       options: ['減少 FLOP', '把多趟 global memory 往返併成一次讀 + 一次寫', '提高精度', '增加 occupancy 上限'],
       answer: 1,
-      explanation: '中間結果留在 register/shared memory,省下的正是 memory traffic。',
+      explanation: '中間結果留在 register/shared memory, 省下的正是 memory traffic。',
     },
     {
       question: '和 torch.compile 比較的合理結論?',
-      options: ['手寫永遠大勝', 'torch.compile 常能自動 fuse 到接近手寫,手寫留給它處理不好的情況', 'torch.compile 不能 fuse', '兩者完全相同'],
+      options: ['手寫永遠大勝', 'torch.compile 常能自動 fuse 到接近手寫, 手寫留給它處理不好的情況', 'torch.compile 不能 fuse', '兩者完全相同'],
       answer: 1,
-      explanation: 'torch.compile 的 Triton fusion 通常很強,手寫的價值在它涵蓋不到的模式。',
+      explanation: 'torch.compile 的 Triton fusion 通常很強, 手寫的價值在它涵蓋不到的模式。',
     },
   ]}
 />

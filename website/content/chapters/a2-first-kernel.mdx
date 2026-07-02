@@ -1,10 +1,10 @@
 # 第一個 kernel
 
-我們來寫第一個真正在 GPU 上跑的程式:vector add,$C = A + B$。它簡單到沒有任何優化空間,正好讓你把注意力放在「一段程式碼如何被幾千個 thread 同時執行」這件事上。
+我們來寫第一個真正在 GPU 上跑的程式: vector add,$C = A + B$。它簡單到沒有任何優化空間, 正好讓你把注意力放在「一段程式碼如何被幾千個 thread 同時執行」這件事上。
 
 ## thread / block / grid hierarchy
 
-GPU 的並行度用三層結構描述。最小單位是 thread;threads 組成 block (同一 block 的 threads 能共用 shared memory、能 `__syncthreads ()`);blocks 組成 grid。你在 launch kernel 時指定 grid 與 block 的維度,硬體再把它們排到 SM/CU 上。
+GPU 的並行度用三層結構描述。最小單位是 thread;threads 組成 block (同一 block 的 threads 能共用 shared memory、能 `__syncthreads()`);blocks 組成 grid。你在 launch kernel 時指定 grid 與 block 的維度, 硬體再把它們排到 SM/CU 上。
 
 每個 thread 用內建變數算出「我負責哪一筆資料」:
 
@@ -56,12 +56,12 @@ void launch(const float* a, const float* b, float* c, int n) {
 </PlatformTabs>
 
 <Callout variant="info" title="那個 if (i < n) 不是裝飾">
-grid 用 ceil-div 算出來,最後一個 block 幾乎一定會有超出 n 的 thread。少了邊界檢查,這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
+grid 用 ceil-div 算出來, 最後一個 block 幾乎一定會有超出 n 的 thread。少了邊界檢查, 這些 thread 會越界寫記憶體 — 在 GPU 上這常是 silent corruption 而不是乾脆的 crash。
 </Callout>
 
 ## compile 流程
 
-CUDA 用 `nvcc`,HIP 用 `hipcc`。兩者都會把 host 程式碼交給系統 C++ 編譯器,把 device 程式碼編成中介表示(PTX / GCN-CDNA ISA),最後在載入時 JIT 或 AOT 成實際 GPU 指令。
+CUDA 用 `nvcc`, HIP 用 `hipcc`。兩者都會把 host 程式碼交給系統 C++ 編譯器, 把 device 程式碼編成中介表示 (PTX / GCN-CDNA ISA), 最後在載入時 JIT 或 AOT 成實際 GPU 指令。
 
 ```bash
 # CUDA
@@ -71,10 +71,10 @@ nvcc -O3 -arch=sm_80 vector_add.cu -o vector_add
 hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 ```
 
-本站的 kernels 用 CMake 包起來,自動偵測平台並帶入正確的 arch flag,你不必手記這些參數。
+本站的 kernels 用 CMake 包起來, 自動偵測平台並帶入正確的 arch flag, 你不必手記這些參數。
 
 <LabBox path="kernels/01-basics">
-編譯並執行 `vector_add`。它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對(correctness check),再用 benchmark harness 報告 achieved bandwidth (GB/s)與 % of peak。vector add 是純 memory-bound,你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的,第 5 章的 roofline 會解釋為什麼。
+編譯並執行 `vector_add`。它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
 </LabBox>
 
 <Quiz
@@ -83,19 +83,19 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
       question: 'kernel 裡的 `blockIdx.x * blockDim.x + threadIdx.x` 算的是?',
       options: ['block 數量', '這個 thread 負責的 global 索引', 'warp 大小', 'shared memory 大小'],
       answer: 1,
-      explanation: '把 block 內的 local 索引加上 block 的起始偏移,得到跨整個 grid 的唯一 global 索引。',
+      explanation: '把 block 內的 local 索引加上 block 的起始偏移, 得到跨整個 grid 的唯一 global 索引。',
     },
     {
-      question: '為什麼 grid size 要用 ceil-div `(n + block - 1) / block`?',
-      options: ['為了對齊 cache line', '確保 thread 總數 ≥ n,不漏掉任何元素', '為了提高 occupancy', '為了避免 bank conflict'],
+      question: '為什麼 grid size 要用 ceil-div ` (n + block - 1) / block`?',
+      options: ['為了對齊 cache line', '確保 thread 總數 ≥ n, 不漏掉任何元素', '為了提高 occupancy', '為了避免 bank conflict'],
       answer: 1,
-      explanation: 'n 不一定整除 block size,ceil-div 保證覆蓋所有元素;多出來的 thread 靠邊界檢查擋掉。',
+      explanation: 'n 不一定整除 block size, ceil-div 保證覆蓋所有元素;多出來的 thread 靠邊界檢查擋掉。',
     },
     {
       question: 'vector add 屬於哪一類 kernel?',
       options: ['compute-bound', 'memory-bound', 'latency-bound 的序列程式', '完全在 register 內'],
       answer: 1,
-      explanation: '每個元素只做一次加法卻要讀兩個、寫一個 float,arithmetic intensity 極低,受限於 memory bandwidth。',
+      explanation: '每個元素只做一次加法卻要讀兩個、寫一個 float, arithmetic intensity 極低, 受限於 memory bandwidth。',
     },
   ]}
 />

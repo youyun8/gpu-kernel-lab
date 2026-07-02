@@ -4,7 +4,7 @@ import { exerciseSets } from '@/lib/curriculum';
 
 export const metadata: Metadata = {
   title: '練習與解答',
-  description: 'GPU Kernel Lab 的 paper-and-pencil 與 programming 練習題,附完整解答。',
+  description: 'GPU Kernel Lab 的 paper-and-pencil 與 programming 練習題, 附完整解答。',
 };
 
 export default function ExercisesIndexPage() {
@@ -13,7 +13,7 @@ export default function ExercisesIndexPage() {
     <main className="mx-auto max-w-6xl px-4 py-12">
       <h1 className="text-3xl font-bold text-white">練習與解答</h1>
       <p className="mt-3 max-w-2xl text-slate-400">
-        每個 track 都有一組練習,混合 paper-and-pencil(計算與推理)與 programming(改寫 / 實作 kernel)兩類,共 {total} 題。每題附完整解答(點開 <span className="text-brand">顯示解答</span> 展開);programming 題的參考解位於 <code>kernels/exercises/</code>,可直接編譯執行。
+        每個 track 都有一組練習, 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 共 {total} 題。每題附完整解答 (點開 <span className="text-brand">顯示解答</span> 展開); programming 題的參考解位於 <code>kernels/exercises/</code>, 可直接編譯執行。
       </p>
       <div className="mt-8 grid gap-4 sm:grid-cols-2">
         {exerciseSets.map((set) => (

@@ -10,7 +10,7 @@ export const metadata: Metadata = {
     template: `%s | ${siteConfig.name}`,
   },
   description:
-    'GPU Kernel Lab 是一個以繁體中文撰寫的 CUDA/ROCm kernel 優化學習網站,從入門到專家,搭配可執行的 kernels、benchmark 與 profiling 範例。',
+    'GPU Kernel Lab 是一個以繁體中文撰寫的 CUDA/ROCm kernel 優化學習網站, 從入門到專家, 搭配可執行的 kernels、benchmark 與 profiling 範例。',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

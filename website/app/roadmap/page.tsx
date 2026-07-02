@@ -11,7 +11,7 @@ export default function RoadmapPage() {
     <main className="mx-auto max-w-6xl px-4 py-12">
       <h1 className="text-3xl font-bold text-white">學習路線圖</h1>
       <p className="mt-3 max-w-2xl text-slate-400">
-        建議依序完成 Track A → B → C,建立完整的 mental model;Track D (PyTorch 實戰) 可在讀完 Track A 後隨時穿插。每章都附互動元件、動手實驗與章末測驗。
+        建議依序完成 Track A → B → C, 建立完整的 mental model; Track D (PyTorch 實戰) 可在讀完 Track A 後隨時穿插。每章都附互動元件、動手實驗與章末測驗。
       </p>
       <div className="mt-8">
         <LearningPathMap />

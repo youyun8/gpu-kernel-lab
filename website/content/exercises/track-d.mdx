@@ -1,74 +1,74 @@
-# Track D 練習:profiling、custom extension、fusion、Triton
+# Track D 練習: profiling、custom extension、fusion、Triton
 
 對應第 17–21 章。programming 題需要 GPU 版 PyTorch (第 4 題需 Triton)。
 
 <Exercise id="D1" title="Launch overhead 估算" kind="paper" level="入門">
-一個模型每次 forward 送出 500 個很小的 kernel,每個 kernel 實際 compute 只需 2 μs,但每次 launch overhead 約 5 μs。(a) 一次 forward 的總 GPU 時間下限約多少?(b) 其中 launch overhead 佔比?(c) 這個病徵在 trace 上長什麼樣?該怎麼優化?
+一個模型每次 forward 送出 500 個很小的 kernel, 每個 kernel 實際 compute 只需 2 μs, 但每次 launch overhead 約 5 μs。(a) 一次 forward 的總 GPU 時間下限約多少?(b) 其中 launch overhead 佔比?(c) 這個病徵在 trace 上長什麼樣?該怎麼優化?
 
 <Solution>
-(a) 若序列化,每 kernel `5 + 2 = 7` μs → `500 * 7 = 3500` μs = 3.5 ms。
+(a) 若序列化, 每 kernel `5 + 2 = 7` μs → `500 * 7 = 3500` μs = 3.5 ms。
 
-(b) launch overhead = `500 * 5 = 2500` μs,佔 `2500/3500 ≈ 71%`。真正的瓶頸是 launch,不是 compute。
+(b) launch overhead = `500 * 5 = 2500` μs, 佔 `2500/3500 ≈ 71%`。真正的瓶頸是 launch, 不是 compute。
 
-(c) trace 上是「一長排極短 kernel,彼此間有 CPU 空檔」。優化方向:把小 op **fuse** 成少數大 kernel,或用 **CUDA Graph** 消除重複 launch 成本(見第 17 章)。
+(c) trace 上是「一長排極短 kernel, 彼此間有 CPU 空檔」。優化方向: 把小 op **fuse** 成少數大 kernel, 或用 **CUDA Graph** 消除重複 launch 成本 (見第 17 章)。
 </Solution>
 </Exercise>
 
 <Exercise id="D2" title="哪些 op 值得 fuse" kind="paper" level="入門">
-給定序列 `y = layernorm (gelu (x @ W + b))`。哪些部分是 memory-bound、適合 fuse?哪個部分通常該交給 library?為什麼?
+給定序列 `y = layernorm(gelu(x @ W + b))`。哪些部分是 memory-bound、適合 fuse?哪個部分通常該交給 library?為什麼?
 
 <Solution>
-`x @ W`(GEMM/matmul)是 compute-bound 的重活,通常交給 cuBLAS / hipBLASLt,不要自己重寫。
+`x @ W` (GEMM/matmul) 是 compute-bound 的重活, 通常交給 cuBLAS / hipBLASLt, 不要自己重寫。
 
-`+ b`(bias)、`gelu`、`layernorm` 是相接的 elementwise / reduction op,各自 memory-bound、中間結果只用一次 → 適合 **fuse** 成一個 kernel (甚至 fuse 進 GEMM 的 epilogue),把多趟 global memory 往返併成一次。判準見第 17、19 章。
+`+ b` (bias)、`gelu`、`layernorm` 是相接的 elementwise / reduction op, 各自 memory-bound、中間結果只用一次 → 適合 **fuse** 成一個 kernel (甚至 fuse 進 GEMM 的 epilogue), 把多趟 global memory 往返併成一次。判準見第 17、19 章。
 </Solution>
 </Exercise>
 
 <Exercise id="D3" title="Custom kernel 前的 tensor 檢查" kind="paper" level="進階">
-同事的 custom CUDA op 對某些輸入結果錯誤、對某些輸入 crash。他直接用 `x.data_ptr<float>()` 線性索引。列出上 kernel 前至少四項必要檢查,並說明各自防止什麼問題。
+同事的 custom CUDA op 對某些輸入結果錯誤、對某些輸入 crash。他直接用 `x.data_ptr<float>()` 線性索引。列出上 kernel 前至少四項必要檢查, 並說明各自防止什麼問題。
 
 <Solution>
-1. `TORCH_CHECK (x.is_cuda ())` — 防止對 CPU tensor 的 device 指標解參考(crash)。
-2. `x = x.contiguous ()` — 非連續 tensor 的 stride 不規則,線性索引會讀錯元素(結果錯誤)。
-3. dtype 檢查 `x.scalar_type () == at::kFloat` — 把 half/double 當 float 讀會錯位(結果錯誤 / 越界)。
-4. `CUDAGuard (x.device ())` — 多 GPU 下 launch 到錯的 device (crash / 錯誤)。
+1. `TORCH_CHECK(x.is_cuda())` — 防止對 CPU tensor 的 device 指標解參考 (crash)。
+2. `x = x.contiguous()` — 非連續 tensor 的 stride 不規則, 線性索引會讀錯元素 (結果錯誤)。
+3. dtype 檢查 `x.scalar_type() == at::kFloat` — 把 half/double 當 float 讀會錯位 (結果錯誤 / 越界)。
+4. `CUDAGuard(x.device())` — 多 GPU 下 launch 到錯的 device (crash / 錯誤)。
 
-額外:用 `at::cuda::getCurrentCUDAStream ()` launch,避免與框架非同步執行的 race (見第 18 章)。
+額外: 用 `at::cuda::getCurrentCUDAStream()` launch, 避免與框架非同步執行的 race (見第 18 章)。
 </Solution>
 </Exercise>
 
 <Exercise id="D4" title="fused speedup 上限估算" kind="paper" level="進階">
-baseline `add → gelu → sum` 對一個大 tensor 各讀寫一次 global memory,共約 5 次全張量 traffic (add 讀2寫1、gelu 讀1寫1... 概估)。fused 版只讀一次、寫一個極小的 reduction 結果。(a) 若 kernel 純 memory-bound,fused 的理論加速上限約多少倍?(b) 為什麼實測通常達不到這個上限?
+baseline `add → gelu → sum` 對一個大 tensor 各讀寫一次 global memory, 共約 5 次全張量 traffic (add 讀2寫1、gelu 讀1寫1... 概估)。fused 版只讀一次、寫一個極小的 reduction 結果。(a) 若 kernel 純 memory-bound, fused 的理論加速上限約多少倍?(b) 為什麼實測通常達不到這個上限?
 
 <Solution>
-(a) memory-bound 時時間正比於 traffic。baseline 約 5 次全張量 traffic,fused 約 1 次 → 理論上限約 **5×**(數量級;精確值看你怎麼數中間張量)。
+(a) memory-bound 時時間正比於 traffic。baseline 約 5 次全張量 traffic, fused 約 1 次 → 理論上限約 **5×** (數量級;精確值看你怎麼數中間張量)。
 
-(b) 實測較低,因為:reduction 仍有 shared-memory / 同步成本;kernel launch 與 tail effect;fused kernel 的 occupancy 或 register 壓力;以及非全張量的固定 overhead。此外 `torch.compile` 已能自動 fuse,手寫的相對增益因此縮小(見第 19 章)。
+(b) 實測較低, 因為: reduction 仍有 shared-memory / 同步成本;kernel launch 與 tail effect;fused kernel 的 occupancy 或 register 壓力;以及非全張量的固定 overhead。此外 `torch.compile` 已能自動 fuse, 手寫的相對增益因此縮小 (見第 19 章)。
 </Solution>
 </Exercise>
 
 <Exercise id="D5" title="用 torch.profiler 找熱點" kind="code" level="入門">
-執行 `kernels/06-pytorch-integration/profile_model.py`,從印出的表找出 device time 最高的 op,並打開匯出的 `trace.json`(Perfetto)。回報:最耗時的 op 是什麼?它是 compute-bound 還是 memory-bound?你會怎麼優化它?
+執行 `kernels/06-pytorch-integration/profile_model.py`, 從印出的表找出 device time 最高的 op, 並打開匯出的 `trace.json` (Perfetto)。回報: 最耗時的 op 是什麼?它是 compute-bound 還是 memory-bound?你會怎麼優化它?
 
 <Solution>
-這個 workload 是 `add → gelu → sum` 的 elementwise 鏈,通常最耗時的是 elementwise / reduction op,且為 memory-bound (低 arithmetic intensity)。優化方向是把整條鏈 fuse 成一個 kernel (對照 D2、D4,以及 `load_inline/fused_bias_gelu.py`)。實際排名依 PyTorch 版本與硬體而異;重點在於「先量測、再依 bound 類型決定方向」。此題需 GPU 版 PyTorch。
+這個 workload 是 `add → gelu → sum` 的 elementwise 鏈, 通常最耗時的是 elementwise / reduction op, 且為 memory-bound (低 arithmetic intensity)。優化方向是把整條鏈 fuse 成一個 kernel (對照 D2、D4, 以及 `load_inline/fused_bias_gelu.py`)。實際排名依 PyTorch 版本與硬體而異;重點在於「先量測、再依 bound 類型決定方向」。此題需 GPU 版 PyTorch。
 </Solution>
 </Exercise>
 
 <Exercise id="D6" title="實作並驗證 fused kernel 的 backward" kind="code" level="挑戰">
-以 `kernels/06-pytorch-integration/cpp_extension/` 為範本,為一個 elementwise op (例如 SiLU:`x * sigmoid (x)`)寫 forward + backward CUDA/HIP kernel,包成 `autograd.Function`,並用與 `test_gelu.py` 相同的方式對 `F.silu` 與其解析梯度做正確性比對。
+以 `kernels/06-pytorch-integration/cpp_extension/` 為範本, 為一個 elementwise op (例如 SiLU: `x * sigmoid(x)`) 寫 forward + backward CUDA/HIP kernel, 包成 `autograd.Function`, 並用與 `test_gelu.py` 相同的方式對 `F.silu` 與其解析梯度做正確性比對。
 
 <Solution>
-SiLU 導數:`d/dx [x·σ(x)] = σ(x) + x·σ(x)·(1−σ(x))`。forward 寫 `y = x * sigmoid (x)`,backward 用上式乘上 `grad_out`。驗證流程與 `test_gelu.py` 相同:forward 比 `F.silu`,backward 比對 autograd 對 `F.silu` 的梯度。關鍵仍是第 18 章的 tensor 檢查(contiguous / dtype / device / stream)。此題需 GPU 版 PyTorch;結構可直接複製 `cpp_extension/` 目錄修改 kernel 數學。
+SiLU 導數: `d/dx [x·σ(x)] = σ(x) + x·σ(x)·(1−σ(x))`。forward 寫 `y = x * sigmoid(x)`, backward 用上式乘上 `grad_out`。驗證流程與 `test_gelu.py` 相同: forward 比 `F.silu`, backward 比對 autograd 對 `F.silu` 的梯度。關鍵仍是第 18 章的 tensor 檢查 (contiguous / dtype / device / stream)。此題需 GPU 版 PyTorch;結構可直接複製 `cpp_extension/` 目錄修改 kernel 數學。
 </Solution>
 </Exercise>
 
 <Exercise id="D7" title="Triton softmax 對照" kind="code" level="進階">
-執行 `kernels/06-pytorch-integration/triton/softmax_triton.py`,確認它與 `torch.softmax` 的最大絕對誤差在容忍度內。然後回答:Triton 版為了 numerical stability 做了什麼?它比第 10 章手寫的 CUDA softmax 少寫了哪些底層細節?
+執行 `kernels/06-pytorch-integration/triton/softmax_triton.py`, 確認它與 `torch.softmax` 的最大絕對誤差在容忍度內。然後回答: Triton 版為了 numerical stability 做了什麼?它比第 10 章手寫的 CUDA softmax 少寫了哪些底層細節?
 
 <Solution>
-numerical stability:kernel 內 `x = x - tl.max (x, axis=0)` 先減 row max,再 `exp`,與手寫版一致(避免 overflow)。
+numerical stability: kernel 內 `x = x - tl.max(x, axis=0)` 先減 row max, 再 `exp`, 與手寫版一致 (避免 overflow)。
 
-Triton 幫你處理掉的底層細節:shared memory 配置、`__syncthreads ()`、warp shuffle reduction、coalescing 與 index 計算——你只寫 block-level 的 `tl.load / tl.max / tl.sum / tl.store`。代價是可能少了最後幾 % 的 peak,但開發速度與可攜性(同一份 `.py` 跑 NVIDIA 與 AMD)大幅提升(見第 20 章)。此題需安裝 Triton。
+Triton 幫你處理掉的底層細節: shared memory 配置、`__syncthreads()`、warp shuffle reduction、coalescing 與 index 計算——你只寫 block-level 的 `tl.load / tl.max / tl.sum / tl.store`。代價是可能少了最後幾 % 的 peak, 但開發速度與可攜性 (同一份 `.py` 跑 NVIDIA 與 AMD) 大幅提升 (見第 20 章)。此題需安裝 Triton。
 </Solution>
 </Exercise>

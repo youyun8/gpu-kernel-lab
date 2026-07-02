@@ -1,14 +1,14 @@
 # GEMM 優化全流程
 
-為什麼一個「照著數學公式寫」的 SGEMM,只跑出 cuBLAS 的 2%?矩陣乘法的 FLOP 數是固定的($2MNK$),但 naive kernel 把時間全花在等 global memory。這一章是本站的主軸:我們用同一個 $C = A \times B$,一步一步把它從不到 5% 推到接近 library 水準,每一步只解決一個明確的 bottleneck。
+為什麼一個「照著數學公式寫」的 SGEMM, 只跑出 cuBLAS 的 2%?矩陣乘法的 FLOP 數是固定的 ($2MNK$), 但 naive kernel 把時間全花在等 global memory。這一章是本站的主軸: 我們用同一個 $C = A \times B$, 一步一步把它從不到 5% 推到接近 library 水準, 每一步只解決一個明確的 bottleneck。
 
 <Callout variant="insight" title="貫穿全章的一句話">
-GEMM 優化的核心不是「算得更快」,而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size),roofline 上的點才會從 bandwidth roof 爬到 compute roof。
+GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。arithmetic intensity 從 naive 的 O (1) 拉到 O (tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
 </Callout>
 
-## Step 0:naive — 每個 output 一個 thread
+## Step 0: naive — 每個 output 一個 thread
 
-最直觀的寫法:每個 thread 算一個 $C_{ij}$,跑一個長度 $K$ 的迴圈。
+最直觀的寫法: 每個 thread 算一個 $C_{ij}$, 跑一個長度 $K$ 的迴圈。
 
 <PlatformTabs>
 <Platform name="CUDA">
@@ -52,11 +52,11 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 </Platform>
 </PlatformTabs>
 
-問題:每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP,arithmetic intensity ≈ 0.25 FLOP/byte,牢牢卡在 bandwidth roof。profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
+問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
 
-## Step 1:shared memory tiling — 讓資料被重複使用
+## Step 1: shared memory tiling — 讓資料被重複使用
 
-把 $A$、$B$ 切成 tile,一個 block 協力把 tile 載入 shared memory,再從 shared memory 反覆讀。每筆 global load 被同一個 block 內的多個 thread 共用,arithmetic intensity 隨 tile size 線性上升。
+把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
 
 <TilingAnimator />
 
@@ -84,11 +84,11 @@ __global__ void sgemmTiled(const float* A, const float* B, float* C,
 }
 ```
 
-profiler 觀察:global memory transactions 大幅下降,DRAM throughput 不再是瓶頸,performance 通常跳到 naive 的 5–10 倍。
+profiler 觀察: global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。
 
-## Step 2:register tiling — 一個 thread 算一小塊 C
+## Step 2: register tiling — 一個 thread 算一小塊 C
 
-光靠 shared memory 還不夠:shared memory 的 bandwidth 也有限。下一步讓每個 thread 算一個 $TM \times TN$ 的 micro-tile,把 $A$、$B$ 的片段放進 registers 反覆用,把 shared memory 的存取次數再攤薄。這一步通常帶來最大的單步跳躍。
+光靠 shared memory 還不夠: shared memory 的 bandwidth 也有限。下一步讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 registers 反覆用, 把 shared memory 的存取次數再攤薄。這一步通常帶來最大的單步跳躍。
 
 ```cpp
 // Each thread now computes a TM x TN block of C, holding operands in registers.
@@ -110,63 +110,63 @@ for (int p = 0; p < kTile; ++p) {
 }
 ```
 
-## Step 3–5:vectorized loads、double buffering、Tensor Core / MFMA
+## Step 3–5: vectorized loads、double buffering、Tensor Core / MFMA
 
-接下來的三步分別攻擊不同的殘餘 bottleneck,細節在後續小節與 lab 展開:
+接下來的三步分別攻擊不同的殘餘 bottleneck, 細節在後續小節與 lab 展開:
 
-- Step 3 **vectorized loads**:用 `float4` 一次搬 128 bits,減少 load 指令數與 address 計算 overhead。
-- Step 4 **double buffering**:預先載入下一個 k-tile 到另一組 shared memory buffer,讓 compute 與 global load 重疊,隱藏 latency (software pipelining)。
-- Step 5 **Tensor Core (WMMA) / AMD MFMA**:改用矩陣乘加硬體單元,對 half/bf16 提供數量級的吞吐提升。
+- Step 3 **vectorized loads**: 用 `float4` 一次搬 128 bits, 減少 load 指令數與 address 計算 overhead。
+- Step 4 **double buffering**: 預先載入下一個 k-tile 到另一組 shared memory buffer, 讓 compute 與 global load 重疊, 隱藏 latency (software pipelining)。
+- Step 5 **Tensor Core (WMMA) / AMD MFMA**: 改用矩陣乘加硬體單元, 對 half/bf16 提供數量級的吞吐提升。
 
-## 每一步的效果(示意數據)
+## 每一步的效果 (示意數據)
 
-下圖讀取 `bench_all.py` 產生的 JSON,展示每一步相對 library 的百分比。切換 CUDA / ROCm 看兩個平台的差異:
+下圖讀取 `bench_all.py` 產生的 JSON, 展示每一步相對 library 的百分比。切換 CUDA / ROCm 看兩個平台的差異:
 
 <BenchmarkComparison />
 
-同一組 kernel 落在 roofline 上的位置:naive 卡在 bandwidth roof,tiling 後往右上爬,Tensor Core/MFMA 逼近 compute roof。
+同一組 kernel 落在 roofline 上的位置: naive 卡在 bandwidth roof, tiling 後往右上爬, Tensor Core/MFMA 逼近 compute roof。
 
 <RooflineChart />
 
 <Callout variant="warn" title="profiler 截圖說明">
-本 repo 不內建截圖(避免造假數據)。請用 `scripts/profile_ncu.sh` 或 `scripts/profile_rocprof.sh` 對每一個 step kernel 各跑一次,觀察這些 metric 的變化:Step 1 看 DRAM throughput 下降、Step 2 看 shared memory 存取下降與 compute 使用率上升、Step 4 看 stall (long scoreboard) 減少、Step 5 看 Tensor/MFMA pipe 使用率。
+本 repo 不內建截圖 (避免造假數據)。請用 `scripts/profile_ncu.sh` 或 `scripts/profile_rocprof.sh` 對每一個 step kernel 各跑一次, 觀察這些 metric 的變化: Step 1 看 DRAM throughput 下降、Step 2 看 shared memory 存取下降與 compute 使用率上升、Step 4 看 stall (long scoreboard) 減少、Step 5 看 Tensor/MFMA pipe 使用率。
 </Callout>
 
 <LabBox path="kernels/03-gemm">
-`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step5_wmma`(HIP 版對應 MFMA)以及 `sgemm_cublas`/`sgemm_hipblaslt` 參考。每個 target 都會對 CPU reference 做 correctness check,並印出 GFLOP/s 與 % of peak。依序編譯執行,把你機器的數字餵給 `bench_all.py`,再回來看上面的圖表變成你自己的資料。
+`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step5_wmma` (HIP 版對應 MFMA) 以及 `sgemm_cublas`/`sgemm_hipblaslt` 參考。每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。依序編譯執行, 把你機器的數字餵給 `bench_all.py`, 再回來看上面的圖表變成你自己的資料。
 </LabBox>
 
 <Quiz
   questions={[
     {
       question: 'naive SGEMM 效能低落的根本原因是?',
-      options: ['FLOP 數太多', 'arithmetic intensity 太低,卡在 bandwidth roof', 'occupancy 太高', 'register 用太少'],
+      options: ['FLOP 數太多', 'arithmetic intensity 太低, 卡在 bandwidth roof', 'occupancy 太高', 'register 用太少'],
       answer: 1,
-      explanation: '每個 output 讀 2K 個值只做 2K FLOP,intensity ≈ 0.25,是典型 memory-bound,再多 SM 也算不快。',
+      explanation: '每個 output 讀 2K 個值只做 2K FLOP, intensity ≈ 0.25, 是典型 memory-bound, 再多 SM 也算不快。',
     },
     {
       question: 'shared memory tiling 主要改善了哪個量?',
-      options: ['register 數量', '每筆 global load 的 reuse 次數(進而拉高 arithmetic intensity)', 'kernel launch overhead', 'L2 cache 大小'],
+      options: ['register 數量', '每筆 global load 的 reuse 次數 (進而拉高 arithmetic intensity)', 'kernel launch overhead', 'L2 cache 大小'],
       answer: 1,
-      explanation: 'tile 載入 shared memory 後被 block 內多個 thread 共用,global traffic 下降、intensity 上升。',
+      explanation: 'tile 載入 shared memory 後被 block 內多個 thread 共用, global traffic 下降、intensity 上升。',
     },
     {
-      question: 'register tiling (每 thread 算 TM×TN)相對純 shared memory tiling 的主要好處?',
-      options: ['降低 shared memory 存取次數,提高 compute 使用率', '完全不需要 __syncthreads', '自動啟用 Tensor Core', '減少 global memory 容量需求'],
+      question: 'register tiling (每 thread 算 TM×TN) 相對純 shared memory tiling 的主要好處?',
+      options: ['降低 shared memory 存取次數, 提高 compute 使用率', '完全不需要 __syncthreads', '自動啟用 Tensor Core', '減少 global memory 容量需求'],
       answer: 0,
-      explanation: '把 operand 放進 register 反覆使用,攤薄 shared memory bandwidth,讓 FMA pipe 更飽和。',
+      explanation: '把 operand 放進 register 反覆使用, 攤薄 shared memory bandwidth, 讓 FMA pipe 更飽和。',
     },
     {
       question: 'double buffering 的目的是?',
       options: ['減少 register 使用', '讓下一個 k-tile 的 global load 與當前 compute 重疊以隱藏 latency', '避免 bank conflict', '提高數值精度'],
       answer: 1,
-      explanation: 'software pipelining:用兩組 buffer,一邊算一邊預取,把 memory latency 藏在 compute 後面。',
+      explanation: 'software pipelining: 用兩組 buffer, 一邊算一邊預取, 把 memory latency 藏在 compute 後面。',
     },
     {
       question: '什麼情況下改用 Tensor Core / MFMA 效益最大?',
       options: ['fp64 高精度需求', 'half/bf16 且矩陣夠大、intensity 已接近 compute roof', '極小矩陣', 'memory-bound 的 elementwise op'],
       answer: 1,
-      explanation: 'MMA 單元對低精度矩陣乘加提供數量級吞吐,但要先讓 kernel 不再 memory-bound 才吃得到。',
+      explanation: 'MMA 單元對低精度矩陣乘加提供數量級吞吐, 但要先讓 kernel 不再 memory-bound 才吃得到。',
     },
   ]}
 />

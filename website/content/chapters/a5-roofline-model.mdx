@@ -1,16 +1,16 @@
 # Roofline model
 
-你花了一週優化一個 kernel,從 200 GFLOP/s 推到 400。這算好嗎?如果它的天花板本來就是 15000,你才跑到 3%;如果天花板是 420,你已經榨乾了。沒有 roofline model,你根本不知道自己站在哪。這一章教你用一張圖判斷任何 kernel 的優化上限。
+你花了一週優化一個 kernel, 從 200 GFLOP/s 推到 400。這算好嗎?如果它的天花板本來就是 15000, 你才跑到 3%;如果天花板是 420, 你已經榨乾了。沒有 roofline model, 你根本不知道自己站在哪。這一章教你用一張圖判斷任何 kernel 的優化上限。
 
 ## Arithmetic intensity 是關鍵座標
 
-roofline 的橫軸是 arithmetic intensity (AI):每從 memory 搬一個 byte,做了多少 FLOP。
+roofline 的橫軸是 arithmetic intensity (AI): 每從 memory 搬一個 byte, 做了多少 FLOP。
 
 $$
 \text{AI} = \frac{\text{FLOP count}}{\text{bytes moved}} \quad (\text{FLOP/byte})
 $$
 
-縱軸是可達到的 throughput (GFLOP/s)。屋頂由兩段組成:一條斜線(受 memory bandwidth 限制,$\text{perf} = \text{BW} \times \text{AI}$)和一條水平線(受 compute peak 限制)。兩者的交點叫 ridge point。
+縱軸是可達到的 throughput (GFLOP/s)。屋頂由兩段組成: 一條斜線 (受 memory bandwidth 限制,$\text{perf} = \text{BW} \times \text{AI}$) 和一條水平線 (受 compute peak 限制)。兩者的交點叫 ridge point。
 
 $$
 \text{attainable perf} = \min (\text{peak compute},\; \text{peak bandwidth} \times \text{AI})
@@ -18,26 +18,26 @@ $$
 
 ## Bandwidth-bound vs. compute-bound
 
-- AI 落在 ridge point **左邊** → 你在斜線下,是 **bandwidth-bound**:瓶頸是搬資料。優化方向是提高 coalescing、減少冗餘搬移、提高 reuse (拉高 AI)。
-- AI 落在 ridge point **右邊** → 你在水平線下,是 **compute-bound**:瓶頸是算術單元。優化方向是提高 ILP、用 FMA、用 Tensor Core/MFMA。
+- AI 落在 ridge point **左邊** → 你在斜線下, 是 **bandwidth-bound**: 瓶頸是搬資料。優化方向是提高 coalescing、減少冗餘搬移、提高 reuse (拉高 AI)。
+- AI 落在 ridge point **右邊** → 你在水平線下, 是 **compute-bound**: 瓶頸是算術單元。優化方向是提高 ILP、用 FMA、用 Tensor Core/MFMA。
 
 <RooflineChart />
 
-拖動上面的 FLOPs / bytes,看你的點如何在圖上移動。vector add 這種 AI ≈ 0.1 的 kernel 死死貼在斜線上 — 這解釋了第 2 章為什麼它 GFLOP/s 很低卻很正常:它已經接近 bandwidth 屋頂了,低的是 compute 而非效率。GEMM 隨著 tiling 把 AI 往右推,才有機會爬到 compute 屋頂。
+拖動上面的 FLOPs / bytes, 看你的點如何在圖上移動。vector add 這種 AI ≈ 0.1 的 kernel 死死貼在斜線上 — 這解釋了第 2 章為什麼它 GFLOP/s 很低卻很正常: 它已經接近 bandwidth 屋頂了, 低的是 compute 而非效率。GEMM 隨著 tiling 把 AI 往右推, 才有機會爬到 compute 屋頂。
 
 <Callout variant="insight" title="roofline 給你的第一個問題">
-每次看到一個慢 kernel,先問:「它是 bandwidth-bound 還是 compute-bound?」這一個判斷就決定了你接下來所有的優化方向。搞錯方向,你可能花一週優化 compute,而瓶頸其實在 memory。
+每次看到一個慢 kernel, 先問: 「它是 bandwidth-bound 還是 compute-bound?」這一個判斷就決定了你接下來所有的優化方向。搞錯方向, 你可能花一週優化 compute, 而瓶頸其實在 memory。
 </Callout>
 
 ## 怎麼把你的 kernel 標上去
 
-1. 數出 FLOP count (演算法決定,通常固定)。
-2. 估 bytes moved (理想值可從演算法算,實際值可從 profiler 的 memory throughput 讀)。
-3. AI = FLOP / bytes,量到的 GFLOP/s 當縱座標,點上去。
-4. 看點離哪一段屋頂近,決定優化方向。
+1. 數出 FLOP count (演算法決定, 通常固定)。
+2. 估 bytes moved (理想值可從演算法算, 實際值可從 profiler 的 memory throughput 讀)。
+3. AI = FLOP / bytes, 量到的 GFLOP/s 當縱座標, 點上去。
+4. 看點離哪一段屋頂近, 決定優化方向。
 
 <LabBox path="kernels/02-memory">
-跑 `roofline_probe`:它對幾個不同 AI 的 micro-kernel (從純 copy 到每 byte 做很多 FMA)各量一次,印出 (AI, GFLOP/s)。把這些點對照上面的互動 roofline,你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。
+跑 `roofline_probe`: 它對幾個不同 AI 的 micro-kernel (從純 copy 到每 byte 做很多 FMA) 各量一次, 印出 (AI, GFLOP/s)。把這些點對照上面的互動 roofline, 你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。
 </LabBox>
 
 <Quiz
@@ -46,19 +46,19 @@ $$
       question: 'arithmetic intensity 的定義是?',
       options: ['每秒 FLOP 數', '每 byte memory traffic 做的 FLOP 數', 'register 使用量', 'occupancy 百分比'],
       answer: 1,
-      explanation: 'AI = FLOP / bytes moved,是 roofline 的橫軸,決定 kernel 落在斜線還是水平線下。',
+      explanation: 'AI = FLOP / bytes moved, 是 roofline 的橫軸, 決定 kernel 落在斜線還是水平線下。',
     },
     {
-      question: 'kernel 的 AI 落在 ridge point 左側,代表?',
-      options: ['compute-bound', 'bandwidth-bound,應優先減少/加速 memory traffic', '已達最佳', 'occupancy 不足'],
+      question: 'kernel 的 AI 落在 ridge point 左側, 代表?',
+      options: ['compute-bound', 'bandwidth-bound, 應優先減少/加速 memory traffic', '已達最佳', 'occupancy 不足'],
       answer: 1,
-      explanation: 'ridge point 左邊由斜線(bandwidth)封頂,瓶頸在資料搬移。',
+      explanation: 'ridge point 左邊由斜線 (bandwidth) 封頂, 瓶頸在資料搬移。',
     },
     {
       question: '為什麼提高 tiling / reuse 能幫 bandwidth-bound kernel?',
-      options: ['降低 FLOP 數', '提高 AI,把點往右推,可能越過 ridge point 進入 compute-bound', '增加 register', '減少 thread 數'],
+      options: ['降低 FLOP 數', '提高 AI, 把點往右推, 可能越過 ridge point 進入 compute-bound', '增加 register', '減少 thread 數'],
       answer: 1,
-      explanation: '重複使用資料讓每 byte 做更多 FLOP,AI 上升,天花板隨之抬高。',
+      explanation: '重複使用資料讓每 byte 做更多 FLOP, AI 上升, 天花板隨之抬高。',
     },
   ]}
 />

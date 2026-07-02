@@ -1,10 +1,10 @@
 # 小矩陣與尾端效應
 
-你的 GEMM 在 4096×4096 上跑得漂亮,換成 4096×4096×48 的瘦長矩陣卻掉到一半效能。同一個 kernel,為什麼形狀一變就崩?答案是 wave quantization 與 tail effect — GPU 把工作切成 wave 一批批送,最後那批沒填滿就是純浪費。
+你的 GEMM 在 4096×4096 上跑得漂亮, 換成 4096×4096×48 的瘦長矩陣卻掉到一半效能。同一個 kernel, 為什麼形狀一變就崩?答案是 wave quantization 與 tail effect — GPU 把工作切成 wave 一批批送, 最後那批沒填滿就是純浪費。
 
 ## wave quantization
 
-GPU 一次能同時跑的 CTA (block)數量有限(取決於 SM/CU 數與每 SM 可容納的 block 數)。所有 CTA 分成一批批「wave」執行。如果你的 grid 產生 130 個 CTA,而硬體一 wave 能跑 128 個,那你需要 2 個 wave:第一 wave 滿載 128,第二 wave 只有 2 個 CTA 在跑,其餘執行單元閒置。
+GPU 一次能同時跑的 CTA (block) 數量有限 (取決於 SM/CU 數與每 SM 可容納的 block 數)。所有 CTA 分成一批批「wave」執行。如果你的 grid 產生 130 個 CTA, 而硬體一 wave 能跑 128 個, 那你需要 2 個 wave: 第一 wave 滿載 128, 第二 wave 只有 2 個 CTA 在跑, 其餘執行單元閒置。
 
 $$
 \text{efficiency} = \frac{\text{CTA count}}{\lceil \text{CTA count} / \text{CTAs per wave} \rceil \times \text{CTAs per wave}}
@@ -14,58 +14,58 @@ $$
 
 ## tail effect
 
-同一個 wave 內,若各 CTA 工作量不均(例如邊界 tile 較小),整個 wave 要等最慢的 CTA 收工。最後一個 wave 又常常最空 — 兩者疊加就是 tail effect,對小矩陣或不整除的形狀特別明顯。
+同一個 wave 內, 若各 CTA 工作量不均 (例如邊界 tile 較小), 整個 wave 要等最慢的 CTA 收工。最後一個 wave 又常常最空 — 兩者疊加就是 tail effect, 對小矩陣或不整除的形狀特別明顯。
 
 <Callout variant="insight" title="為什麼大矩陣沒事">
-大矩陣產生成百上千個 CTA,最後一個沒填滿的 wave 佔比極小,quantization 損失被稀釋。矩陣越小、wave 數越少,最後一個殘缺 wave 的相對成本越高。這是小矩陣特有的痛。
+大矩陣產生成百上千個 CTA, 最後一個沒填滿的 wave 佔比極小, quantization 損失被稀釋。矩陣越小、wave 數越少, 最後一個殘缺 wave 的相對成本越高。這是小矩陣特有的痛。
 </Callout>
 
 ## Split-K 與 Stream-K
 
-當 M、N 很小但 K 很大時,能產生的 CTA (由 M×N tile 決定)太少,填不滿 GPU。**Split-K** 把 K 維切成多段,讓多個 CTA 各算一段 partial sum,最後再 reduce — 用更多 CTA 換取填滿硬體,代價是一次額外的 reduction。
+當 M、N 很小但 K 很大時, 能產生的 CTA (由 M×N tile 決定) 太少, 填不滿 GPU。**Split-K** 把 K 維切成多段, 讓多個 CTA 各算一段 partial sum, 最後再 reduce — 用更多 CTA 換取填滿硬體, 代價是一次額外的 reduction。
 
-**Stream-K** 更進一步:把所有 output tile 的 MAC 工作攤平成一條連續的 work stream,均勻分給固定數量的 CTA,天生解決 quantization 與負載不均。它讓每個 CTA 的工作量幾乎相等,最後只需少量 fixup。現代 library (CUTLASS)用它處理任意形狀。
+**Stream-K** 更進一步: 把所有 output tile 的 MAC 工作攤平成一條連續的 work stream, 均勻分給固定數量的 CTA, 天生解決 quantization 與負載不均。它讓每個 CTA 的工作量幾乎相等, 最後只需少量 fixup。現代 library (CUTLASS) 用它處理任意形狀。
 
 ## CTA swizzling 與 L2 locality
 
-CTA 的 launch 順序影響哪些 tile 同時在跑,進而影響它們共享的 A/B 資料是否還在 L2。預設的 row-major CTA ordering 可能讓同時執行的 CTA 存取分散的 A/B 區塊;**swizzle**(重排 CTA 到 tile 的對映,例如以 group 為單位 Z 字形)讓相鄰執行的 CTA 共用更多 A/B row/column,提高 L2 命中率。
+CTA 的 launch 順序影響哪些 tile 同時在跑, 進而影響它們共享的 A/B 資料是否還在 L2。預設的 row-major CTA ordering 可能讓同時執行的 CTA 存取分散的 A/B 區塊;**swizzle** (重排 CTA 到 tile 的對映, 例如以 group 為單位 Z 字形) 讓相鄰執行的 CTA 共用更多 A/B row/column, 提高 L2 命中率。
 
 <LabBox path="kernels/05-advanced-scheduling">
-`split_k_gemm` 對一個瘦長(小 M、N,大 K)矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化,對照本章的 quantization 公式。
+`split_k_gemm` 對一個瘦長 (小 M、N, 大 K) 矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化, 對照本章的 quantization 公式。
 </LabBox>
 
 <Quiz
   questions={[
     {
       question: 'wave quantization 造成效能損失的原因?',
-      options: ['register 不足', 'CTA 數不是每 wave 容量的整數倍,最後一個 wave 未填滿而閒置執行單元', 'bank conflict', 'divergence'],
+      options: ['register 不足', 'CTA 數不是每 wave 容量的整數倍, 最後一個 wave 未填滿而閒置執行單元', 'bank conflict', 'divergence'],
       answer: 1,
-      explanation: '工作以 wave 為批次,殘缺的最後一 wave 讓部分執行單元空轉,矩陣越小損失佔比越高。',
+      explanation: '工作以 wave 為批次, 殘缺的最後一 wave 讓部分執行單元空轉, 矩陣越小損失佔比越高。',
     },
     {
-      question: 'M、N 很小但 K 很大時,Split-K 的作用?',
-      options: ['減少 FLOP', '沿 K 切段以產生更多 CTA 填滿 GPU,代價是額外 reduction', '避免 bank conflict', '提高數值精度'],
+      question: 'M、N 很小但 K 很大時, Split-K 的作用?',
+      options: ['減少 FLOP', '沿 K 切段以產生更多 CTA 填滿 GPU, 代價是額外 reduction', '避免 bank conflict', '提高數值精度'],
       answer: 1,
-      explanation: 'M×N 太小產生的 CTA 不夠,Split-K 用 K 維的平行度換取足夠的 CTA。',
+      explanation: 'M×N 太小產生的 CTA 不夠, Split-K 用 K 維的平行度換取足夠的 CTA。',
     },
     {
       question: 'Stream-K 相對 Split-K 的特點?',
-      options: ['完全不需 reduction', '把 MAC 工作攤平均分給固定數量 CTA,天然解決 quantization 與負載不均', '只適用小 K', '需要 Tensor Core'],
+      options: ['完全不需 reduction', '把 MAC 工作攤平均分給固定數量 CTA, 天然解決 quantization 與負載不均', '只適用小 K', '需要 Tensor Core'],
       answer: 1,
-      explanation: 'Stream-K 讓每個 CTA 工作量近乎相等,對任意形狀都能高利用率,只需少量 fixup。',
+      explanation: 'Stream-K 讓每個 CTA 工作量近乎相等, 對任意形狀都能高利用率, 只需少量 fixup。',
     },
     {
       question: 'CTA swizzling 主要改善?',
-      options: ['register 使用', '同時執行的 CTA 之間的 L2 資料共用(locality)', 'occupancy 上限', 'exp 精度'],
+      options: ['register 使用', '同時執行的 CTA 之間的 L2 資料共用 (locality)', 'occupancy 上限', 'exp 精度'],
       answer: 1,
-      explanation: '重排 CTA→tile 對映讓相鄰執行的 CTA 共用更多 A/B 資料,提高 L2 命中率。',
+      explanation: '重排 CTA→tile 對映讓相鄰執行的 CTA 共用更多 A/B 資料, 提高 L2 命中率。',
     },
   ]}
 />
 
 <FurtherReading
   links={[
-    { citation: 'M. Osama, D. Merrill, C. Cecka, M. Garland, and J. D. Owens, "Stream-K: Work-Centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU," arXiv:2301.03598, 2023.', href: 'https://arxiv.org/abs/2301.03598' },
+    { citation: 'M. Osama, D. Merrill, C. Cecka, M. Garland, and J. D. Owens, "Stream-K: Work-Centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU," arXiv: 2301.03598, 2023.', href: 'https://arxiv.org/abs/2301.03598' },
     { citation: 'NVIDIA Corporation, "Efficient GEMM (tile scheduling)," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
     { citation: 'NVIDIA Corporation, "Matrix Multiplication Background," in Deep Learning Performance Documentation, 2024.', href: 'https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html' },
   ]}
