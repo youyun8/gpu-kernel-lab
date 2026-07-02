@@ -11,6 +11,10 @@ import { LabBox } from '@/components/widgets/LabBox';
 import { FurtherReading } from '@/components/widgets/FurtherReading';
 import { Exercise } from '@/components/widgets/Exercise';
 import { Solution } from '@/components/widgets/Solution';
+import { DataLayoutVisualizer } from '@/components/widgets/DataLayoutVisualizer';
+import { GatherScatterVisualizer } from '@/components/widgets/GatherScatterVisualizer';
+import { CollectiveAnimator } from '@/components/widgets/CollectiveAnimator';
+import { DataRaceTimeline } from '@/components/widgets/DataRaceTimeline';
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
@@ -27,6 +31,10 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     FurtherReading,
     Exercise,
     Solution,
+    DataLayoutVisualizer,
+    GatherScatterVisualizer,
+    CollectiveAnimator,
+    DataRaceTimeline,
     ...components,
   };
 }
