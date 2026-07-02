@@ -22,14 +22,10 @@ export default function ChapterPage({ params }: { params: { slug: string } }) {
   if (!MDX || !current) notFound();
 
   return (
-    <AppWidthContainer className="px-4 py-8 lg:grid lg:grid-cols-[220px_1fr] lg:gap-10">
-      <aside className="mb-8 hidden lg:block">
-        <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto pr-2">
-          <ChapterSidebar activeSlug={params.slug} />
-        </div>
-      </aside>
+    <AppWidthContainer className="px-4 py-8 lg:flex lg:items-start lg:gap-10">
+      <ChapterSidebar activeSlug={params.slug} />
 
-      <main className="min-w-0">
+      <main className="min-w-0 lg:flex-1">
         <p className="mb-2 text-sm font-medium" style={{ color: current.trackColor }}>
           {current.trackLabel} · Chapter {current.num}
         </p>
