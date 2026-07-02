@@ -1,12 +1,13 @@
 import Link from 'next/link';
 import { LearningPathMap } from '@/components/LearningPathMap';
+import { AppWidthContainer } from '@/components/AppWidthContainer';
 import { siteConfig } from '@/lib/site';
 import { flatChapters } from '@/lib/curriculum';
 
 export default function HomePage() {
   const totalChapters = flatChapters.length;
   return (
-    <main className="mx-auto max-w-6xl px-4">
+    <AppWidthContainer as="main" className="px-4">
       <section className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-card via-accent to-card px-6 py-16 sm:px-12">
         <p className="mb-3 text-sm font-medium text-primary">CUDA · ROCm / HIP · Triton · PyTorch</p>
         <h1 className="max-w-3xl text-4xl font-bold leading-tight text-foreground sm:text-5xl">
@@ -57,7 +58,7 @@ cd .. && python scripts/bench_all.py --out website/content/data/benchmarks.json`
         <p className="mb-6 text-sm text-muted-foreground">Track A → D。前三個 track 是能力階梯, Track D 貫穿各等級, 把技巧帶回 PyTorch 實戰。</p>
         <LearningPathMap />
       </section>
-    </main>
+    </AppWidthContainer>
   );
 }
 

@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ChapterSidebar } from '@/components/ChapterSidebar';
+import { AppWidthContainer } from '@/components/AppWidthContainer';
 import { chapterComponents } from '@/content/chapters/registry';
 import { flatChapters, getChapterNav } from '@/lib/curriculum';
 
@@ -21,7 +22,7 @@ export default function ChapterPage({ params }: { params: { slug: string } }) {
   if (!MDX || !current) notFound();
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 lg:grid lg:grid-cols-[220px_1fr] lg:gap-10">
+    <AppWidthContainer className="px-4 py-8 lg:grid lg:grid-cols-[220px_1fr] lg:gap-10">
       <aside className="mb-8 hidden lg:block">
         <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto pr-2">
           <ChapterSidebar activeSlug={params.slug} />
@@ -55,6 +56,6 @@ export default function ChapterPage({ params }: { params: { slug: string } }) {
           )}
         </nav>
       </main>
-    </div>
+    </AppWidthContainer>
   );
 }

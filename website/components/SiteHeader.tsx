@@ -1,7 +1,8 @@
 import Link from 'next/link';
 import { siteConfig } from '@/lib/site';
+import { AppWidthContainer } from '@/components/AppWidthContainer';
+import { SettingsNavButton } from '@/components/SettingsModal';
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { TextSizeToggle } from '@/components/TextSizeToggle';
 
 const navItems = [
   { href: '/', label: '首頁' },
@@ -13,7 +14,7 @@ const navItems = [
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
+      <AppWidthContainer className="flex h-14 items-center justify-between px-4">
         <Link href="/" className="flex items-center gap-2 font-semibold text-foreground">
           <span aria-hidden className="text-primary">▍</span>
           <span>{siteConfig.name}</span>
@@ -37,10 +38,10 @@ export function SiteHeader() {
             GitHub
           </a>
           <span className="mx-1 h-5 w-px bg-border" aria-hidden />
-          <TextSizeToggle />
+          <SettingsNavButton />
           <ThemeToggle />
         </nav>
-      </div>
+      </AppWidthContainer>
     </header>
   );
 }
