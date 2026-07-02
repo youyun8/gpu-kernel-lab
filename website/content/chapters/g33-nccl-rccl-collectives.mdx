@@ -1,0 +1,188 @@
+# NCCL / RCCL 與 Multi-GPU Collectives
+
+單張 GPU 的天花板前面 32 章已經摸過了; 模型再大, 就得把工作切到多張卡上 — 而多卡的效能故事幾乎全部圍繞一個問題: **GPU 之間怎麼交換資料, 交換得夠不夠快?** 這一章介紹 collective communication 的核心 primitives、ring 演算法為什麼是 bandwidth-optimal、bus bandwidth 怎麼量, 以及 NCCL 與 RCCL 在 CUDA/ROCm 兩邊怎麼寫出同一份 code。
+
+## 為什麼需要 collective
+
+三種主流的平行化策略, 各自對通訊的需求:
+
+- **Data parallelism**: 每張卡拿完整模型、不同 batch。 每個 step 結束後所有卡的 gradients 要平均 — 這就是一次 **all-reduce**, 資料量 = 整個模型的 gradient (GB 級), 每個 step 都來一次。
+- **Tensor parallelism**: 一層的權重矩陣切在多張卡上, forward/backward 中間結果要 **all-gather** / **reduce-scatter**, 頻率更高 (每層都有), 訊息較小 — latency 敏感。
+- **Pipeline parallelism**: 不同層放不同卡, 相鄰 stage 之間 point-to-point send/recv, 資料量小但在 critical path 上。
+
+訓練一個大模型通常三種同時用 (3D parallelism), 所以通訊 library 的效率直接決定 scaling 曲線的斜率。
+
+## 核心 primitives
+
+以 4 張 GPU、每張有一個向量為例:
+
+| Primitive | 語意 | 結束時每張卡有什麼 |
+| --- | --- | --- |
+| **broadcast** | root 的資料發給所有卡 | root 的完整資料 |
+| **all-gather** | 每張卡貢獻一段, 拼成完整資料 | 所有卡的所有段 |
+| **reduce-scatter** | 對應元素相加, 每張卡拿走結果的一段 | 結果的 1/n |
+| **all-reduce** | 對應元素相加, 每張卡拿完整結果 | 完整的和 |
+| **all-to-all** | 每張卡給每張卡一段不同的資料 | 來自每張卡的各一段 |
+
+其中最重要的恆等式: **all-reduce = reduce-scatter + all-gather**。 先讓每張卡負責「算出結果的一段」(reduce-scatter), 再把各段裝配回完整結果 (all-gather)。 NCCL 的 ring all-reduce 內部就是這兩個 phase, ZeRO/FSDP 的 sharding 策略也是把這個恆等式拆開來用 — 理解它等於理解一半的分散式訓練。
+
+用下面的動畫親手走一遍資料流, 切換 primitive 與 GPU 數量, 注意每一步搬的資料量:
+
+<CollectiveAnimator />
+
+## Ring vs. Tree
+
+**Ring**: n 張卡排成環, 資料切成 n 個 chunks。 reduce-scatter 階段 n−1 步, 每步每張卡送出一個 chunk 給下家、收到一個 chunk 累加; all-gather 階段再 n−1 步把完成的 chunks 傳一圈。 關鍵性質: **每張卡每一步都在同時收和送**, 所有 link 滿載, 沒有一條線閒著 — 這讓 ring 是 **bandwidth-optimal**: 每張卡總共只搬 $2(n-1)/n \times S$ 的資料, 與卡數幾乎無關。
+
+**Tree**: 卡排成樹狀, reduce 沿樹往上、broadcast 沿樹往下。 步數是 $O(\log n)$ 而不是 ring 的 $O(n)$, 所以 **latency 低得多**; 代價是每一步只有部分 link 在工作, 頻寬利用率較差。
+
+兩者的適用區間由 message size 決定:
+
+- **小訊息** (KB 級): 時間被每一步的固定 latency 主宰, ring 的 2(n−1) 步很傷, tree 勝。
+- **大訊息** (百 MB 級): 時間被頻寬主宰, ring 的滿載 link 勝。
+
+NCCL/RCCL 會依 size、拓樸自動選演算法 (`NCCL_ALGO` 可以強制指定來做實驗)。 這也是為什麼 benchmark 一定要掃一整條 size 曲線, 單一點的數字沒有代表性。
+
+## algbw 與 busbw: 兩種頻寬, 別搞混
+
+Benchmark 輸出兩個數字 (沿用 nccl-tests 的慣例):
+
+$$
+\text{algbw} = \frac{S}{t} \qquad
+\text{busbw} = \text{algbw} \times \frac{2(n-1)}{n} \;\; (\text{all-reduce})
+$$
+
+- **algbw (algorithm bandwidth)**: 使用者視角 — 一個 $S$ bytes 的 buffer 花 $t$ 秒完成 all-reduce。 好懂, 但卡數越多數字看起來越差, 不能跨卡數比較。
+- **busbw (bus bandwidth)**: 硬體視角 — 每張卡實際在 link 上收送的流量。 推導: ring all-reduce 共 $2(n-1)$ 步, 每步每張卡送出 $S/n$, 所以每張卡總共送出 $\frac{2(n-1)}{n} S$; 除以時間 $t$ 就是 busbw = algbw × 2(n−1)/n。 **busbw 可以直接跟 NVLink/xGMI 的理論頻寬對照**, 也不隨卡數變化 — 這才是「我的通訊跑滿硬體了嗎」的正確指標。
+
+其他 primitive 的係數: all-gather 與 reduce-scatter 是 $(n-1)/n$, broadcast 是 1。
+
+## 拓樸與互連
+
+busbw 的「理論頻寬」由互連決定:
+
+| | NVIDIA | AMD |
+| --- | --- | --- |
+| GPU 間直連 | NVLink (每代 ~50–100 GB/s 每 link, 一張卡多條) | xGMI / Infinity Fabric links |
+| 全連接交換 | NVSwitch (DGX/HGX: 任兩卡全速) | Infinity Fabric mesh (MI300X: 8 卡全連接) |
+| 節點之間 | InfiniBand / RoCE (每 NIC 25–50 GB/s) | 同左 |
+
+**Intra-node** (NVLink/xGMI, 數百 GB/s) 與 **inter-node** (網卡, 數十 GB/s) 差了一個數量級, 所以 NCCL 的拓樸偵測會盡量讓 ring 在節點內多繞、跨節點的邊最少; 多機訓練的 parallelism 配置 (tensor parallel 放節點內、data parallel 跨節點) 也是同一個邏輯。 `nvidia-smi topo -m` / `rocm-smi --showtopo` 可以看你機器的實際拓樸。
+
+## 與 compute overlap
+
+通訊如果串行在 compute 後面, 多卡的收益會被吃掉一大塊。 標準做法 (第 28 章的 stream/event 機制直接適用):
+
+- collective 發在**專用的 communication stream** 上, 與 compute stream 並行。
+- 用 **event** 建立依賴: gradient bucket 算完 → record event → comm stream wait event → all-reduce 該 bucket。 backward 還在算後面的層時, 前面層的 gradient 已經在路上 — PyTorch DDP 的 gradient bucketing 就是這個模式。
+- 注意 SM 競爭: NCCL kernel 也占 SM, overlap 不是免費的; 這正是 profiler timeline (第 16 章) 要看的東西。
+
+## NCCL ↔ RCCL: 同一份 code, 兩個平台
+
+RCCL 提供 **NCCL 相容 API**: 函式名、型別、語意都是 `ncclXxx`, 所以 source code 層級幾乎不用改, 差別只在 header 與連結的 library:
+
+```cpp
+// ccl_portability.h (kernels/common/): the only per-platform difference
+#if defined(USE_HIP)
+#include <rccl/rccl.h>   // ROCm; link against librccl
+#elif defined(USE_CUDA)
+#include <nccl.h>        // CUDA; link against libnccl
+#endif
+```
+
+單機多卡、single process 的用法 (完整版在 lab):
+
+```cpp
+// One communicator per visible GPU in this process.
+std::vector<ncclComm_t> comms(num_gpus);
+CCL_CHECK(ncclCommInitAll(comms.data(), num_gpus, nullptr));
+
+// Group the per-device calls so they launch as one collective.
+CCL_CHECK(ncclGroupStart());
+for (int g = 0; g < num_gpus; ++g) {
+  CCL_CHECK(ncclAllReduce(send_bufs[g], recv_bufs[g], count, ncclFloat, ncclSum,
+                          comms[g], streams[g]));
+}
+CCL_CHECK(ncclGroupEnd());
+for (int g = 0; g < num_gpus; ++g) {
+  GPU_CHECK(gpuSetDevice(g));
+  GPU_CHECK(gpuStreamSynchronize(streams[g]));
+}
+```
+
+多機訓練用的是另一條初始化路徑 (`ncclGetUniqueId` + `ncclCommInitRank`, 由 torchrun/MPI 把 id 廣播出去), primitives 完全相同。 build 端: CUDA 連 `-lnccl`, ROCm 連 `-lrccl`; 本 repo 的 CMake 用 `find_library` 自動偵測, 找不到就跳過該 target。
+
+<LabBox path="kernels/07-multi-gpu-collectives">
+在多卡機器上編譯並執行 `allreduce_bench`: 它用 `ncclCommInitAll` 在單一 process 內對所有可見 GPU 做 float sum all-reduce, 從 1 MiB 掃到 256 MiB, 每個 size 先驗證每張卡的結果等於 n(n+1)/2, 再印出 time、algbw 與 busbw。 觀察兩件事: (1) busbw 隨 size 上升後趨於平坦 — 平坦區就是你互連的實效頻寬, 拿去跟 NVLink/xGMI 規格對照; (2) 小 size 的 busbw 很低 — 那是 latency 主宰區, 正是 tree 演算法的舞台。 可以用 `NCCL_ALGO=Ring` / `Tree` 各跑一次比較曲線。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'all-reduce 可以拆解成哪兩個 primitives?',
+      options: ['broadcast + gather', 'reduce-scatter + all-gather', 'all-to-all + reduce', 'scatter + broadcast'],
+      answer: 1,
+      explanation: '先 reduce-scatter 讓每張卡算出結果的 1/n, 再 all-gather 把各段裝配回完整結果。 NCCL 的 ring all-reduce 內部就是這兩個 phase。',
+    },
+    {
+      question: '為什麼 ring all-reduce 是 bandwidth-optimal?',
+      options: [
+        '因為它步數最少',
+        '因為每一步所有 GPU 同時收送, 所有 link 滿載, 每張卡總傳輸量 2(n-1)/n·S 幾乎不隨卡數增長',
+        '因為它不需要同步',
+        '因為它只用 NVLink',
+      ],
+      answer: 1,
+      explanation: 'ring 的代價是 2(n-1) 步的 latency; 換來的是沒有任何 link 閒置, 大訊息時逼近硬體頻寬。 小訊息則是 O(log n) 步的 tree 勝出。',
+    },
+    {
+      question: '8 卡 all-reduce, algbw 量到 42 GB/s, busbw 是多少?',
+      options: ['42 GB/s', '42 × 2×7/8 ≈ 73.5 GB/s', '42 × 8 = 336 GB/s', '42 / 8 ≈ 5.3 GB/s'],
+      answer: 1,
+      explanation: 'busbw = algbw × 2(n−1)/n = 42 × 14/8 ≈ 73.5 GB/s。 這個數字才能直接跟 NVLink/xGMI 的規格頻寬比較。',
+    },
+    {
+      question: '小訊息 (幾十 KB) 的 all-reduce, 哪個演算法通常較快? 為什麼?',
+      options: [
+        'ring, 因為頻寬利用率高',
+        'tree, 因為 O(log n) 步的固定 latency 遠小於 ring 的 2(n-1) 步',
+        '兩者一樣',
+        'all-to-all',
+      ],
+      answer: 1,
+      explanation: '小訊息的時間被每步固定 latency 主宰, 步數是決定性因素; 頻寬利用率在這個區間無關緊要。 NCCL 會依 size 自動選擇。',
+    },
+    {
+      question: '把 CUDA 上的 NCCL 程式移植到 ROCm, 需要改什麼?',
+      options: [
+        '把所有 ncclXxx 改成 rcclXxx',
+        '重寫成 MPI',
+        '幾乎不改 code: RCCL 提供 nccl 相容 API, 只需換 header (rccl.h) 與連結 librccl',
+        '無法移植',
+      ],
+      answer: 2,
+      explanation: 'RCCL 刻意保持 NCCL API 相容, 函式名與語意都相同; 差異只在 include 路徑與 link 的 library, 用一個小 portability header 就能吸收。',
+    },
+    {
+      question: 'DDP 訓練想讓 gradient all-reduce 與 backward 重疊, 正確的機制是?',
+      options: [
+        '在 compute stream 上直接呼叫 ncclAllReduce',
+        '每個 bucket 算完就 record event, communication stream wait 該 event 後發 all-reduce',
+        '把 backward 拆成兩個 process',
+        '用 cudaDeviceSynchronize 分隔',
+      ],
+      answer: 1,
+      explanation: '專用 comm stream + event 依賴讓「前面層的 gradient 在路上」與「後面層還在算」並行 (第 28 章); 全部串在 compute stream 上就沒有 overlap 可言。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "NCCL Developer Guide," 2024', href: 'https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html' },
+    { citation: 'NVIDIA Corporation, "nccl-tests: Performance Metrics," GitHub, 2024', href: 'https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md' },
+    { citation: 'Advanced Micro Devices, Inc., "RCCL Documentation," ROCm Documentation, 2024', href: 'https://rocm.docs.amd.com/projects/rccl/en/latest/' },
+    { citation: 'P. Patarasuk and X. Yuan, "Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations," J. Parallel Distrib. Comput., vol. 69, no. 2, 2009', href: 'https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf' },
+    { citation: 'NVIDIA Corporation, "Massively Scale Your Deep Learning Training with NCCL 2.4," NVIDIA Developer Blog, 2019', href: 'https://developer.nvidia.com/blog/massively-scale-deep-learning-training-nccl-2-4/' },
+  ]}
+/>

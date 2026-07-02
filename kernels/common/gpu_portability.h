@@ -48,6 +48,8 @@ inline GpuError gpuStreamSynchronize(GpuStream stream) { return hipStreamSynchro
 inline GpuError gpuGetMultiprocessorCount(int* count) {
   return hipDeviceGetAttribute(count, hipDeviceAttributeMultiprocessorCount, 0);
 }
+inline GpuError gpuSetDevice(int device) { return hipSetDevice(device); }
+inline GpuError gpuGetDeviceCount(int* count) { return hipGetDeviceCount(count); }
 
 inline GpuError gpuEventCreate(GpuEvent* event) { return hipEventCreate(event); }
 inline GpuError gpuEventDestroy(GpuEvent event) { return hipEventDestroy(event); }
@@ -97,6 +99,8 @@ inline GpuError gpuStreamSynchronize(GpuStream stream) { return cudaStreamSynchr
 inline GpuError gpuGetMultiprocessorCount(int* count) {
   return cudaDeviceGetAttribute(count, cudaDevAttrMultiProcessorCount, 0);
 }
+inline GpuError gpuSetDevice(int device) { return cudaSetDevice(device); }
+inline GpuError gpuGetDeviceCount(int* count) { return cudaGetDeviceCount(count); }
 
 inline GpuError gpuEventCreate(GpuEvent* event) { return cudaEventCreate(event); }
 inline GpuError gpuEventDestroy(GpuEvent event) { return cudaEventDestroy(event); }
