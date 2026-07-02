@@ -1,0 +1,5 @@
+gklab_add_kernel(sgemm_step0_naive sgemm_step0_naive.cpp)
+gklab_add_kernel(sgemm_step1_shared sgemm_step1_shared.cpp)
+gklab_add_kernel(sgemm_step2_register_tiling sgemm_step2_register_tiling.cpp)
+gklab_add_kernel(sgemm_step3_vectorized sgemm_step3_vectorized.cpp)
+gklab_add_kernel(sgemm_step4_double_buffer sgemm_step4_double_buffer.cpp)
