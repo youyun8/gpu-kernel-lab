@@ -338,7 +338,7 @@ export function getChapterNav(slug: string): {
   };
 }
 
-const repoBase = 'https://github.com/your-org/gpu-kernel-lab/tree/main/';
+const repoBase = 'https://github.com/youyun8/gpu-kernel-lab/tree/main/';
 
 export function labUrl(lab: string): string {
   return `${repoBase}${lab}`;
