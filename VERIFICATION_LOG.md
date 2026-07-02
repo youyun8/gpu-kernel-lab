@@ -62,6 +62,17 @@
 
 ## Final Audit summary
 
+## Exercises 新增(練習與解答)
+
+- 新增 Exercise / Solution 元件(Solution 用原生 `<details>`,預設收合、鍵盤可操作、無 JS 亦可運作),併入 `mdx-components.tsx`。
+- 新增路由:`/exercises` 索引與 `/exercises/[slug]` 動態頁(4 個 track),於 header 與首頁加入連結。
+- 內容:Track A(8)、Track B(9)、Track C(8)、Track D(7),共 32 題,混合 paper-and-pencil 與 programming。每題附完整解答。
+- programming 參考解 kernels:`kernels/exercises/ex_a_saxpy`、`ex_b_block_reduce`,已在 ROCm 實機 build + run,correctness check 全通過(saxpy 誤差 1.19e-7;兩種 reduction 收尾皆通過)。其餘 programming 題複用既有 03-gemm / 05-advanced-scheduling / 06-pytorch-integration 目錄。
+- 驗證:website tsc / lint / build(含 basePath)再次全通過,靜態輸出新增 `/exercises` 與 4 個 track 頁面(solution 以收合 `<details>` render);簡體字掃描 0 命中、placeholder 掃描 0 命中。
+- 修復記錄:`track-c.mdx` 內文的 `<1%` 被 MDX 當成 JSX 標籤 → 以 inline code 包成 `` `<1%` ``。
+
+### 原 Final Audit summary
+
 - 全站 tsc / lint / build 再次全通過(含 basePath build)。
 - PLAN.md 全項目已打勾且對應檔案存在(21 章 + 7 元件 + 21 lab 目錄/檔案)。
 - 全 repo 簡體字掃描 0 命中、placeholder 掃描 0 命中、內部 chapter 連結與 lab 路徑全部有效。

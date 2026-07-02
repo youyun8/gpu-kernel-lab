@@ -12,6 +12,7 @@ gpu-kernel-lab/
 │   ├── app/                 # App Router 頁面 (首頁、roadmap、chapters/[slug])
 │   ├── components/          # 互動元件 (7 個 widgets) 與版面
 │   ├── content/chapters/    # 21 章 MDX 內容 (Track A–D)
+│   ├── content/exercises/   # 4 組練習與完整解答 (Track A–D)
 │   └── content/data/        # benchmark 示意數據 JSON
 ├── kernels/                 # 可執行 kernel,對應網站章節
 │   ├── common/              # portability header + benchmark harness
@@ -20,6 +21,7 @@ gpu-kernel-lab/
 │   ├── 03-gemm/             # SGEMM step0–step4 + WMMA/MFMA 說明
 │   ├── 04-reductions-softmax/
 │   ├── 05-advanced-scheduling/  # Split-K、CTA swizzle、async pipeline
+│   ├── exercises/           # programming 練習參考解 (可編譯執行)
 │   └── 06-pytorch-integration/  # cpp_extension / load_inline / triton / custom_op
 ├── scripts/                 # bench_all.py、profile_ncu.sh、profile_rocprof.sh
 ├── docker/                  # CUDA 與 ROCm Dockerfile
@@ -79,6 +81,13 @@ cmake --build build -j
 `.github/workflows/deploy.yml` 會在 push 到 `main` 時 typecheck、lint、build(帶 `basePath=/gpu-kernel-lab`)並部署。若你的 repo 名稱不同,調整 `NEXT_PUBLIC_BASE_PATH` 與 `next.config.mjs` 的 basePath。
 
 ## 關於數據誠實
+
+## 練習與解答
+
+每個 track 都有一組練習,混合 paper-and-pencil(計算與推理)與 programming(改寫 / 實作 kernel)兩類,共 32 題,附完整解答:
+
+- 網站:`/exercises`(每題可展開「顯示解答」),內容在 `website/content/exercises/`。
+- programming 參考解:`kernels/exercises/`(可用 CMake 直接編譯執行),其餘題目複用既有 kernel 目錄。
 
 網站上的預設 benchmark 圖表標示為 **示意數據 (illustrative)**,不是任何真實硬體的量測結果。用 `scripts/bench_all.py` 在你自己的 GPU 上跑,把結果 JSON 合併進 `website/content/data/benchmarks.json` 即可換成真實數字。
 
