@@ -11,8 +11,8 @@ export interface QuizQuestion {
 
 export function Quiz({ questions }: { questions: QuizQuestion[] }) {
   return (
-    <section aria-label="章末測驗" className="my-8 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
-      <p className="mb-4 flex items-center gap-2 text-base font-semibold text-white">
+    <section aria-label="章末測驗" className="my-8 rounded-lg border border-border bg-card/40 p-5">
+      <p className="mb-4 flex items-center gap-2 text-base font-semibold text-foreground">
         <span aria-hidden>📝</span>
         <span>章末測驗</span>
       </p>
@@ -34,17 +34,17 @@ function QuizItem({ index, question }: { index: number; question: QuizQuestion }
   return (
     <li className="list-none">
       <fieldset>
-        <legend className="mb-2 font-medium text-slate-100">
+        <legend className="mb-2 font-medium text-foreground">
           {index + 1}. {question.question}
         </legend>
         <div className="space-y-2" role="radiogroup" aria-label={`第 ${index + 1} 題選項`}>
           {question.options.map((option, oi) => {
             const state =
               answered && oi === question.answer
-                ? 'border-brand bg-brand/10 text-white'
+                ? 'border-primary bg-primary/10 text-foreground'
                 : answered && oi === selected
-                  ? 'border-[#f85149] bg-[#f85149]/10 text-white'
-                  : 'border-surface-border hover:border-slate-500';
+                  ? 'border-[#f85149] bg-[#f85149]/10 text-foreground'
+                  : 'border-border hover:border-border';
             return (
               <label
                 key={oi}
@@ -66,7 +66,7 @@ function QuizItem({ index, question }: { index: number; question: QuizQuestion }
       {answered && (
         <p
           className={`mt-2 rounded-md px-3 py-2 text-sm ${
-            isCorrect ? 'bg-brand/10 text-brand' : 'bg-[#f85149]/10 text-[#ff7b72]'
+            isCorrect ? 'bg-primary/10 text-primary' : 'bg-[#f85149]/10 text-[#ff7b72]'
           }`}
           role="status"
         >

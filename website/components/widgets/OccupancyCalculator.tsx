@@ -128,16 +128,16 @@ export function OccupancyCalculator() {
   }, [arch, smem, blockSize]);
 
   return (
-    <div className="my-6 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
-      <p className="mb-4 text-base font-semibold text-white">Occupancy Calculator</p>
+    <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
+      <p className="mb-4 text-base font-semibold text-foreground">Occupancy Calculator</p>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="text-sm text-slate-300">
+        <label className="text-sm text-muted-foreground">
           GPU 架構
           <select
             value={archKey}
             onChange={(e) => setArchKey(e.target.value as keyof typeof kArchs)}
-            className="mt-1 w-full rounded-md border border-surface-border bg-surface px-2 py-1.5 text-white"
+            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-foreground"
           >
             {Object.entries(kArchs).map(([key, a]) => (
               <option key={key} value={key}>
@@ -146,33 +146,33 @@ export function OccupancyCalculator() {
             ))}
           </select>
         </label>
-        <label className="text-sm text-slate-300">
-          Block size (threads):<span className="ml-2 font-mono text-brand">{blockSize}</span>
+        <label className="text-sm text-muted-foreground">
+          Block size (threads):<span className="ml-2 font-mono text-primary">{blockSize}</span>
           <input type="range" min={32} max={1024} step={32} value={blockSize} onChange={(e) => setBlockSize(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="block size" />
         </label>
-        <label className="text-sm text-slate-300">
-          Registers / thread:<span className="ml-2 font-mono text-brand">{regs}</span>
+        <label className="text-sm text-muted-foreground">
+          Registers / thread:<span className="ml-2 font-mono text-primary">{regs}</span>
           <input type="range" min={16} max={128} step={1} value={regs} onChange={(e) => setRegs(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="registers per thread" />
         </label>
-        <label className="text-sm text-slate-300">
-          Shared memory / block (bytes):<span className="ml-2 font-mono text-brand">{smem}</span>
+        <label className="text-sm text-muted-foreground">
+          Shared memory / block (bytes):<span className="ml-2 font-mono text-primary">{smem}</span>
           <input type="range" min={0} max={49152} step={1024} value={smem} onChange={(e) => setSmem(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="shared memory per block" />
         </label>
       </div>
 
       <dl className="mt-5 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">Theoretical occupancy</dt>
-          <dd className="font-mono text-lg text-brand">{(result.occupancy * 100).toFixed(1)}%</dd>
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">Theoretical occupancy</dt>
+          <dd className="font-mono text-lg text-primary">{(result.occupancy * 100).toFixed(1)}%</dd>
         </div>
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">Active warps / SM</dt>
-          <dd className="font-mono text-lg text-white">
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">Active warps / SM</dt>
+          <dd className="font-mono text-lg text-foreground">
             {result.activeWarps} / {arch.maxWarpsPerSM}
           </dd>
         </div>
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">Limiter</dt>
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">Limiter</dt>
           <dd className="text-sm font-medium text-[#ffa657]">{result.limiter}</dd>
         </div>
       </dl>
@@ -189,7 +189,7 @@ export function OccupancyCalculator() {
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <p className="mt-1 text-xs text-slate-400">
+      <p className="mt-1 text-xs text-muted-foreground">
         曲線:固定目前的 shared memory 與 block size,occupancy 隨 registers/thread 變化。粉紅線是目前的設定。注意 occupancy 常呈階梯狀下降 — 這是 register allocation 以 warp 為單位量化造成的。
       </p>
     </div>

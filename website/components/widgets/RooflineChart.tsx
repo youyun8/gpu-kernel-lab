@@ -46,18 +46,18 @@ export function RooflineChart() {
   const userPoint = [{ x: userIntensity, y: achieved, name: '你的 kernel' }];
 
   return (
-    <div className="my-6 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
+    <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-base font-semibold text-white">Interactive Roofline</p>
-        <div role="group" aria-label="平台切換" className="inline-flex overflow-hidden rounded-md border border-surface-border text-sm">
+        <p className="text-base font-semibold text-foreground">Interactive Roofline</p>
+        <div role="group" aria-label="平台切換" className="inline-flex overflow-hidden rounded-md border border-border text-sm">
           {(['cuda', 'rocm'] as Platform[]).map((p) => (
-            <button key={p} onClick={() => setPlatform(p)} aria-pressed={platform === p} className={`px-3 py-1 transition ${platform === p ? 'bg-brand text-black' : 'text-slate-300 hover:text-white'}`}>
+            <button key={p} onClick={() => setPlatform(p)} aria-pressed={platform === p} className={`px-3 py-1 transition ${platform === p ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
               {p === 'cuda' ? 'CUDA' : 'ROCm'}
             </button>
           ))}
         </div>
       </div>
-      <p className="mb-4 text-xs text-slate-400">
+      <p className="mb-4 text-xs text-muted-foreground">
         peak {(cfg.peakGflops / 1000).toFixed(1)} TFLOP/s · BW {cfg.peakBandwidthGBs} GB/s · ridge point AI ≈ {ridgePoint.toFixed(1)} FLOP/byte · <span className="text-[#ffa657]">示意數據</span>
       </p>
 
@@ -78,21 +78,21 @@ export function RooflineChart() {
       </div>
 
       <div className="mt-4 grid gap-4 sm:grid-cols-3">
-        <label className="text-sm text-slate-300">
-          FLOPs:<span className="ml-1 font-mono text-brand">{flops.toExponential(1)}</span>
+        <label className="text-sm text-muted-foreground">
+          FLOPs:<span className="ml-1 font-mono text-primary">{flops.toExponential(1)}</span>
           <input type="range" min={7} max={12} step={0.1} value={Math.log10(flops)} onChange={(e) => setFlops(Math.round(Math.pow(10, Number(e.target.value))))} className="mt-1 w-full accent-brand" aria-label="FLOPs" />
         </label>
-        <label className="text-sm text-slate-300">
-          Bytes:<span className="ml-1 font-mono text-brand">{bytes.toExponential(1)}</span>
+        <label className="text-sm text-muted-foreground">
+          Bytes:<span className="ml-1 font-mono text-primary">{bytes.toExponential(1)}</span>
           <input type="range" min={6} max={11} step={0.1} value={Math.log10(bytes)} onChange={(e) => setBytes(Math.round(Math.pow(10, Number(e.target.value))))} className="mt-1 w-full accent-brand" aria-label="Bytes" />
         </label>
-        <label className="text-sm text-slate-300">
-          Achieved GFLOP/s:<span className="ml-1 font-mono text-brand">{achieved}</span>
+        <label className="text-sm text-muted-foreground">
+          Achieved GFLOP/s:<span className="ml-1 font-mono text-primary">{achieved}</span>
           <input type="range" min={10} max={cfg.peakGflops} step={10} value={Math.min(achieved, cfg.peakGflops)} onChange={(e) => setAchieved(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="achieved GFLOP/s" />
         </label>
       </div>
-      <p className="mt-3 text-xs text-slate-400">
-        你的 kernel arithmetic intensity = FLOPs / bytes = <span className="font-mono text-brand">{userIntensity.toFixed(2)}</span> FLOP/byte。若這個點落在斜線 (bandwidth roof) 上,代表 bandwidth-bound;落在水平線 (compute roof) 上則是 compute-bound。點與屋頂的垂直距離就是還能榨出的效能空間。
+      <p className="mt-3 text-xs text-muted-foreground">
+        你的 kernel arithmetic intensity = FLOPs / bytes = <span className="font-mono text-primary">{userIntensity.toFixed(2)}</span> FLOP/byte。若這個點落在斜線 (bandwidth roof) 上,代表 bandwidth-bound;落在水平線 (compute roof) 上則是 compute-bound。點與屋頂的垂直距離就是還能榨出的效能空間。
       </p>
     </div>
   );

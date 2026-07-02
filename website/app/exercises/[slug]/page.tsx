@@ -32,19 +32,19 @@ export default function ExerciseSetPage({ params }: { params: { slug: string } }
         <MDX />
       </article>
 
-      <nav aria-label="練習導覽" className="mt-12 grid gap-3 border-t border-surface-border pt-6 sm:grid-cols-2">
+      <nav aria-label="練習導覽" className="mt-12 grid gap-3 border-t border-border pt-6 sm:grid-cols-2">
         {prev ? (
-          <Link href={`/exercises/${prev.slug}`} className="rounded-lg border border-surface-border p-4 transition hover:border-brand">
-            <span className="text-xs text-slate-500">← 上一組</span>
-            <span className="mt-1 block text-sm font-medium text-slate-100">{prev.trackLabel}</span>
+          <Link href={`/exercises/${prev.slug}`} className="rounded-lg border border-border p-4 transition hover:border-primary">
+            <span className="text-xs text-muted-foreground">← 上一組</span>
+            <span className="mt-1 block text-sm font-medium text-foreground">{prev.trackLabel}</span>
           </Link>
         ) : (
           <span />
         )}
         {next ? (
-          <Link href={`/exercises/${next.slug}`} className="rounded-lg border border-surface-border p-4 text-right transition hover:border-brand">
-            <span className="text-xs text-slate-500">下一組 →</span>
-            <span className="mt-1 block text-sm font-medium text-slate-100">{next.trackLabel}</span>
+          <Link href={`/exercises/${next.slug}`} className="rounded-lg border border-border p-4 text-right transition hover:border-primary">
+            <span className="text-xs text-muted-foreground">下一組 →</span>
+            <span className="mt-1 block text-sm font-medium text-foreground">{next.trackLabel}</span>
           </Link>
         ) : (
           <span />

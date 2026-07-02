@@ -25,8 +25,8 @@ export function PlatformTabs({ children }: { children: ReactNode }) {
   const current = panels[Math.min(active, panels.length - 1)];
 
   return (
-    <div className="my-6 overflow-hidden rounded-lg border border-surface-border">
-      <div role="tablist" aria-label="平台程式碼切換" className="flex border-b border-surface-border bg-surface-raised">
+    <div className="my-6 overflow-hidden rounded-lg border border-border">
+      <div role="tablist" aria-label="平台程式碼切換" className="flex border-b border-border bg-card">
         {panels.map((panel, i) => (
           <button
             key={panel.name}
@@ -34,7 +34,7 @@ export function PlatformTabs({ children }: { children: ReactNode }) {
             aria-selected={active === i}
             id={`tab-${panel.name}`}
             className={`px-4 py-2 text-sm font-medium transition ${
-              active === i ? 'bg-surface text-brand' : 'text-slate-400 hover:text-white'
+              active === i ? 'bg-background text-primary' : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={() => setActive(i)}
           >
@@ -45,7 +45,7 @@ export function PlatformTabs({ children }: { children: ReactNode }) {
       <div
         role="tabpanel"
         aria-labelledby={`tab-${current.name}`}
-        className="bg-surface px-4 [&_pre]:my-0 [&_pre]:rounded-none [&_pre]:border-0"
+        className="bg-background px-4 [&_pre]:my-0 [&_pre]:rounded-none [&_pre]:border-0"
       >
         {current.content}
       </div>

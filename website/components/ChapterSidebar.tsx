@@ -6,7 +6,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
     <nav aria-label="章節目錄" className="space-y-5 text-sm">
       {tracks.map((track) => (
         <div key={track.id}>
-          <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             <span aria-hidden className="h-2 w-2 rounded-full" style={{ backgroundColor: track.color }} />
             {track.label}
           </p>
@@ -19,7 +19,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
                     href={`/chapters/${chapter.slug}`}
                     aria-current={active ? 'page' : undefined}
                     className={`block rounded px-2 py-1.5 transition ${
-                      active ? 'bg-brand/15 font-medium text-brand' : 'text-slate-400 hover:bg-surface-raised hover:text-white'
+                      active ? 'bg-primary/15 font-medium text-primary' : 'text-muted-foreground hover:bg-card hover:text-foreground'
                     }`}
                   >
                     <span className="font-mono text-xs opacity-60">{String(chapter.num).padStart(2, '0')}</span> {chapter.title}

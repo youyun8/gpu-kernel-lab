@@ -32,23 +32,23 @@ export function Exercise({
     <section
       id={id}
       aria-label={`練習 ${id}`}
-      className="my-6 rounded-lg border border-surface-border bg-surface-raised/40 p-5 scroll-mt-24"
+      className="my-6 rounded-lg border border-border bg-card/40 p-5 scroll-mt-24"
     >
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="font-mono text-sm text-slate-500">{id}</span>
-        <h3 className="text-base font-semibold text-white">{title}</h3>
+        <span className="font-mono text-sm text-muted-foreground">{id}</span>
+        <h3 className="text-base font-semibold text-foreground">{title}</h3>
         <span
           className="rounded-full border px-2 py-0.5 text-xs"
           style={{ borderColor: levelColor[level], color: levelColor[level] }}
         >
           {level}
         </span>
-        <span className="inline-flex items-center gap-1 rounded-full border border-surface-border px-2 py-0.5 text-xs text-slate-400">
+        <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
           <span aria-hidden>{meta.icon}</span>
           {meta.label}
         </span>
       </div>
-      <div className="text-sm text-slate-300 [&>p]:my-2">{children}</div>
+      <div className="text-sm text-muted-foreground [&>p]:my-2">{children}</div>
     </section>
   );
 }

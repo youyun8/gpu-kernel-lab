@@ -4,38 +4,117 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens follow cp-handbook's HSL CSS-variable architecture, keeping the
+   GPU Kernel Lab green as the primary/brand colour. Light is the default; the
+   `.dark` class (driven by next-themes) preserves the GitHub-dark surfaces the
+   site shipped with. */
 :root {
-  color-scheme: dark;
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+  --muted: 214 32% 93%;
+  --muted-foreground: 215 16% 42%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --border: 214 30% 89%;
+  --primary: 137 55% 36%;
+  --primary-foreground: 0 0% 100%;
+  --accent: 138 40% 94%;
+  --accent-foreground: 222 47% 11%;
+  --ring: 137 55% 36%;
+}
+
+.dark {
+  --background: 216 28% 7%;
+  --foreground: 210 20% 90%;
+  --muted: 215 22% 14%;
+  --muted-foreground: 215 14% 62%;
+  --card: 215 22% 11%;
+  --card-foreground: 210 20% 92%;
+  --border: 213 12% 22%;
+  --primary: 132 64% 53%;
+  --primary-foreground: 216 28% 7%;
+  --accent: 132 26% 18%;
+  --accent-foreground: 210 20% 92%;
+  --ring: 132 64% 53%;
+}
+
+* {
+  border-color: hsl(var(--border));
 }
 
 html {
   scroll-behavior: smooth;
 }
 
+html[data-text-size='small'] {
+  font-size: 93.75%;
+}
+
+html[data-text-size='large'] {
+  font-size: 112.5%;
+}
+
 body {
-  @apply bg-surface text-slate-200 antialiased;
+  @apply antialiased;
+  min-height: 100vh;
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(60rem 32rem at 110% -8%, rgba(57, 211, 83, 0.08), transparent 70%),
+    radial-gradient(52rem 30rem at -10% 0%, rgba(46, 160, 67, 0.1), transparent 70%);
+  background-attachment: fixed;
+  color: hsl(var(--foreground));
   font-feature-settings: 'liga' 1, 'calt' 1;
+  text-rendering: optimizeLegibility;
+}
+
+.dark body {
+  background-image:
+    radial-gradient(60rem 32rem at 110% -8%, rgba(57, 211, 83, 0.06), transparent 70%),
+    radial-gradient(52rem 30rem at -10% 0%, rgba(46, 160, 67, 0.1), transparent 70%);
+}
+
+::selection {
+  background: rgba(57, 211, 83, 0.3);
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--border));
+  border-radius: 9999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Prose styling for MDX chapters. Kept explicit so we do not depend on the
    Tailwind typography plugin (avoids an extra dependency for static export). */
 .prose-doc {
-  @apply max-w-none leading-8 text-[15px] text-slate-200;
+  @apply max-w-none leading-8 text-[15px] text-foreground;
 }
 .prose-doc h1 {
-  @apply mt-2 mb-6 text-3xl font-bold text-white;
+  @apply mt-2 mb-6 text-3xl font-bold text-foreground;
 }
 .prose-doc h2 {
-  @apply mt-12 mb-4 border-b border-surface-border pb-2 text-2xl font-semibold text-white scroll-mt-24;
+  @apply mt-12 mb-4 border-b border-border pb-2 text-2xl font-semibold text-foreground scroll-mt-24;
 }
 .prose-doc h3 {
-  @apply mt-8 mb-3 text-xl font-semibold text-slate-100 scroll-mt-24;
+  @apply mt-8 mb-3 text-xl font-semibold text-foreground scroll-mt-24;
 }
 .prose-doc p {
   @apply my-4;
 }
 .prose-doc a {
-  @apply text-accent underline-offset-4 hover:underline;
+  @apply text-primary underline-offset-4 hover:underline;
 }
 .prose-doc ul {
   @apply my-4 list-disc space-y-1 pl-6;
@@ -44,13 +123,13 @@ body {
   @apply my-4 list-decimal space-y-1 pl-6;
 }
 .prose-doc blockquote {
-  @apply my-6 border-l-4 border-brand-muted bg-surface-raised/60 px-4 py-2 text-slate-300;
+  @apply my-6 border-l-4 border-primary bg-card/60 px-4 py-2 text-muted-foreground;
 }
 .prose-doc code:not(pre code) {
-  @apply rounded bg-surface-raised px-1.5 py-0.5 font-mono text-[13px] text-brand;
+  @apply rounded bg-muted px-1.5 py-0.5 font-mono text-[13px] text-primary;
 }
 .prose-doc pre {
-  @apply my-5 overflow-x-auto rounded-lg border border-surface-border p-4 text-[13px] leading-6;
+  @apply my-5 overflow-x-auto rounded-lg border border-border p-4 text-[13px] leading-6;
 }
 .prose-doc pre code {
   @apply font-mono;
@@ -60,17 +139,17 @@ body {
 }
 .prose-doc th,
 .prose-doc td {
-  @apply border border-surface-border px-3 py-2 text-left align-top;
+  @apply border border-border px-3 py-2 text-left align-top;
 }
 .prose-doc th {
-  @apply bg-surface-raised font-semibold text-white;
+  @apply bg-card font-semibold text-foreground;
 }
 .prose-doc strong {
-  @apply font-semibold text-white;
+  @apply font-semibold text-foreground;
 }
 
 /* Focus visibility for keyboard users across interactive widgets. */
 :focus-visible {
-  outline: 2px solid #58a6ff;
+  outline: 2px solid hsl(var(--ring));
   outline-offset: 2px;
 }

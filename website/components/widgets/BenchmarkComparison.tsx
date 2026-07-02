@@ -12,12 +12,12 @@ export function BenchmarkComparison() {
   const chartData = dataset.steps.map((s) => ({ ...s, shortName: s.name.replace(/^Step \d+: /, '') }));
 
   return (
-    <div className="my-6 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
+    <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-base font-semibold text-white">GEMM 優化每一步 (% of {dataset.reference})</p>
+        <p className="text-base font-semibold text-foreground">GEMM 優化每一步 (% of {dataset.reference})</p>
         <PlatformToggle platform={platform} onChange={setPlatform} />
       </div>
-      <p className="mb-4 text-xs text-slate-400">
+      <p className="mb-4 text-xs text-muted-foreground">
         {dataset.device} · peak ≈ {dataset.peakTflops} TFLOP/s · <span className="text-[#ffa657]">示意數據 (illustrative)</span>
       </p>
       <div className="h-80" aria-hidden>
@@ -38,15 +38,15 @@ export function BenchmarkComparison() {
       </div>
       <table className="mt-4 w-full text-left text-xs">
         <thead>
-          <tr className="text-slate-400">
+          <tr className="text-muted-foreground">
             <th className="py-1">Step</th>
             <th className="py-1">GFLOP/s</th>
             <th className="py-1">% of {dataset.reference}</th>
           </tr>
         </thead>
-        <tbody className="font-mono text-slate-200">
+        <tbody className="font-mono text-foreground">
           {dataset.steps.map((s) => (
-            <tr key={s.name} className="border-t border-surface-border">
+            <tr key={s.name} className="border-t border-border">
               <td className="py-1 pr-2 font-sans">{s.name}</td>
               <td className="py-1">{s.gflops}</td>
               <td className="py-1">{s.pctOfRef}%</td>
@@ -60,13 +60,13 @@ export function BenchmarkComparison() {
 
 function PlatformToggle({ platform, onChange }: { platform: Platform; onChange: (p: Platform) => void }) {
   return (
-    <div role="group" aria-label="平台切換" className="inline-flex overflow-hidden rounded-md border border-surface-border text-sm">
+    <div role="group" aria-label="平台切換" className="inline-flex overflow-hidden rounded-md border border-border text-sm">
       {(['cuda', 'rocm'] as Platform[]).map((p) => (
         <button
           key={p}
           onClick={() => onChange(p)}
           aria-pressed={platform === p}
-          className={`px-3 py-1 transition ${platform === p ? 'bg-brand text-black' : 'text-slate-300 hover:text-white'}`}
+          className={`px-3 py-1 transition ${platform === p ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
         >
           {p === 'cuda' ? 'CUDA' : 'ROCm'}
         </button>

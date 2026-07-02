@@ -54,25 +54,25 @@ export function TilingAnimator() {
   }
 
   return (
-    <div className="my-6 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
-      <p className="mb-4 text-base font-semibold text-white">Tiling Animator</p>
+    <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
+      <p className="mb-4 text-base font-semibold text-foreground">Tiling Animator</p>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="text-sm text-slate-300">
-          Tile size:<span className="ml-2 font-mono text-brand">{tileSize}×{tileSize}</span>
+        <label className="text-sm text-muted-foreground">
+          Tile size:<span className="ml-2 font-mono text-primary">{tileSize}×{tileSize}</span>
           <input type="range" min={1} max={4} step={1} value={tileSize} onChange={(e) => setTileSize(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="tile size" />
         </label>
         <div className="flex items-end gap-2">
-          <button onClick={() => setPlaying((p) => !p)} className="rounded-md border border-surface-border px-3 py-1.5 text-sm text-white hover:border-brand">
+          <button onClick={() => setPlaying((p) => !p)} className="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:border-primary">
             {playing ? '暫停' : '播放'}
           </button>
-          <button onClick={() => setStep((s) => (s + 1) % totalSteps)} className="rounded-md border border-surface-border px-3 py-1.5 text-sm text-white hover:border-brand">
+          <button onClick={() => setStep((s) => (s + 1) % totalSteps)} className="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:border-primary">
             下一步
           </button>
         </div>
       </div>
 
-      <p className="mt-4 text-sm text-slate-200">{phaseLabels[phase]}<span className="ml-2 text-slate-400">(k-tile {kTile + 1} / {numTiles})</span></p>
+      <p className="mt-4 text-sm text-foreground">{phaseLabels[phase]}<span className="ml-2 text-muted-foreground">(k-tile {kTile + 1} / {numTiles})</span></p>
 
       <div className="mt-3 grid gap-1" style={{ gridTemplateColumns: `repeat(${kMatrixDim}, minmax(0, 1fr))` }} role="img" aria-label={`GEMM tiling 動畫,目前階段:${phaseLabels[phase]}`}>
         {cells.map((_, i) => {
@@ -83,20 +83,20 @@ export function TilingAnimator() {
       </div>
 
       <dl className="mt-5 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">K-tiles</dt>
-          <dd className="font-mono text-lg text-white">{numTiles}</dd>
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">K-tiles</dt>
+          <dd className="font-mono text-lg text-foreground">{numTiles}</dd>
         </div>
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">Reuse / element</dt>
-          <dd className="font-mono text-lg text-brand">{reuse}×</dd>
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">Reuse / element</dt>
+          <dd className="font-mono text-lg text-primary">{reuse}×</dd>
         </div>
-        <div className="rounded-md bg-surface p-3">
-          <dt className="text-xs text-slate-400">Global loads 減少</dt>
-          <dd className="font-mono text-lg text-white">≈ {(1 - 1 / reuse) * 100 || 0}%</dd>
+        <div className="rounded-md bg-background p-3">
+          <dt className="text-xs text-muted-foreground">Global loads 減少</dt>
+          <dd className="font-mono text-lg text-foreground">≈ {(1 - 1 / reuse) * 100 || 0}%</dd>
         </div>
       </dl>
-      <p className="mt-3 text-xs text-slate-400">
+      <p className="mt-3 text-xs text-muted-foreground">
         tile 越大,每筆從 global memory 載入 shared memory 的資料被 register 重複使用的次數越多,arithmetic intensity 越高。代價是更多 shared memory 與 register 壓力,可能壓低 occupancy。
       </p>
     </div>

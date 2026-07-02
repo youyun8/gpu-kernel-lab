@@ -36,19 +36,19 @@ export default function ChapterPage({ params }: { params: { slug: string } }) {
           <MDX />
         </article>
 
-        <nav aria-label="章節導覽" className="mt-12 grid gap-3 border-t border-surface-border pt-6 sm:grid-cols-2">
+        <nav aria-label="章節導覽" className="mt-12 grid gap-3 border-t border-border pt-6 sm:grid-cols-2">
           {prev ? (
-            <Link href={`/chapters/${prev.slug}`} className="rounded-lg border border-surface-border p-4 transition hover:border-brand">
-              <span className="text-xs text-slate-500">← 上一章</span>
-              <span className="mt-1 block text-sm font-medium text-slate-100">{prev.title}</span>
+            <Link href={`/chapters/${prev.slug}`} className="rounded-lg border border-border p-4 transition hover:border-primary">
+              <span className="text-xs text-muted-foreground">← 上一章</span>
+              <span className="mt-1 block text-sm font-medium text-foreground">{prev.title}</span>
             </Link>
           ) : (
             <span />
           )}
           {next ? (
-            <Link href={`/chapters/${next.slug}`} className="rounded-lg border border-surface-border p-4 text-right transition hover:border-brand">
-              <span className="text-xs text-slate-500">下一章 →</span>
-              <span className="mt-1 block text-sm font-medium text-slate-100">{next.title}</span>
+            <Link href={`/chapters/${next.slug}`} className="rounded-lg border border-border p-4 text-right transition hover:border-primary">
+              <span className="text-xs text-muted-foreground">下一章 →</span>
+              <span className="mt-1 block text-sm font-medium text-foreground">{next.title}</span>
             </Link>
           ) : (
             <span />
