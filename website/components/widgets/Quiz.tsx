@@ -1,6 +1,7 @@
 'use client';
 
 import { useId, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 
 export interface QuizQuestion {
   question: string;
@@ -11,10 +12,14 @@ export interface QuizQuestion {
 
 export function Quiz({ questions }: { questions: QuizQuestion[] }) {
   return (
-    <details aria-label="章末測驗" className="my-8 rounded-lg border border-border bg-card/40 p-5">
-      <summary className="flex cursor-pointer items-center gap-2 text-base font-semibold text-foreground marker:text-muted-foreground">
+    <details aria-label="章末測驗" className="group my-8 rounded-lg border border-border bg-card/40 p-5">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded text-base font-semibold text-foreground marker:content-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
         <span aria-hidden>📝</span>
         <span>章末測驗</span>
+        <ChevronDown
+          aria-hidden
+          className="ml-auto h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+        />
       </summary>
       <ol className="mt-4 space-y-6">
         {questions.map((q, i) => (
