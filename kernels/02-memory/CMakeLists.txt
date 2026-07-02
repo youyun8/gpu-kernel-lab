@@ -4,3 +4,5 @@ gklab_add_kernel(roofline_probe roofline_probe.cpp)
 gklab_add_kernel(transpose transpose.cpp)
 gklab_add_kernel(vectorized_copy vectorized_copy.cpp)
 gklab_add_kernel(saxpy_unroll saxpy_unroll.cpp)
+
+add_subdirectory(access-patterns)

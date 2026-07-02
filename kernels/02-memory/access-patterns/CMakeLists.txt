@@ -1,0 +1,6 @@
+gklab_add_kernel(aosoa_layout aosoa_layout.cpp)
+gklab_add_kernel(vectorized_tail vectorized_tail.cpp)
+gklab_add_kernel(cooperative_tile_load cooperative_tile_load.cpp)
+gklab_add_kernel(gather_scatter gather_scatter.cpp)
+gklab_add_kernel(row_padding row_padding.cpp)
+gklab_add_kernel(embedding_lookup embedding_lookup.cpp)

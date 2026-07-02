@@ -68,6 +68,10 @@ SoA 讓「同一個欄位跨 element」變成連續存取, 這正是 warp 想要
 
 折衷方案也存在: 如果 kernel 總是同時用到 `x, y, z`, 那 AoS 反而只要一次寬存取; 或用 AoSoA (把 SoA 以 warp 大小分塊交錯) 兼顧兩種模式。 原則是: **依照「warp 在同一個 cycle 想要什麼」來排資料**, 而不是依照物件導向的直覺。
 
+下面的互動元件把三種佈局下 warp 0 實際觸碰的位址畫出來, 切換 layout 與 field, 觀察 transaction 數量怎麼變:
+
+<DataLayoutVisualizer />
+
 ## Misaligned access 的代價
 
 就算 stride = 1, 如果起始位址沒對齊 segment 邊界, 一個 warp 的存取會跨兩個 segment, 需要 2 次 transaction 而不是 1 次。 對 memory-bound kernel 來說, 這等於憑空多付近一倍的 bandwidth。 實務上: 讓 allocation 對齊、避免對 buffer 做奇數 byte 的 offset、必要時用 padding 把每 row 對齊。
@@ -90,18 +94,151 @@ L1/L2 會緩解部分懲罰 — 第一個 warp 搬進來的 segment, 相鄰 warp
 
 ## Advanced Access Patterns
 
-幾個常見場景的處理方式:
+以下六個場景涵蓋了實務上絕大多數「access pattern 不理想」的處理方式。 每一個都有對應的可編譯 benchmark 在 `kernels/02-memory/access-patterns/`。
 
-- **AoSoA**: 將資料切成 warp/wavefront 大小的小 SoA chunk, chunk 之間仍保留 object grouping。 粒子模擬和 graph feature 常用這個折衷。
-- **Vectorized loads**: 連續、對齊且每 thread 有多元素工作時, 用 `float4` / `int4` 降低指令數。 尾端用 scalar cleanup。
-- **Cooperative loading**: 一個 block 協力把不規則 global 資料整理成 shared memory 中的規則 tile, 之後的 compute 階段就能 coalesced 或 conflict-free。
-- **Gather vs. scatter**: 如果只能讓讀或寫 coalesced, 優先讓資料量較大、重用較低的一側 coalesced。 scatter 寫入若還有 atomic, 通常要先做 warp/block aggregation。
-- **Row padding**: 2D tensor 的 leading dimension 補到 128 bytes 或 cache line 的倍數, 避免每 row 開頭逐漸漂移造成 misalignment。
+### AoSoA: 分塊交錯的折衷
 
-簡單例子: embedding lookup 是 gather, index 通常不連續。 若同一 batch 內 index 可排序或按 page 分桶, L2 hit rate 會提高; 若輸出端是按原順序, 再用 inverse permutation 還原。 這是用一點額外 bookkeeping 換 coalescing/locality。
+把資料切成 warp/wavefront 大小的小 SoA chunk, chunk 之間仍保留 object grouping。 粒子模擬和 graph feature 常用這個折衷 — 讀單一欄位時 warp 內連續 (像 SoA), 同一物件的所有欄位又在同一個 chunk 附近 (像 AoS)。
+
+```cpp
+// AoSoA: each chunk stores 32 x's, then 32 y's, then 32 z's.
+struct ParticleChunk {
+  float x[32];
+  float y[32];
+  float z[32];
+};
+
+// Lane i of a warp reads x[i] within one chunk -> one contiguous
+// 128-byte segment, coalesced exactly like SoA.
+__global__ void scaleXAosoa(ParticleChunk* chunks, float k, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) chunks[i / 32].x[i % 32] *= k;
+}
+```
+
+`aosoa_layout` benchmark 用同一個「scale x」操作跑 AoS/SoA/AoSoA 三種佈局: SoA 與 AoSoA 頻寬相近, AoS 因為 stride-3 大約掉三倍。
+
+### Vectorized loads 與 tail cleanup
+
+連續、對齊且每 thread 有多元素工作時, 用 `float4` / `int4` 把每條指令搬的資料從 4 bytes 提高到 16 bytes, 降低指令數與 index 運算。 長度不是 4 的倍數時, 主體用 float4、尾端 (n % 4 個元素) 用 scalar cleanup kernel 收尾:
+
+```cpp
+// Main body: each thread handles one float4 (16 bytes).
+__global__ void saxpyVec4Body(const float4* x, float4* y, float a, int n4) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n4) {
+    float4 xv = x[i], yv = y[i];
+    yv.x = a * xv.x + yv.x;  yv.y = a * xv.y + yv.y;
+    yv.z = a * xv.z + yv.z;  yv.w = a * xv.w + yv.w;
+    y[i] = yv;
+  }
+}
+
+// Tail cleanup: the last n % 4 elements, one tiny scalar launch.
+__global__ void saxpyTail(const float* x, float* y, float a, int tail_start, int n) {
+  int i = tail_start + threadIdx.x;
+  if (i < n) y[i] = a * x[i] + y[i];
+}
+```
+
+注意前提: `reinterpret_cast<float4*>` 要求 16-byte 對齊, device allocation 本身沒問題, 但對指標做過奇數 offset 就會 crash。 `vectorized_tail` 用 n = 2²⁴ + 3 驗證主體 + 尾端的正確性。
+
+### Cooperative loading: block 協力搬 tile
+
+一個 block 協力把 global 資料整理成 shared memory 中的規則 tile, 之後的 compute 階段就能 coalesced 或 conflict-free。 關鍵是 load phase 與 compute phase 之間的 `__syncthreads()` — 沒有它, 有些 thread 會讀到還沒被寫入的 tile 元素:
+
+```cpp
+__global__ void boxFilterShared(const float* in, float* out, int n) {
+  __shared__ float tile[kBlockSize + 2 * kRadius];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // Phase 1: everyone loads its own element (coalesced).
+  tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;
+  // Phase 2: first kRadius threads fetch the left/right halos.
+  if (threadIdx.x < kRadius) { /* load halo elements */ }
+
+  __syncthreads();  // no one reads tile[] before everyone wrote it
+
+  float sum = 0.0f;
+  for (int r = -kRadius; r <= kRadius; ++r)
+    sum += tile[kRadius + threadIdx.x + r];
+  out[i] = sum / (2 * kRadius + 1);
+}
+```
+
+`cooperative_tile_load` 拿它對比「每個 thread 自己發 17 個 global load」的 naive 版: 邏輯結果相同, 但 load 指令數差 17 倍。
+
+### Gather vs. scatter
+
+如果只能讓讀或寫其中一側 coalesced, 優先讓資料量較大、重用較低的一側 coalesced。 gather (`out[i] = in[idx[i]]`) 天生寫入連續; scatter (`out[idx[i]] = in[i]`) 寫入分散, 若目標還會碰撞就必須用 atomic, 而 atomic 對同一位址會序列化。 下面的互動元件比較兩者, 並展示 aggregation 怎麼減少 atomic 數量:
+
+<GatherScatterVisualizer />
+
+Scatter + atomic 的標準解法是先在 block 內聚合, 再一次寫出:
+
+```cpp
+// Block-aggregated scatter: shared-memory histogram absorbs
+// collisions cheaply, then one flush issues kNumBins global
+// atomics per block instead of kBlockSize.
+__global__ void scatterAtomicAggregated(const int* idx, unsigned int* bins, int n) {
+  __shared__ unsigned int local_bins[kNumBins];
+  for (int b = threadIdx.x; b < kNumBins; b += blockDim.x) local_bins[b] = 0u;
+  __syncthreads();
+
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) atomicAdd(&local_bins[idx[i]], 1u);
+  __syncthreads();
+
+  for (int b = threadIdx.x; b < kNumBins; b += blockDim.x)
+    if (local_bins[b] != 0u) atomicAdd(&bins[b], local_bins[b]);
+}
+```
+
+`gather_scatter` 對 4M 筆資料實測 gather、naive scatter、block-aggregated scatter 三種路徑的差距。 atomic contention 的更多變化 (warp aggregation、privatization) 見第 26 章。
+
+### Row padding: 對齊每一 row 的開頭
+
+2D tensor 的 leading dimension 補到 128 bytes 的倍數, 避免每 row 開頭逐漸漂移造成 misalignment。 例如 1000 個 float 的 row 是 4000 bytes — 每往下一 row, 開頭就在 128-byte segment 內漂移 32 bytes, 大部分 row 的第一個 warp 都要多一次 transaction:
+
+```cpp
+// ld = 1000: row r starts at byte 4000*r, misaligned for most r.
+// ld = 1024: row r starts at byte 4096*r, always 128-byte aligned,
+//            at the cost of 2.4% wasted memory.
+__global__ void scaleRows(float* data, int ld, int rows, int cols, float k) {
+  float* row = data + static_cast<size_t>(blockIdx.x) * ld;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) row[c] *= k;
+}
+```
+
+這正是 `cudaMallocPitch` / `hipMallocPitch` 幫你做的事; BLAS 介面裡無所不在的 `lda` / `ldb` 參數存在的理由之一也是它。 `row_padding` 實測 ld = 1000 vs 1024 的頻寬差。
+
+### Embedding lookup: 用排序換 locality
+
+Embedding lookup 是典型的大規模 gather, index 通常不連續。 若同一 batch 內 index 可排序或按 page 分桶, 重複與相鄰的 row 會被連續處理, L2 hit rate 大幅提高; 輸出若要按原順序, 再用 inverse permutation 還原。 這是用一點額外 bookkeeping 換 coalescing/locality:
+
+```cpp
+// One warp per lookup: lane L copies elements L, L+32 of the row.
+// out_pos maps the (possibly sorted) processing order back to the
+// original batch order - the inverse permutation.
+__global__ void embeddingGather(const float* table, const int* idx,
+                                const int* out_pos, float* out, int batch) {
+  int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int lane = threadIdx.x % 32;
+  if (warp >= batch) return;
+  const float* src = table + static_cast<size_t>(idx[warp]) * kDim;
+  float* dst = out + static_cast<size_t>(out_pos[warp]) * kDim;
+  for (int d = lane; d < kDim; d += 32) dst[d] = src[d];
+}
+```
+
+`embedding_lookup` 用「90% 的 index 集中在 4096 個 hot rows」的偏斜分佈模擬真實 batch, 比較隨機順序與排序 + inverse permutation 兩種跑法, 並驗證輸出完全一致。 注意 trade-off: 排序讓讀取側獲得 locality, 但寫入側從連續變成 permuted — 值得與否取決於 table 有多大、分佈有多偏斜, 要實測。
 
 <LabBox path="kernels/02-memory">
 編譯 `stride_bandwidth` 這個 benchmark, 它會對同一份 buffer 用 stride = 1, 2, 4, 8, 16, 32 各測一次 achieved bandwidth, 印出 GB/s 與 % of peak。 你應該會看到一條隨 stride 遞減的曲線, 和上面的 visualizer 對得起來。 接著把 profiler 打開, 對照 `l1tex__t_sectors` 或 rocprof 的 memory efficiency counter。
+</LabBox>
+
+<LabBox path="kernels/02-memory/access-patterns">
+進階存取型態的六個 benchmark: `aosoa_layout`、`vectorized_tail`、`cooperative_tile_load`、`gather_scatter`、`row_padding`、`embedding_lookup`。 每個都內建正確性驗證與 bandwidth 報告。 建議順序: 先跑 `aosoa_layout` 印證上面的 DataLayoutVisualizer, 再跑 `gather_scatter` 觀察 block aggregation 對 atomic scatter 的加速, 最後用 `embedding_lookup` 感受排序對 L2 hit rate 的影響。
 </LabBox>
 
 <Quiz
