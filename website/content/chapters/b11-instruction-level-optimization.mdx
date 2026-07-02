@@ -1,0 +1,75 @@
+# Instruction-level 優化
+
+你的 kernel 已經 coalesced、沒有 bank conflict、occupancy 也合理,但還差一截。這時該往下看指令層級:一次搬多少 bytes、迴圈展開幾次、乘加能不能合併成一條指令。這些是壓榨最後 10–20% 的工具。
+
+## vectorized memory access(float4)
+
+一個 load 指令搬 32-bit 和搬 128-bit 的 overhead 差不多,但後者一次拿 4 個 float。用 `float4` / `int4` 讓每個 thread 一次搬 128 bits,減少指令數與 address 計算,通常直接改善 memory-bound kernel。
+
+```cpp
+// Vectorized copy: each thread moves 128 bits per load/store instruction.
+// Requires the pointer and count to be 16-byte aligned / divisible by 4.
+__global__ void copyVec4(const float4* in, float4* out, int n4) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n4) out[i] = in[i];
+}
+```
+
+<Callout variant="warn" title="對齊是前提">
+`float4` 要求 16-byte 對齊。對未對齊的 buffer 硬轉會 undefined behavior 或效能反效果。確認 allocation 對齊、元素數是 4 的倍數,或對尾端做 scalar fallback。
+</Callout>
+
+## loop unrolling 與 #pragma unroll
+
+展開迴圈可消除迴圈控制的 overhead、暴露更多獨立指令給 scheduler(提高 ILP)、也讓編譯器有機會做常數摺疊。對已知次數的內層迴圈用 `#pragma unroll`:
+
+```cpp
+// Unrolling the inner accumulation exposes independent FMAs (more ILP) and
+// removes loop overhead. Best when the trip count is a small compile-time value.
+#pragma unroll
+for (int i = 0; i < kUnroll; ++i) {
+  acc[i] = fmaf(a[i], b[i], acc[i]);
+}
+```
+
+過度展開會膨脹 register 使用、壓低 occupancy,要量測拿捏。
+
+## FMA 與 fast math 的取捨
+
+`fmaf(a, b, c)` 把乘加合併成一條指令,不只快一倍,還少一次中間 rounding(精度反而更好)。編譯器通常會自動合併,但明確寫出可確保發生。
+
+`--use_fast_math`(nvcc)/ `-ffast-math`(hipcc)把 `sinf`、`expf`、除法等換成低精度高速版本,並放寬 IEEE 語意。對容忍度高的 workload(很多 DL inference)值得,對需要精確結果的科學計算要謹慎。
+
+<LabBox path="kernels/02-memory">
+`vectorized_copy` 比較 scalar 與 float4 版本的 achieved bandwidth;`saxpy_unroll` 展示不同 unroll factor 對 SAXPY 的影響(含 register 使用與 occupancy 變化)。跑跑看,找出你的硬體上 unroll 的甜蜜點 — 你會發現不是越多越好。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '用 float4 取代 float 存取,主要改善?',
+      options: ['提高數值精度', '每個 load/store 指令搬更多 bytes,減少指令數與 address 計算', '降低 register', '消除 divergence'],
+      answer: 1,
+      explanation: '128-bit 向量存取攤薄了每筆 memory 指令的 overhead,對 memory-bound kernel 特別有效。',
+    },
+    {
+      question: '過度使用 #pragma unroll 的風險?',
+      options: ['降低 FLOP', 'register 使用膨脹、壓低 occupancy', '造成 bank conflict', '關閉 L2'],
+      answer: 1,
+      explanation: '展開會增加同時存活的變數,吃更多 register,可能反而拖低 occupancy,需量測。',
+    },
+    {
+      question: 'fmaf(a,b,c) 相較先乘後加,除了更快還有?',
+      options: ['佔更多 register', '少一次中間 rounding,精度通常更好', '需要 fast math', '只能用於 double'],
+      answer: 1,
+      explanation: 'fused multiply-add 在單一步驟內完成,省掉中間結果的 rounding。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'CUDA C++ Best Practices — Instruction Optimization', href: 'https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#instruction-optimization' },
+    { label: 'CUDA — Floating Point and IEEE 754', href: 'https://docs.nvidia.com/cuda/floating-point/index.html' },
+  ]}
+/>

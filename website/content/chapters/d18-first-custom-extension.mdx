@@ -1,0 +1,115 @@
+# 第一個 custom CUDA/HIP extension
+
+找到熱點後,該把它換成自己的 kernel 了。好消息:PyTorch 讓你不必離開 Python 生態就能掛進 C++/CUDA kernel。壞消息:tensor 的 contiguity、dtype、device、stream 有一堆細節,錯一個就 silent wrong 或 crash。這一章帶你把流程與陷阱一次走完。
+
+## 兩種載入方式
+
+**`load_inline`** 適合快速實驗:把 C++/CUDA 原始碼字串直接編譯載入,不必建置檔案。
+
+**`torch.utils.cpp_extension`(setup.py / `load`)** 適合正式專案:有獨立的 `.cpp`/`.cu` 檔、可指定 flags、可打包發佈。
+
+```python
+from torch.utils.cpp_extension import load
+
+# Ahead-of-file build; works for both CUDA and ROCm toolchains that PyTorch detects.
+ext = load(
+    name="my_ops",
+    sources=["my_ops.cpp", "my_ops_kernel.cu"],
+    extra_cuda_cflags=["-O3"],
+    verbose=True,
+)
+```
+
+## 正確處理 tensor:五個必檢項
+
+<Callout variant="warn" title="上 kernel 前必做的檢查">
+1. `TORCH_CHECK(x.is_cuda())` — 確認在 GPU 上。
+2. `TORCH_CHECK(x.is_contiguous())` 或 `x = x.contiguous()` — kernel 通常假設連續記憶體。
+3. `TORCH_CHECK(x.scalar_type() == at::kFloat)` — dtype 相符,別把 half 當 float 讀。
+4. device guard:`const at::cuda::CUDAGuard guard(x.device());` — 多 GPU 下切到正確 device。
+5. 用 current stream:`at::cuda::getCurrentCUDAStream()` 傳給 kernel launch,才不會和 PyTorch 的非同步執行打架。
+</Callout>
+
+```cpp
+#include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
+
+// Elementwise y = gelu(x). Launched on PyTorch's current stream and device.
+torch::Tensor geluForward(torch::Tensor x) {
+  TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+  x = x.contiguous();
+  TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
+  const at::cuda::CUDAGuard guard(x.device());
+
+  auto y = torch::empty_like(x);
+  const int n = x.numel();
+  constexpr int kBlock = 256;
+  const int grid = (n + kBlock - 1) / kBlock;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  geluKernel<<<grid, kBlock, 0, stream>>>(
+      x.data_ptr<float>(), y.data_ptr<float>(), n);
+  return y;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("gelu_forward", &geluForward, "GELU forward (CUDA)");
+}
+```
+
+## 支援 backward:autograd Function
+
+要讓 custom op 能被訓練,必須提供 backward。用 `torch.autograd.Function` 包住 forward/backward:
+
+```python
+class GeluFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return ext.gelu_forward(x)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (x,) = ctx.saved_tensors
+        return ext.gelu_backward(grad_out, x)  # your custom backward kernel
+
+
+# Always validate against autograd's numerical estimate.
+# torch.autograd.gradcheck(GeluFn.apply, (x.double().requires_grad_(),))
+```
+
+`gradcheck` 用數值微分驗證你的 backward — custom autograd 最容易錯的地方,務必跑。
+
+<LabBox path="kernels/06-pytorch-integration/cpp_extension">
+`cpp_extension/` 目錄有完整的 GELU forward+backward extension(`.cpp` + `.cu` + `setup.py` + 測試),測試會對 `torch.nn.functional.gelu` 做正確性比對並跑 `gradcheck`。HIP 環境下同一份 `.cu` 由 PyTorch 的 hipify 流程處理。跑 `python test_gelu.py` 確認 forward 與 backward 都通過。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '把 tensor 傳進 custom kernel 前,為什麼常要 `.contiguous()`?',
+      options: ['加快 Python', 'kernel 通常假設連續記憶體佈局,非連續會讀錯位址', '提高精度', '減少 register'],
+      answer: 1,
+      explanation: '非連續 tensor 的 stride 不規則,直接用 data_ptr 線性索引會讀到錯的元素。',
+    },
+    {
+      question: '為什麼 kernel launch 要用 at::cuda::getCurrentCUDAStream()?',
+      options: ['省 register', '與 PyTorch 的非同步執行順序一致,避免 race', '提高 occupancy', '啟用 Tensor Core'],
+      answer: 1,
+      explanation: '在 current stream 上 launch 才能與框架的其他非同步操作正確排序。',
+    },
+    {
+      question: 'gradcheck 的用途?',
+      options: ['檢查 forward 速度', '用數值微分驗證 custom backward 的正確性', '測 occupancy', '檢查記憶體洩漏'],
+      answer: 1,
+      explanation: 'gradcheck 比對解析梯度與數值梯度,是驗證 autograd Function 的標準做法。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'PyTorch — Custom C++ and CUDA Extensions', href: 'https://pytorch.org/tutorials/advanced/cpp_extension.html' },
+    { label: 'PyTorch — torch.utils.cpp_extension', href: 'https://pytorch.org/docs/stable/cpp_extension.html' },
+    { label: 'PyTorch — Extending torch.autograd', href: 'https://pytorch.org/docs/stable/notes/extending.html' },
+  ]}
+/>

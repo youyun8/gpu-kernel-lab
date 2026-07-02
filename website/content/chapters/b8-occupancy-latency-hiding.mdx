@@ -1,0 +1,74 @@
+# Occupancy 與 latency hiding
+
+新手常把 occupancy 當成唯一的效能旋鈕:「把 occupancy 拉到 100% 就對了」。但很多世界級的 GEMM kernel 只跑在 25–50% occupancy,卻逼近硬體極限。這一章解釋 occupancy 到底是什麼、它為什麼重要、以及為什麼「越高不一定越快」。
+
+## occupancy 是什麼
+
+occupancy = 一個 SM/CU 上實際活躍的 warp 數 ÷ 硬體支援的最大 warp 數。它衡量的是「你有多少 warp 可以拿來做 latency hiding」。當一個 warp 卡在 memory,scheduler 需要別的 ready warp 來填空檔;warp 越多,越容易把 latency 藏起來。
+
+occupancy 受三個資源限制,取最嚴格的那個(limiter):
+
+- **registers per thread** × block 大小 vs. register file 容量
+- **shared memory per block** vs. SM 的 shared memory 容量
+- **block / warp 數量上限**(硬體固定)
+
+<OccupancyCalculator />
+
+調調看:把 registers/thread 往上拉,occupancy 會呈階梯狀下降 — 因為 register 以 warp 為單位量化配置。切換架構,注意 AMD 的 wavefront = 64 讓每 block 的 warp 數算法不同。
+
+## __launch_bounds__:給編譯器目標
+
+編譯器分配 register 時並不知道你想要的 occupancy。`__launch_bounds__` 告訴它上限,讓它盡量把 register 壓在能達到目標 occupancy 的範圍內(代價可能是 register spill 到 local memory)。
+
+```cpp
+// Hint the compiler: at most 256 threads/block, aim for >=2 blocks/SM.
+// The compiler will try to cap register usage to honor this.
+__global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
+  // ...
+}
+```
+
+## 為什麼 higher occupancy 不一定更快
+
+這是本章的核心洞見。latency hiding 不只能靠「更多 warp」,也能靠「單一 warp 內更多獨立指令」(ILP)。兩者是替代品:
+
+- **走高 occupancy**:很多 warp、每 thread 少 register、小 tile。適合 memory-bound、每 thread 工作簡單的 kernel。
+- **走低 occupancy + 大 tile + 高 ILP**:少 warp、每 thread 用很多 register 算一大塊、指令間彼此獨立。GEMM 這類 compute-bound kernel 常走這條路 — 大 tile 帶來高 reuse 與高 arithmetic intensity,勝過多塞幾個 warp。
+
+<Callout variant="insight" title="該記住的一句話">
+occupancy 是手段不是目的。真正的目的是「讓執行單元不閒著」。當 ILP 已經足夠把 pipeline 餵飽,再往上加 occupancy 只是浪費 register、甚至因為 tile 變小而降低 reuse。用 profiler 看的是 stall 原因,不是 occupancy 數字本身。
+</Callout>
+
+<LabBox path="kernels/01-basics">
+`occupancy_experiment` 用同一個 compute-heavy kernel,透過不同的 `__launch_bounds__` 與 tile size 產生高/低 occupancy 兩種配置,各自量測執行時間。你會看到低 occupancy + 大 tile 的版本反而更快 — 親手驗證本章的反直覺結論。用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` / HIP 對應 API 印出理論 occupancy 對照。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'occupancy 衡量的是?',
+      options: ['kernel 的 FLOP 數', 'SM 上活躍 warp 數 / 最大可支援 warp 數', 'memory bandwidth 使用率', 'L2 命中率'],
+      answer: 1,
+      explanation: 'occupancy 反映可用來做 latency hiding 的 warp 密度,不是效能本身。',
+    },
+    {
+      question: '為什麼提高 registers per thread 可能降低 occupancy?',
+      options: ['register 變慢', 'register file 固定,每 thread 用越多,能同時活躍的 warp 越少', '會觸發 bank conflict', '會關閉 Tensor Core'],
+      answer: 1,
+      explanation: 'register 是硬性資源,占用越多,能塞進 SM 的 warp/block 越少。',
+    },
+    {
+      question: '為什麼某些 GEMM kernel 在低 occupancy 下反而更快?',
+      options: ['低 occupancy 省電', '大 tile + 高 ILP 提供足夠的 latency hiding,同時帶來更高 reuse', 'occupancy 越低 memory 越快', '這不可能發生'],
+      answer: 1,
+      explanation: 'ILP 可替代 occupancy 做 latency hiding;大 tile 的高 reuse 帶來的收益超過多幾個 warp。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'Volkov — Better Performance at Lower Occupancy (GTC)', href: 'https://www.nvidia.com/content/gtc-2010/pdfs/2238_gtc2010.pdf' },
+    { label: 'CUDA C++ Programming Guide — Occupancy', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#occupancy-calculator' },
+  ]}
+/>

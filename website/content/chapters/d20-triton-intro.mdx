@@ -1,0 +1,74 @@
+# Triton 入門與比較
+
+手寫 CUDA/HIP 讓你完全掌控,但每一行 shared memory 管理、每一個 index 計算都是你的責任。Triton 換一個交易:你用 Python 寫 block-level 邏輯,compiler 負責 coalescing、shared memory、pipelining。這一章用 softmax 與 GEMM 重寫,直接感受 productivity 與 peak performance 的取捨。
+
+## Triton 的心智模型
+
+在 Triton,你不寫「每個 thread 做什麼」,而是寫「每個 program(≈ block)處理哪一塊資料」。用 `tl.load` / `tl.store` 搬 block,用 `tl.arange` 產生 index,compiler 把它降階成高效的 GPU 指令。
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def softmax_kernel(x_ptr, y_ptr, n_cols, stride, BLOCK: tl.constexpr):
+    # One program handles one row. Numerically stable softmax (subtract max).
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    ptr = x_ptr + row * stride + cols
+    x = tl.load(ptr, mask=mask, other=-float("inf"))
+    x = x - tl.max(x, axis=0)
+    num = tl.exp(x)
+    y = num / tl.sum(num, axis=0)
+    tl.store(y_ptr + row * stride + cols, y, mask=mask)
+```
+
+對照第 10 章手寫的 softmax:同樣的 numerical stability(減 max)、同樣的 reduction,但你沒寫任何 `__shared__`、`__syncthreads` 或 shuffle。compiler 幫你處理了。
+
+## productivity vs. peak performance
+
+<Callout variant="insight" title="這個取捨怎麼看">
+Triton 讓你在幾十行內寫出「接近手調」的 kernel,開發速度快一個數量級。代價是最後那幾 % 的 peak — 對極致場景,手調 CUTLASS 仍可能勝出,因為它能觸及 Triton 抽象暫時觸不到的硬體細節(某些 TMA/swizzle 模式)。但對絕大多數自訂 op,Triton 的「夠快 + 好維護」是更划算的選擇。
+</Callout>
+
+GEMM 也一樣:Triton 官方的 matmul tutorial 用 autotune 掃 tile size,在大矩陣上能到 cuBLAS 的八九成,而程式碼比手寫 CUTLASS 短得多。
+
+## CUDA 與 ROCm 可攜性
+
+Triton 同時支援 NVIDIA 與 AMD backend:多數情況同一份 `.py` 不改就能兩邊跑,autotuner 各自找該平台的最佳 config。這是相對手寫 CUDA(需 hipify)或分別維護兩份 kernel 的一大優勢。要注意的是,peak 效能與可用的進階特性(某些 MMA 模式)仍可能因 backend 成熟度而異。
+
+<LabBox path="kernels/06-pytorch-integration/triton">
+`triton/` 目錄有 `softmax_triton.py` 與 `matmul_triton.py`,各自對 PyTorch reference 做正確性比對並 benchmark,印出 GB/s 或 GFLOP/s 與相對 `torch` 內建的比值。若安裝了 Triton(CUDA 或 ROCm 版),直接跑;比較它和第 10、12 章手寫版本的效能與程式碼長度。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Triton 的程式設計抽象層級是?',
+      options: ['每個 thread 做什麼', '每個 program(≈ block)處理哪一塊資料,compiler 管 thread 細節', '每個 warp 的 shuffle', 'PTX 指令'],
+      answer: 1,
+      explanation: 'Triton 是 block-level DSL,coalescing、shared memory、pipelining 交由 compiler。',
+    },
+    {
+      question: 'Triton 版 softmax 仍要做什麼以保證正確?',
+      options: ['寫 __syncthreads', '減去 max 以維持 numerical stability', '手動配置 shared memory', '指定 warp size'],
+      answer: 1,
+      explanation: '數值穩定性是演算法層面的要求,和用哪種語言無關,仍需減 max。',
+    },
+    {
+      question: 'Triton 相對手寫 CUDA 的主要取捨?',
+      options: ['更慢的開發但更快的 kernel', '極高生產力與可攜性,代價是可能少了最後幾 % 的 peak', '不支援 AMD', '只能寫 elementwise'],
+      answer: 1,
+      explanation: 'Triton 犧牲一點峰值換取開發速度與跨平台可攜,多數自訂 op 都划算。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'Triton — Fused Softmax tutorial', href: 'https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html' },
+    { label: 'Triton — Matrix Multiplication tutorial', href: 'https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html' },
+    { label: 'AMD ROCm — Triton support', href: 'https://rocm.docs.amd.com/en/latest/' },
+  ]}
+/>

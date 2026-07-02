@@ -1,0 +1,78 @@
+# Profiling 深入
+
+profiler 吐出上百個 metric,新手看了只會更焦慮。但其實你不需要全懂 — 你需要的是一套「從症狀回推病因」的流程。這一章教你怎麼讀 Nsight Compute / omniperf 的關鍵 section,以及一個能反覆套用的 bottleneck 診斷 workflow。
+
+## 先分類:memory-bound 還是 compute-bound
+
+一切從 speed-of-light / roofline section 開始。Nsight Compute 的 GPU Speed of Light section 直接給你 Compute (SM) 與 Memory 兩個 throughput 百分比:
+
+- Memory 高、Compute 低 → **memory-bound**,往 memory workload analysis 深入。
+- Compute 高、Memory 低 → **compute-bound**,往 scheduler / instruction 深入。
+- 兩者都低 → **latency-bound**,往 scheduler statistics 找 stall 原因。
+
+## 三個關鍵 section 怎麼讀
+
+**Memory Workload Analysis:** 看 L1/L2 hit rate、DRAM throughput、每個 request 的 sector 使用率。sector 使用率低 = coalescing 差(回第 6 章);L2 hit 低 = locality 差(考慮 swizzle,第 13 章)。
+
+**Scheduler Statistics / Warp State:** 看每個 issue slot 的 stall 原因。常見的 `Stall Long Scoreboard` = 在等 global memory,代表 latency hiding 不足(加 warp 或做 prefetch)。`Stall MIO Throttle` = shared memory/特殊功能單元壅塞。
+
+**Occupancy Section:** 顯示 achieved vs. theoretical occupancy,以及 limiter。achieved 遠低於 theoretical 通常是 load imbalance 或 tail effect(第 13 章)。
+
+## omniperf 的對應
+
+AMD 的 omniperf 提供類似的分層視圖:speed-of-light、memory chart(LDS、L1/L2/vL1D、HBM)、以及 wavefront / VALU / MFMA 使用率。概念一一對應:
+
+| 診斷目標 | Nsight Compute | omniperf |
+| --- | --- | --- |
+| bound 分類 | Speed of Light | System Speed-of-Light |
+| memory 效率 | Memory Workload Analysis | Memory Chart |
+| stall 原因 | Scheduler / Warp State | Wavefront / stall breakdown |
+| 矩陣單元使用率 | Tensor pipe utilization | MFMA / VALU utilization |
+
+## systematic workflow
+
+<Callout variant="insight" title="可反覆套用的六步驟">
+1. 跑 speed-of-light,分類 memory / compute / latency-bound。
+2. 依分類進對應 section 找主要 stall 或低效率指標。
+3. 提出一個假設(例如「sector 使用率 25% → coalescing 差」)。
+4. 只改一件事去驗證假設。
+5. 重新 profiling,確認該 metric 改善且整體變快。
+6. 回到步驟 1,直到接近 roofline 或收益遞減。
+</Callout>
+
+關鍵紀律:一次只改一個變因,並讓 profiler 而非直覺告訴你瓶頸在哪。很多優化「感覺應該更快」卻沒效,就是因為改錯了維度。
+
+<LabBox path="kernels/05-advanced-scheduling">
+用 `scripts/profile_ncu.sh` 與 `scripts/profile_rocprof.sh` 對第 12 章的各個 GEMM step kernel 依序 profiling,把每一步的 speed-of-light 與主要 stall 記下來。你會看到 bound 類型隨優化階段遷移:naive 是 memory-bound,tiling 後轉向 latency/compute-bound,最終 MMA 版逼近 compute roof。這就是本章 workflow 的實戰演練。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'profiling 的第一步應該是?',
+      options: ['調 register', '看 speed-of-light section 把 kernel 分類為 memory/compute/latency-bound', '直接加 occupancy', '換演算法'],
+      answer: 1,
+      explanation: '先分類 bound 類型,才知道接下來該深入哪個 section、往哪個方向優化。',
+    },
+    {
+      question: '`Stall Long Scoreboard` 通常代表?',
+      options: ['shared memory 壅塞', '在等 global memory,latency hiding 不足', 'register spill', 'divergence'],
+      answer: 1,
+      explanation: 'long scoreboard stall 是等待 global memory 回應,需更多 warp 或 prefetch 來掩蓋。',
+    },
+    {
+      question: '本章強調的優化紀律是?',
+      options: ['一次改多個變因加快進度', '一次只改一個變因並用 profiler 驗證', '完全靠直覺', '只看 occupancy 數字'],
+      answer: 1,
+      explanation: '單一變因 + 量測驗證,才能確定每次改動的因果與收益。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'Nsight Compute — Kernel Profiling Guide', href: 'https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html' },
+    { label: 'ROCm omniperf — Profiling & analysis', href: 'https://rocm.docs.amd.com/projects/omniperf/en/latest/' },
+    { label: 'NVIDIA — Warp state & stall reasons', href: 'https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#statistical-sampler' },
+  ]}
+/>

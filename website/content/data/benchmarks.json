@@ -1,0 +1,61 @@
+{
+  "_note": "示意數據 (illustrative). Regenerate with scripts/bench_all.py on your own hardware.",
+  "gemm": {
+    "cuda": {
+      "device": "NVIDIA A100 (illustrative)",
+      "peakTflops": 19.5,
+      "reference": "cuBLAS",
+      "steps": [
+        { "name": "Step 0: naive", "gflops": 320, "pctOfRef": 2 },
+        { "name": "Step 1: shared memory tiling", "gflops": 2100, "pctOfRef": 13 },
+        { "name": "Step 2: register tiling", "gflops": 7200, "pctOfRef": 45 },
+        { "name": "Step 3: vectorized loads", "gflops": 9800, "pctOfRef": 61 },
+        { "name": "Step 4: double buffering", "gflops": 12500, "pctOfRef": 78 },
+        { "name": "Step 5: Tensor Core (WMMA)", "gflops": 15200, "pctOfRef": 95 },
+        { "name": "Step 6: cuBLAS", "gflops": 16000, "pctOfRef": 100 }
+      ]
+    },
+    "rocm": {
+      "device": "AMD MI250 (illustrative)",
+      "peakTflops": 45.3,
+      "reference": "hipBLASLt",
+      "steps": [
+        { "name": "Step 0: naive", "gflops": 410, "pctOfRef": 2 },
+        { "name": "Step 1: shared memory tiling", "gflops": 2600, "pctOfRef": 12 },
+        { "name": "Step 2: register tiling", "gflops": 9100, "pctOfRef": 41 },
+        { "name": "Step 3: vectorized loads", "gflops": 12800, "pctOfRef": 58 },
+        { "name": "Step 4: double buffering", "gflops": 16400, "pctOfRef": 74 },
+        { "name": "Step 5: MFMA", "gflops": 20800, "pctOfRef": 94 },
+        { "name": "Step 6: hipBLASLt", "gflops": 22100, "pctOfRef": 100 }
+      ]
+    }
+  },
+  "rooflinePoints": {
+    "cuda": {
+      "peakGflops": 19500,
+      "peakBandwidthGBs": 1555,
+      "kernels": [
+        { "name": "vector add", "intensity": 0.083, "gflops": 120 },
+        { "name": "SAXPY", "intensity": 0.125, "gflops": 185 },
+        { "name": "reduction", "intensity": 0.25, "gflops": 360 },
+        { "name": "softmax", "intensity": 0.4, "gflops": 560 },
+        { "name": "GEMM naive", "intensity": 2.0, "gflops": 320 },
+        { "name": "GEMM tiled", "intensity": 32.0, "gflops": 7200 },
+        { "name": "GEMM Tensor Core", "intensity": 90.0, "gflops": 15200 }
+      ]
+    },
+    "rocm": {
+      "peakGflops": 45300,
+      "peakBandwidthGBs": 3277,
+      "kernels": [
+        { "name": "vector add", "intensity": 0.083, "gflops": 250 },
+        { "name": "SAXPY", "intensity": 0.125, "gflops": 380 },
+        { "name": "reduction", "intensity": 0.25, "gflops": 720 },
+        { "name": "softmax", "intensity": 0.4, "gflops": 1150 },
+        { "name": "GEMM naive", "intensity": 2.0, "gflops": 410 },
+        { "name": "GEMM tiled", "intensity": 32.0, "gflops": 9100 },
+        { "name": "GEMM MFMA", "intensity": 90.0, "gflops": 20800 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,84 @@
+# 整合回訓練/推論流程
+
+你的 custom kernel 在 microbenchmark 上贏了,但要真正用在訓練或推論裡,還有一段路:它得被 `torch.compile` 認得、在多 GPU 下正確、而且未來別人改動時不會悄悄變慢。這一章講「讓 custom op 成為一等公民」的工程實務。
+
+## 用 torch.library 註冊 custom op
+
+直接呼叫 extension 函式雖然能動,但 `torch.compile` 看不懂它、也無法追蹤梯度或做 shape 推導。用 `torch.library` 把它註冊成正式的 op,並提供 `FakeTensor`(meta)實作讓 compiler 能在不執行的情況下推 shape:
+
+```python
+import torch
+
+# Register a proper custom op so torch.compile can trace and reason about it.
+@torch.library.custom_op("mylib::gelu", mutates_args=())
+def gelu(x: torch.Tensor) -> torch.Tensor:
+    return ext.gelu_forward(x.contiguous())
+
+@gelu.register_fake
+def _(x):
+    # Shape/dtype propagation without running the kernel (needed by torch.compile).
+    return torch.empty_like(x)
+
+# Register backward via the autograd dispatch key or setup_context/backward.
+```
+
+## 與 torch.compile 共存
+
+註冊為 custom op 後,`torch.compile` 會把它當成一個不可分割的節點:它不會嘗試 fuse 進去(那是你的 kernel 內部的事),但會正確地在它前後 fuse 其他 op、追蹤相依、規劃記憶體。避免用會導致 graph break 的寫法(例如 op 內部呼叫 `.item()` 或依 data-dependent 的 Python 控制流),否則 compile 的效益會被打斷。
+
+## 多 GPU 注意事項
+
+<Callout variant="warn" title="多 GPU 三個地雷">
+1. **device guard**:kernel 內務必用 `CUDAGuard(x.device())`,否則在非 default device 的 tensor 上會 launch 到錯的 GPU。
+2. **current stream**:用 `getCurrentCUDAStream()`,尤其和 DDP/NCCL 的 communication stream 並存時,錯誤的 stream 會造成 race 或死結。
+3. **同步邊界**:custom op 若內部有跨 device 或 host 同步,會拖垮整個 data-parallel 的 pipeline;盡量保持純 device、非同步。
+</Callout>
+
+## regression benchmark:防止效能悄悄退化
+
+效能不是一次達標就永遠有效。程式碼演進、library 升級、shape 改變,都可能讓你的 kernel 悄悄變慢。把 benchmark 做成 CI 可跑的 regression 測試:
+
+```python
+# Pin a performance budget; fail CI if the kernel regresses beyond tolerance.
+def test_gelu_perf_regression():
+    t = benchmark_ms(lambda: gelu(x))       # warmup + CUDA events (chapter 4)
+    baseline_ms = load_baseline("gelu")     # recorded on this hardware
+    assert t <= baseline_ms * 1.10, f"regression: {t:.3f} vs {baseline_ms:.3f} ms"
+```
+
+關鍵:baseline 綁定硬體(不同 GPU 數字不同)、用穩健的計時(warmup + events + 多次取中位數)、留合理容忍度避免 flaky。
+
+<LabBox path="kernels/06-pytorch-integration/custom_op_autograd">
+`custom_op_autograd/` 有完整範例:用 `torch.library.custom_op` 註冊 GELU(含 fake/meta 與 backward)、一個 `torch.compile` 相容性測試,以及一個 regression benchmark 樣板(記錄 baseline JSON、比對容忍度)。跑 `python test_custom_op.py`,確認 op 能被 compile、gradcheck 通過、且效能在預算內。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼要用 torch.library 註冊 custom op 而非直接呼叫?',
+      options: ['純粹風格', '讓 torch.compile 能追蹤、推 shape,並正確處理相依與梯度', '加快 kernel', '減少 register'],
+      answer: 1,
+      explanation: '正式註冊(含 fake 實作)讓 compiler 在不執行下推理,並把它整合進 graph。',
+    },
+    {
+      question: 'custom op 內呼叫 .item() 或 data-dependent Python 控制流會?',
+      options: ['提高精度', '造成 torch.compile 的 graph break,打斷 fusion 效益', '增加 occupancy', '沒有影響'],
+      answer: 1,
+      explanation: 'data-dependent 行為使 compiler 無法保持單一 graph,導致 graph break。',
+    },
+    {
+      question: 'performance regression 測試的關鍵設計?',
+      options: ['固定用某台雲端機', 'baseline 綁硬體、穩健計時(warmup+events)、合理容忍度', '只跑一次不 warmup', '比對 FLOP 數'],
+      answer: 1,
+      explanation: '效能數字依硬體而異,需穩健計時與容忍度才不會 flaky 又能抓到真退化。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'PyTorch — Custom Operators (torch.library)', href: 'https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html' },
+    { label: 'PyTorch — torch.compile & custom ops', href: 'https://pytorch.org/docs/stable/torch.compiler_custom_backends.html' },
+    { label: 'PyTorch — DistributedDataParallel notes', href: 'https://pytorch.org/docs/stable/notes/ddp.html' },
+  ]}
+/>

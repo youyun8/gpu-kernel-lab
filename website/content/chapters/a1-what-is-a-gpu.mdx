@@ -1,0 +1,75 @@
+# GPU 是什麼樣的機器?
+
+同樣是矽晶片,為什麼 CPU 只有幾十個核心,GPU 卻有上萬個?如果 GPU 這麼多核心,為什麼跑一段普通的 if-else 程式反而比 CPU 慢?這一章不寫任何 kernel,先把 GPU 的設計哲學講清楚 — 後面每一個優化技巧,都是這個哲學的推論。
+
+<Callout variant="insight" title="先給直覺">
+CPU 是短跑選手:少數幾條非常快的核心,配上巨大的 cache 與複雜的 branch predictor,目標是把「單一任務」跑到最低 latency。GPU 是搬運大隊:成千上萬條相對慢、但極多的執行單元,目標是把「大量相同任務」的 throughput 拉到最高。你不會叫一個短跑選手去搬一萬箱貨。
+</Callout>
+
+## Throughput vs. latency
+
+CPU 花大量電晶體在「讓一條指令流盡快完成」:亂序執行、分支預測、多層 cache。GPU 反過來,把電晶體幾乎都投在 ALU 上,靠「同時有海量的工作在排隊」來掩蓋每一項工作的延遲。當一個 warp 在等 memory,scheduler 立刻切到另一個 ready 的 warp,執行單元幾乎不閒著。這叫 latency hiding,是理解 GPU 效能的第一把鑰匙。
+
+這也解釋了為什麼「一段有很多分支、彼此相依的序列程式」在 GPU 上不快:它既沒有足夠的平行度餵飽執行單元,又觸發 SIMT 的 divergence 懲罰。
+
+## SIMT 執行模型
+
+GPU 以 warp(NVIDIA,32 threads)或 wavefront(AMD,64 threads,RDNA 可 32)為單位排程:同一個 warp 裡的所有 threads 在同一個 cycle 執行同一條指令,只是各自的 register 資料不同。這就是 SIMT(Single Instruction, Multiple Threads)。
+
+推論很直接:如果 warp 裡的 threads 走進不同的 if 分支(branch divergence),硬體必須把兩條路徑輪流跑一遍,效能折半。後面章節談的 coalescing、bank conflict、warp shuffle,全都圍繞「一個 warp 作為一個整體」這個事實。
+
+## CUDA 與 ROCm 生態系對照
+
+本站兩個平台並行。名詞會不斷交錯出現,先建立對照表:
+
+| 概念 | NVIDIA (CUDA) | AMD (ROCm/HIP) |
+| --- | --- | --- |
+| 執行單位 | warp(32 threads) | wavefront(64 threads;RDNA 可 32) |
+| 運算核心叢集 | SM (Streaming Multiprocessor) | CU (Compute Unit) |
+| thread block | block / CTA | block / workgroup |
+| on-chip 快取記憶體 | shared memory | LDS (Local Data Share) |
+| 低階 ISA | PTX → SASS | GCN / CDNA / RDNA ISA |
+| 編譯器 | nvcc | hipcc |
+| 矩陣加速單元 | Tensor Core (WMMA/mma) | Matrix Core (MFMA) |
+| BLAS library | cuBLAS / cuBLASLt | hipBLAS / hipBLASLt |
+
+<Callout variant="warn" title="可攜性陷阱先劇透">
+warp = 32 vs. wavefront = 64 是最常見的可攜性地雷。任何寫死 `32` 的 warp-level 程式碼(shuffle、mask、reduction 步數)搬到 AMD 都可能出錯。第 9 章會專門處理這件事;現在先記住這個差異。
+</Callout>
+
+HIP 的 API 幾乎是 CUDA runtime 的鏡像(`cudaMalloc` ↔ `hipMalloc`),多數 CUDA 程式可用 `hipify` 半自動轉換。本站的 kernels 盡量用一層 portability header 讓同一份程式碼在兩個平台編譯。
+
+<LabBox path="kernels/01-basics">
+這一章沒有要跑的 kernel,但請先確認 toolchain。到 `kernels/` 執行 `cmake -B build -S .`,觀察 CMake log 印出偵測到的是 CUDA 還是 HIP。若兩者皆無,CMake 會進入 syntax-only 模式(見 `kernels/common/README`)。這一步確保後面每一章的 lab 都跑得起來。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'GPU 隱藏 memory latency 的主要機制是?',
+      options: ['更大的 branch predictor', '當一個 warp 卡住時切換到另一個 ready warp', '更高的時脈', '更多 L3 cache'],
+      answer: 1,
+      explanation: 'GPU 靠大量並行的 warp 做 latency hiding:一個 warp 等記憶體時,scheduler 立刻換上另一個,執行單元保持忙碌。',
+    },
+    {
+      question: 'branch divergence 為什麼傷效能?',
+      options: ['會增加 register 使用', '同一 warp 內不同分支必須被輪流序列化執行', '會關閉 L2 cache', '會降低時脈'],
+      answer: 1,
+      explanation: 'SIMT 下同一 warp 共用一條指令流,分歧的路徑只能一條一條跑,等於折損平行度。',
+    },
+    {
+      question: 'CUDA 的 warp 對應到 AMD 的什麼?大小通常是?',
+      options: ['CU,32', 'wavefront,64(RDNA 可 32)', 'SM,16', 'LDS,128'],
+      answer: 1,
+      explanation: 'AMD 的 wavefront 對應 warp,CDNA 為 64 lanes,RDNA 可設定為 32 或 64。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'CUDA C++ Programming Guide — Programming Model', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programming-model' },
+    { label: 'HIP Programming Guide', href: 'https://rocm.docs.amd.com/projects/HIP/en/latest/' },
+    { label: 'AMD ROCm Documentation', href: 'https://rocm.docs.amd.com/en/latest/' },
+  ]}
+/>

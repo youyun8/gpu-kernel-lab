@@ -1,0 +1,73 @@
+# Warp specialization 與 producer–consumer pipelines
+
+到目前為止,我們的 kernel 裡每個 warp 都做一樣的事。但現代高效能 GEMM 與 attention kernel 不是這樣寫的:它們讓一部分 warp 專門搬資料(producer),另一部分專門算數(consumer),像工廠的生產線一樣把 memory 與 compute 完全重疊。這一章解釋這個結構。
+
+## 為什麼要 warp specialization
+
+double buffering(第 12 章 Step 4)已經讓 load 與 compute 重疊,但所有 warp 還是既搬又算,受限於同一組資源與同步點。warp specialization 更徹底:
+
+- **producer warps** 只負責把下一批 tile 從 global memory 非同步搬進 shared memory。
+- **consumer warps** 只負責從 shared memory 讀資料餵給 Tensor Core / MFMA。
+- 兩組之間用 shared memory 上的 circular buffer 與輕量同步(barrier / named barrier)協調。
+
+這讓 memory pipeline 和 compute pipeline 幾乎獨立運轉,latency 被藏得更乾淨,尤其在 K 很大的深度 pipeline 上。
+
+## 非同步複製:cp.async 與 TMA
+
+傳統 load 會佔住 register 與 warp,直到資料到齊。**非同步複製**讓 warp 發出「把這段 global 搬到 shared」的請求後就繼續做別的,資料到了再用 barrier 確認。
+
+- **NVIDIA `cp.async`**(Ampere+):global → shared 的非同步拷貝,是 software pipelining 的硬體基礎。
+- **NVIDIA TMA**(Hopper+):Tensor Memory Accelerator,由專用硬體搬整塊 tile,連 address 計算都卸載掉,warp 只需發一次描述子。
+- **AMD 對應機制**:CDNA 透過 LDS 的 direct-to-LDS load 路徑與 `s_waitcnt` 計數器達成類似的非同步搬移與相依追蹤。
+
+<Callout variant="insight" title="心智模型">
+把 kernel 想成一條裝配線:producer 不斷把原料(tile)放上輸送帶(shared memory circular buffer),consumer 從另一端取料加工(MMA)。只要輸送帶不空、不滿,兩端都不會閒等 — 這就是 producer–consumer pipeline 的目標。
+</Callout>
+
+```cpp
+// Sketch of the async-copy pipeline idea (Ampere cp.async). Real kernels manage
+// a multi-stage circular buffer; this shows the prefetch/commit/wait rhythm.
+// for each k-stage:
+//   __pipeline_memcpy_async(&smem[stage], &gmem[...], bytes); // producer issues
+//   __pipeline_commit();
+//   __pipeline_wait_prior(kStages - 1);                       // consumer waits
+//   __syncthreads();
+//   // consumer: MMA on smem[ready_stage]
+```
+
+這些 pipeline 手寫極其容易出錯(相依、buffer 管理、corner case),因此實務上多半交給 CUTLASS / Composable Kernel — 但理解結構讓你讀得懂它們、也 debug 得動。
+
+<LabBox path="kernels/05-advanced-scheduling">
+`async_pipeline` 用一個簡化的兩階段 producer–consumer copy pipeline(CUDA 用 cp.async,HIP 用對應的非同步路徑或 fallback)示範 prefetch/compute 重疊,並和單純的同步 copy 比較 latency。程式碼刻意保持精簡,重點在 pipeline 的節奏而非完整 GEMM。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'warp specialization 的核心想法是?',
+      options: ['所有 warp 做相同工作以簡化', '讓部分 warp 專職搬資料(producer)、部分專職計算(consumer)以重疊 memory 與 compute', '提高 warp size', '關閉 shared memory'],
+      answer: 1,
+      explanation: '分工讓 memory pipeline 與 compute pipeline 近乎獨立運轉,latency hiding 更徹底。',
+    },
+    {
+      question: 'cp.async(Ampere)提供什麼能力?',
+      options: ['同步的 register copy', 'global → shared 的非同步拷貝,warp 發出後可繼續工作', '自動 tiling', 'fp64 加速'],
+      answer: 1,
+      explanation: 'cp.async 讓拷貝不阻塞 warp,是 software pipelining 的硬體基礎。',
+    },
+    {
+      question: 'Hopper 的 TMA 相較 cp.async 多了什麼?',
+      options: ['更高精度', '由專用硬體搬整塊 tile 並卸載 address 計算,warp 只發描述子', '不需要 shared memory', '自動 autotune'],
+      answer: 1,
+      explanation: 'TMA 把整塊 tile 的搬移與定址交給專用引擎,進一步減輕 warp 負擔。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { label: 'CUDA C++ Programming Guide — Asynchronous Data Copies (cp.async)', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-data-copies' },
+    { label: 'NVIDIA Hopper Tuning Guide — TMA', href: 'https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html' },
+    { label: 'CUTLASS — Pipelining & warp specialization', href: 'https://github.com/NVIDIA/cutlass' },
+  ]}
+/>
