@@ -76,11 +76,34 @@ cmake --build build -j
 
 每個 kernel 都:用 CMake 建置(CUDA/HIP 自動偵測)、對 CPU 或 library reference 做 correctness check、用共用 harness 報告 achieved bandwidth 與 throughput 及 % of theoretical peak。C++ 命名遵守 PascalCase / camelCase / kCamelCase / snake_case,註解全英文。
 
-## 部署到 GitHub Pages
+## 透過 GitHub Pages 部署
 
-`.github/workflows/deploy.yml` 會在 push 到 `main` 時 typecheck、lint、build(帶 `basePath=/gpu-kernel-lab`)並部署。若你的 repo 名稱不同,調整 `NEXT_PUBLIC_BASE_PATH` 與 `next.config.mjs` 的 basePath。
+本專案已內建 `.github/workflows/deploy.yml`,只要完成下列設定即可自動部署到 GitHub Pages。
 
-## 關於數據誠實
+### 啟用 GitHub Pages
+
+1. 進入 repo 的 **Settings → Pages**。
+2. 在 **Build and deployment → Source** 選擇 **GitHub Actions**。
+
+### 自動部署流程
+
+每次 push 到 `main` 分支時,CI 會依序執行:
+
+1. `npm ci` 安裝依賴。
+2. `npm run typecheck` 與 `npm run lint` 檢查程式品質。
+3. `npm run build` 產生靜態 site(自動帶入 `basePath=/gpu-kernel-lab`)。
+4. 透過 `actions/deploy-pages@v4` 部署到 GitHub Pages。
+
+也可手動觸發:到 **Actions → Deploy website to GitHub Pages → Run workflow**。
+
+### 調整 basePath(若 fork 到不同名稱的 repo)
+
+GitHub Pages project site 的網址格式為 `https://<user>.github.io/<repo>`。若你的 repo 名稱不是 `gpu-kernel-lab`,請同時修改兩處:
+
+- `website/next.config.mjs` 中的 `basePath`。
+- `.github/workflows/deploy.yml` 中的 `NEXT_PUBLIC_BASE_PATH` 環境變數。
+
+例如 repo 名稱為 `my-gpu-lab`,則兩處皆改為 `/my-gpu-lab`。
 
 ## 練習與解答
 
