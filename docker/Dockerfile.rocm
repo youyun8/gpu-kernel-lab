@@ -1,0 +1,21 @@
+# ROCm reproducibility image for gpu-kernel-lab.
+# Build:  docker build -f docker/Dockerfile.rocm -t gpu-kernel-lab:rocm .
+# Run:    docker run --device=/dev/kfd --device=/dev/dri --group-add video -it gpu-kernel-lab:rocm
+FROM rocm/dev-ubuntu-22.04:6.2-complete
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake ninja-build git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/rocm/bin:${PATH}"
+
+WORKDIR /workspace
+COPY kernels /workspace/kernels
+COPY scripts /workspace/scripts
+
+# Force the HIP backend and build all portable kernels.
+RUN cmake -B kernels/build -S kernels -G Ninja -DGKLAB_FORCE_HIP=ON \
+    && cmake --build kernels/build -j
+
+CMD ["/bin/bash"]

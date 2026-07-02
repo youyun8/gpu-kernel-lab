@@ -1,0 +1,18 @@
+# CUDA reproducibility image for gpu-kernel-lab.
+# Build:  docker build -f docker/Dockerfile.cuda -t gpu-kernel-lab:cuda .
+# Run:    docker run --gpus all -it gpu-kernel-lab:cuda
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake ninja-build git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY kernels /workspace/kernels
+COPY scripts /workspace/scripts
+
+# Configure and build all portable kernels for CUDA.
+RUN cmake -B kernels/build -S kernels -G Ninja && cmake --build kernels/build -j
+
+CMD ["/bin/bash"]

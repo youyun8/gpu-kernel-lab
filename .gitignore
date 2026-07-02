@@ -1,0 +1,25 @@
+# Node / Next.js
+website/node_modules/
+website/.next/
+website/out/
+website/*.tsbuildinfo
+
+# CMake build outputs
+kernels/build/
+build/
+
+# Profiler / benchmark outputs
+ncu_reports/
+rocprof_reports/
+workloads/
+trace.json
+*.ncu-rep
+
+# Python
+__pycache__/
+*.pyc
+kernels/06-pytorch-integration/**/build/
+kernels/06-pytorch-integration/**/*.so
+
+# OS
+.DS_Store
