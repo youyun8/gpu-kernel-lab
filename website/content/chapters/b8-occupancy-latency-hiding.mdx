@@ -1,85 +1,201 @@
 # Occupancy 與 Latency Hiding
 
-新手常把 occupancy 當成唯一的效能旋鈕: 「把 occupancy 拉到 100% 就對了」。 但很多世界級的 GEMM kernel 只跑在 25–50% occupancy, 卻逼近硬體極限。 這一章解釋 occupancy 到底是什麼、它為什麼重要、以及為什麼「越高不一定越快」。
+新手常把 occupancy 當成唯一的效能旋鈕: 「把 occupancy 拉到 100% 就對了」。 但很多世界級的 GEMM kernel 只跑在 25–50% occupancy, 卻逼近硬體極限。 這一章從「GPU 怎麼把等待藏起來」講起, 用具體數字算給你看 occupancy 是怎麼來的、什麼時候夠用、以及每一個調參旋鈕實際上在改什麼。
 
-## Occupancy 是什麼
+## 先理解問題: 一次 memory load 要等 500 cycles
 
-Occupancy = 一個 SM/CU 上實際活躍的 warp 數 ÷ 硬體支援的最大 warp 數。 它衡量的是「你有多少 warp 可以拿來做 latency hiding」。 當一個 warp 卡在 memory, scheduler 需要別的 ready warp 來填空檔; warp 越多, 越容易把 latency 藏起來。
+一條 FMA 指令幾個 cycles 就能完成, 但一次 global memory load 要等大約 400–800 cycles 資料才回來。 如果 SM 上只有一個 warp, 它發出 load 之後, 執行單元就只能空轉幾百個 cycles — 這台機器 99% 的時間在發呆。
 
-Occupancy 受三個資源限制, 取最嚴格的那個 (limiter):
+GPU 的解法不是把 latency 變短 (做不到), 而是**把等待藏起來 (latency hiding)**: SM 上同時駐留很多 warps, 一個 warp 卡在等資料時, warp scheduler **零成本**切到另一個 ready 的 warp 繼續發指令。 只要「正在等的 warp」背後永遠排著「準備好的 warp」, 執行單元就不會閒著。
 
-- **Registers per thread** × block 大小 vs. register file 容量
-- **Shared memory per block** vs. SM 的 shared memory 容量
-- **Block / warp 數量上限** (硬體固定)
+<Callout variant="insight" title="先給直覺">
+把 SM 想成一個只有一位廚師的廚房 (execution units), 每道菜都有「進烤箱等 8 分鐘」的步驟 (memory latency)。 一次只做一張訂單, 廚師大部分時間在等烤箱; 同時掛 20 張訂單 (warps), 等 A 的烤箱時就去切 B 的菜, 廚師就忙個不停。 occupancy 大致上就是「掛了幾張訂單」。
+</Callout>
+
+## Occupancy 是什麼: 一個算給你看的例子
+
+$$
+\text{occupancy} = \frac{\text{SM 上實際活躍的 warps}}{\text{SM 硬體支援的最大 warps}}
+$$
+
+能駐留多少 warps 不是你說了算, 而是**三種硬體資源哪個先用完** (limiter):
+
+1. **Register file**: 整個 SM 共享一個固定大小的 register file, 每個 thread 用越多 register, 塞得下的 threads 越少。
+2. **Shared memory**: 每個 block 要求的 shared memory 加總不能超過 SM 容量。
+3. **硬體 slot 上限**: 每個 SM 能同時掛的 blocks 數與 warps 數各有固定上限。
+
+拿一組具體數字算一次 (A100 等級, 每個 SM: 65,536 個 registers、164 KB shared memory、最多 64 warps、最多 32 blocks)。 你的 kernel: block size = 256 threads (= 8 warps)、每 thread 40 registers、每 block 8 KB shared memory:
+
+| 資源 | 每 block 需要 | SM 容量 | 塞得下幾個 blocks |
+| --- | --- | --- | --- |
+| Registers | 256 × 40 = 10,240 | 65,536 | ⌊65,536 / 10,240⌋ = **6** |
+| Shared memory | 8 KB | 164 KB | ⌊164 / 8⌋ = 20 |
+| Block slots | 1 | 32 | 32 |
+| Warp slots | 8 warps | 64 | ⌊64 / 8⌋ = 8 |
+
+最嚴格的是 register: 6 個 blocks × 8 warps = 48 warps, occupancy = 48/64 = **75%**, limiter 是 register。 現在把每 thread register 加到 64 個: 每 block 要 16,384 個, 只塞得下 4 個 blocks = 32 warps → occupancy 掉到 **50%**。 這就是為什麼 occupancy 對 register 用量呈**階梯狀**變化 — 它是整數除法的結果。
+
+下面的計算機把這套算術做成互動的, 拉拉看每個參數, 觀察 limiter 怎麼換人:
 
 <OccupancyCalculator />
 
-調調看: 把 registers/thread 往上拉, occupancy 會呈階梯狀下降 — 因為 register 以 warp 為單位量化配置。 切換架構, 注意 AMD 的 wavefront = 64 讓每 block 的 warp 數算法不同。
+切換架構時注意 AMD 的 wavefront = 64 threads: 同樣 256 threads 的 block 在 CDNA 上只有 4 個 waves, 每 wave 的 register 配置粒度也不同。
 
-## 需要多少 warp 才夠? Little's law 的估算
+## 多少 warps 才「夠」? 用 Little's Law 估
 
-「夠不夠」可以粗略地用排隊理論估: 要填滿一條 latency 為 $L$ cycles、每 cycle 可發射 $T$ 筆的 pipeline, 需要同時在飛的請求數約為 $L \times T$。 以 global memory latency ~500 cycles 為例, 每個 warp 若一次只發一筆 load, 你就需要幾十個 warp 輪流頂著; 但若每個 warp 一次發 4 筆獨立的 load (ILP), 需要的 warp 數就除以 4。 這條算式就是「occupancy 與 ILP 可互相替代」的數學根據。
+Occupancy 不需要 100%, 只需要「夠把 latency 藏滿」。 需要多少可以粗估: 要填滿一條 latency 為 $L$ cycles、每 cycle 能收 $T$ 筆請求的 pipeline, 需要同時在飛 (in-flight) 的請求約 $L \times T$ 筆。
 
-## 用 API 查詢與驗證
+具體化: 假設 memory latency $L = 500$ cycles, 你希望 SM 每個 cycle 都有一筆 load 在發射 ($T = 1$), 就需要 500 筆 load 同時在飛。 這 500 筆從哪來? 兩個來源相乘:
 
-不用猜, 編譯器和 runtime 會告訴你:
+$$
+\text{in-flight requests} = (\text{active warps}) \times (\text{每 warp 同時發出的獨立 loads})
+$$
 
-```cpp
-// Ask the runtime how many blocks of this kernel fit per SM.
-int numBlocks = 0;
-cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, myKernel, 256, 0);
-// HIP: hipOccupancyMaxActiveBlocksPerMultiprocessor(...)
+- 每個 warp 一次只發 1 筆 load、等它回來才發下一筆 → 需要 ~500 個 warps 的量級 (遠超硬體上限, 所以還要靠每筆 load 搬 128 bytes 的整個 warp 寬度來補)。
+- 每個 warp 一次發 4 筆**互相獨立**的 loads → 需要的 warps 直接除以 4。
 
-// At compile time, ask the compiler to report per-kernel resource usage:
-//   nvcc  -Xptxas=-v  kernel.cu     -> registers, spill stores/loads, smem
-//   hipcc -Rpass-analysis=kernel-resource-usage ...
-```
+第二個因子就是 **ILP (instruction-level parallelism)** — 這是本章最重要的概念: **occupancy 和 ILP 是同一件事的兩種買法**。
 
-編譯時加 `-Xptxas=-v` 會印出每個 kernel 的 register 數、spill 與 shared memory 用量 — 出現 `spill stores` 就代表 register 壓力已經超標, 變數被踢到 local memory (第 3 章), 通常比降一點 occupancy 更傷。
+## ILP: 同一個 warp 內的平行
 
-## __launch_bounds__: 給編譯器目標
-
-編譯器分配 register 時並不知道你想要的 occupancy。`__launch_bounds__` 告訴它上限, 讓它盡量把 register 壓在能達到目標 occupancy 的範圍內 (代價可能是 register spill 到 local memory)。
+「4 筆獨立的 loads」寫出來長什麼樣? 比較下面兩個版本 (每個 thread 處理 4 個元素):
 
 ```cpp
-// Hint the compiler: at most 256 threads/block, aim for >=2 blocks/SM.
-// The compiler will try to cap register usage to honor this.
-__global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
-    // ...
+// Version A: one accumulator - a serial dependency chain.
+// Each FMA must wait for the previous one to finish (~4 cycles each),
+// so this warp can only issue one FMA every ~4 cycles.
+float sum = 0.0f;
+for (int k = 0; k < kK; ++k) {
+  sum += a[k] * b[k];  // sum depends on the previous sum
 }
 ```
 
-HIP 的對應寫法相同 (`__launch_bounds__(256)`), CDNA 上另有 `__attribute__((amdgpu_waves_per_eu(n)))` 可以更直接地要求每個 execution unit 的 wave 數。
+```cpp
+// Version B: four independent accumulators - four parallel chains.
+// The scheduler can issue FMAs from different chains back to back,
+// keeping the math pipe busy with a single warp.
+float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+for (int k = 0; k < kK; k += 4) {
+  sum0 += a[k + 0] * b[k + 0];  // four independent read-modify-writes:
+  sum1 += a[k + 1] * b[k + 1];  // none of these waits for the others
+  sum2 += a[k + 2] * b[k + 2];
+  sum3 += a[k + 3] * b[k + 3];
+}
+float sum = (sum0 + sum1) + (sum2 + sum3);
+```
+
+Version A 的每條 FMA 都要等上一條的結果 (`sum` 是依賴鏈), 一個 warp 每 ~4 cycles 才能發一條指令 — 要靠**別的 warps** 填滿中間的空檔, 也就是需要高 occupancy。 Version B 有 4 條互不依賴的鏈, 單一 warp 自己就能連續發射, 對 occupancy 的需求直接砍到約 1/4。 代價是 4 個 accumulators 佔 4 個 registers — **你用 register 買了 ILP, 用 ILP 省了 occupancy**。
+
+Memory 端同理: 連續發出 4 筆獨立的 load (例如讀 `float4`, 或一次讀 4 個不同位址到不同暫存變數), 一個 warp 就有 4 筆請求同時在飛。 這正是第 11、12 章 GEMM register tiling 的底層邏輯。
+
+## 用工具查, 不要猜
+
+### 編譯期: 每個 kernel 用了多少資源
+
+```bash
+# CUDA: print registers, spills, and shared memory per kernel
+nvcc -Xptxas=-v kernel.cu
+#   ptxas info: Used 40 registers, 8192 bytes smem
+#   ptxas info: 0 bytes spill stores, 0 bytes spill loads   <- watch this line
+
+# HIP/ROCm: same information from the AMDGPU backend
+hipcc -Rpass-analysis=kernel-resource-usage kernel.cpp
+```
+
+`spill stores` 非零代表 register 不夠用, 編譯器把變數踢到 local memory (實際上在 global memory, 第 3 章) — 每次「register 存取」變成幾百 cycles 的 memory 存取, 通常比 occupancy 降一級傷得多。 **看到 spill, 先處理 spill。**
+
+### 執行期: 這個 block size 能跑出多少 occupancy
+
+```cpp
+// Ask the runtime how many blocks of this kernel fit per SM at block=256.
+int num_blocks = 0;
+cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks, myKernel, 256, 0);
+// HIP: hipOccupancyMaxActiveBlocksPerMultiprocessor(...)
+// occupancy = num_blocks * (256 / 32) / max_warps_per_sm
+```
+
+### __launch_bounds__: 向編譯器下訂單
+
+編譯器分配 register 時預設只求單 thread 最快, 不知道你想要幾個 blocks 同時駐留。 `__launch_bounds__` 把目標講清楚:
+
+```cpp
+// Promise: never launched with more than 256 threads/block.
+// Request: fit at least 2 blocks per SM.
+// The compiler then caps register usage at 65536/(256*2) = 128 per thread.
+__global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
+  // ...
+}
+```
+
+加上之後重新編譯, 用 `-Xptxas=-v` 驗證兩件事: register 是否真的降到目標以下、以及**有沒有付出 spill 的代價**。 若出現 spill, 退回或放寬第二個參數。 HIP 寫法相同; CDNA 上另有 `__attribute__((amdgpu_waves_per_eu(n)))` 可更直接指定每個 execution unit 的 waves 數。
 
 ## 為什麼 higher occupancy 不一定更快
 
-這是本章的核心洞見。 latency hiding 不只能靠「更多 warp」, 也能靠「單一 warp 內更多獨立指令」 (ILP)。 兩者是替代品:
+現在可以把整章串起來了。 Latency hiding 需要的是「足夠的 in-flight 工作」, 而它有兩種買法:
 
-- **走高 occupancy**: 很多 warp、每 thread 少 register、小 tile。 適合 memory-bound、每 thread 工作簡單的 kernel。
-- **走低 occupancy + 大 tile + 高 ILP**: 少 warp、每 thread 用很多 register 算一大塊、指令間彼此獨立。 GEMM 這類 compute-bound kernel 常走這條路 — 大 tile 帶來高 reuse 與高 arithmetic intensity, 勝過多塞幾個 warp。
+- **高 occupancy 路線**: 很多 warps、每 thread 少 register、小 tile。 適合 memory-bound、每 thread 邏輯簡單的 kernel (例如 elementwise、copy)。
+- **低 occupancy + 高 ILP 路線**: 少 warps、每 thread 拿一大把 registers 算一大塊資料、指令間彼此獨立。 GEMM 這類 compute-bound kernel 走這條: 每 thread 算 8×8 個輸出, 64 個 accumulator registers 帶來 64 條獨立依賴鏈 (ILP 極高), 而且每載入一筆資料能重用 8 次 (reuse 極高)。 塞更多 warps 反而要縮小 tile, reuse 掉了, memory traffic 變多, 更慢。
+
+Volkov 在 GTC 2010 的經典結果就是這個: **occupancy 只有 25% 但單 warp ILP 拉滿的 kernel, 勝過 100% occupancy 的 naive 版**。
 
 <Callout variant="insight" title="該記住的一句話">
-occupancy 是手段不是目的。 真正的目的是「讓執行單元不閒著」。 當 ILP 已經足夠把 pipeline 餵飽, 再往上加 occupancy 只是浪費 register、甚至因為 tile 變小而降低 reuse。 用 profiler 看的是 stall 原因, 不是 occupancy 數字本身。
+occupancy 是手段不是目的, 目的是「讓執行單元不閒著」。 當 ILP 已經把 pipeline 餵飽, 再加 occupancy 只是浪費 register、逼你縮 tile。 決策依據是 profiler 的 stall 原因, 不是 occupancy 數字本身。
 </Callout>
 
-## Theoretical vs. achieved occupancy
+## Theoretical vs. Achieved: 兩個數字說不同的事
 
-Profiler 會報兩個數字: theoretical (資源計算的上限) 與 achieved (執行期實際平均)。 achieved 遠低於 theoretical 的常見原因: grid 太小填不滿機器 (第 13 章的 wave quantization)、block 之間工作量不均、kernel 尾端只剩少數 block 在跑。 這種情況再怎麼省 register 也沒用 — 問題在工作的「形狀」, 不在資源。
+Profiler 報兩個 occupancy:
 
-## Tuning Levers
+- **Theoretical**: 上面表格那套資源算術的結果 — 「資源上限允許多少」。
+- **Achieved**: 執行期實際的平均活躍 warps — 「實際跑到多少」。
 
-Occupancy 相關調參不要只改一個 block size:
+兩者差距大時, 問題通常不在資源, 而在**工作的形狀**。 具體例子: 你的 grid 只有 8 個 blocks, 但 GPU 有 108 個 SM — 就算 theoretical 100%, 有 100 個 SM 完全沒事做, achieved 慘不忍睹。 這時候降 register、調 block size 全都無效, 你需要的是**製造更多 blocks** (見下方 Grid size)。
 
-- **Block size**: 128、256、512 threads 是常見候選。 太小會浪費 scheduler/block slots, 太大會降低 block-level scheduling 彈性。
-- **Register cap**: `__launch_bounds__` 或 compiler flag 可壓 register, 但一旦出現 spill 就要退回。
-- **Tile size**: 大 tile 提高 reuse 和 ILP, 但吃 register/shared memory。 小 tile occupancy 高, 但可能 memory traffic 變多。
-- **Independent accumulators**: 對 latency-bound loop, 多個 accumulator 可用 ILP 替代部分 occupancy。
-- **Grid size**: achieved occupancy 低可能只是 blocks 太少。 小矩陣用 Split-K、batching 或 persistent scheduler 比調 register 有效。
+## 調參手冊: 五個旋鈕, 每個都有數字
 
-一個 practical loop: 先用 profiler 看 stall reason。 若是 `long scoreboard`, 增加 active warps 或每 warp independent loads; 若是 `not selected` 很高, warp 已經足夠但 issue pipe 競爭, 該看 instruction mix; 若是 `math pipe throttle`, occupancy 不是瓶頸, 要調算術 pipeline 或使用 MMA。
+### 1. Block size — 影響資源包裝的「顆粒」
+
+Block 是資源分配的單位, 顆粒太大或太小都會在整數除法上吃虧:
+
+- **太小**: 64-thread blocks (= 2 warps), 硬體每 SM 最多 32 個 blocks → 最多 32 × 2 = 64 warps, 剛好夠; 但若上限是 16 blocks 的架構, 就只有 32 warps = 50% — **block slots 先用完, warps 沒滿**。
+- **太大**: 1024-thread block (= 32 warps), SM 上限 64 warps → 只能放 2 個 blocks。 若 kernel 還要 100 KB shared memory (剩 64 KB 塞不下第二個), 就只剩 1 個 block = 50%, 而且 `__syncthreads()` 時整個 SM 一半的 warps 一起卡住。
+
+實務: 從 **256** 開始, 只試 128 / 256 / 512 三個值, 每次用 occupancy API 驗證。 Block size 幾乎從不值得更細的搜索。
+
+### 2. Register cap — 用 __launch_bounds__ 換駐留數
+
+上面的 40→64 registers 例子: occupancy 75% → 50%。 反向操作: kernel 自然用到 56 registers 導致只塞 4 blocks 時, `__launch_bounds__(256, 6)` 逼編譯器壓到 42 以下、塞進 6 blocks。 **每次都要重新看 `-Xptxas=-v`**: 若輸出多了 `48 bytes spill stores`, 這筆交易是虧的, 退回。
+
+### 3. Tile size — occupancy 換 reuse
+
+GEMM 每 thread 的輸出 tile 從 4×4 加大到 8×8: accumulator registers 從 16 個變 64 個, occupancy 大概砍半; 但每筆載入的重用次數從 4 變 8, **memory traffic 直接減半**。 對 compute-bound kernel 這通常是淨賺 — 第 12 章的 step2 → step3 實測就是這一步。 反過來, memory-bound kernel 吃不到 reuse 的好處, 就別付 occupancy 的代價。
+
+### 4. Independent accumulators — 不動 tile 也能買 ILP
+
+就是上面 Version A → Version B 的改寫: 把一條依賴鏈拆成 4 條, 只多花 3 個 registers, 單 warp 的發射密度就接近 4 倍。 適用於任何 latency-bound 的迴圈 (reduction、dot product、pooling), 是**性價比最高的第一步**。
+
+### 5. Grid size — achieved 低的時候先看這裡
+
+Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3 × SM 數就是 grid 太小。 對策都在第 13 章, 一句話版本:
+
+- **Split-K**: 把 GEMM 的 K 維切給多個 blocks, 同一個輸出由多方累加 — 小矩陣也能生出足夠的 blocks。
+- **Batching**: 很多小問題合併成一個 kernel launch, blocks 數 = 問題數 × 每問題 blocks。
+- **Persistent scheduler**: 固定數量的 blocks 常駐, 從 work queue 領工作, 消除尾端只剩幾個 blocks 的浪費。
+
+## 用 profiler 決定下一步: 三種 stall 的診斷表
+
+調參的順序不該是「把五個旋鈕都轉一遍」, 而是先問 profiler: **warps 到底在等什麼?** Nsight Compute 的 Warp State Statistics (omniperf 有對應的 wave state 分析) 最常見三種:
+
+| Stall 原因 | 白話翻譯 | 該做什麼 |
+| --- | --- | --- |
+| `long scoreboard` | warps 在等 global memory 的資料回來 | 增加 in-flight loads: 提高 occupancy **或**每 warp 多發獨立 loads (ILP、vectorized loads); 同時檢查第 6 章的 coalescing |
+| `not selected` | warp 已經 ready, 只是 scheduler 這個 cycle 選了別人 | **occupancy 已經夠了**, 再加只是排更長的隊; 瓶頸在 issue 端, 去看 instruction mix 或降 occupancy 換大 tile |
+| `mio/math pipe throttle` | 算術/特殊功能 pipeline 滿載, 發不進去 | 恭喜, 執行單元已經吃飽 — occupancy 不是問題; 要更快只能減少計算量、換更高吞吐的指令 (FMA、MMA/Tensor Core) |
+
+一個 practical loop: profile → 看主要 stall → 對表選一個旋鈕 → 改 → 重新 profile。 每次只動一個旋鈕, 用第 4 章的 benchmark 方法確認淨效果。
 
 <LabBox path="kernels/01-basics">
-`occupancy_experiment` 用同一個 compute-heavy kernel, 透過不同的 `__launch_bounds__` 與 tile size 產生高/低 occupancy 兩種配置, 各自量測執行時間。 你會看到低 occupancy + 大 tile 的版本反而更快 — 親手驗證本章的反直覺結論。 用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` / HIP 對應 API 印出理論 occupancy 對照。
+`occupancy_experiment` 用同一個 compute-heavy kernel, 透過不同的 `__launch_bounds__` 與 tile size 產生高/低 occupancy 兩種配置, 各自量測執行時間。 你會看到低 occupancy + 大 tile 的版本反而更快 — 親手驗證本章的反直覺結論。 用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` / HIP 對應 API 印出理論 occupancy 對照, 並用 `-Xptxas=-v` 檢查兩種配置的 register 用量與 spill。
 </LabBox>
 
 <Quiz
@@ -91,28 +207,40 @@ Occupancy 相關調參不要只改一個 block size:
       explanation: 'occupancy 反映可用來做 latency hiding 的 warp 密度, 不是效能本身。',
     },
     {
-      question: '為什麼提高 registers per thread 可能降低 occupancy?',
-      options: ['register 變慢', 'register file 固定, 每 thread 用越多, 能同時活躍的 warp 越少', '會觸發 bank conflict', '會關閉 Tensor Core'],
+      question: '每 SM 有 65,536 registers、上限 64 warps。 block = 256 threads、每 thread 64 registers 時, occupancy 是?',
+      options: ['100%', '75%', '50%', '25%'],
+      answer: 2,
+      explanation: '每 block 要 256×64 = 16,384 registers, 塞得下 ⌊65,536/16,384⌋ = 4 blocks = 32 warps, 32/64 = 50%。 occupancy 就是這樣的整數除法算出來的。',
+    },
+    {
+      question: '把一條 reduction 迴圈從 1 個 accumulator 改成 4 個獨立 accumulators, 主要效果是?',
+      options: ['減少計算量', '把一條依賴鏈拆成 4 條, 單 warp 發射密度提高, 對 occupancy 的需求下降', '增加 shared memory', '讓結果更精確'],
       answer: 1,
-      explanation: 'register 是硬性資源, 占用越多, 能塞進 SM 的 warp/block 越少。',
+      explanation: '4 條獨立依賴鏈讓 scheduler 能背靠背發射同一 warp 的指令 — 用 3 個額外 registers 買 ILP, 以 ILP 替代 occupancy。',
     },
     {
       question: '為什麼某些 GEMM kernel 在低 occupancy 下反而更快?',
       options: ['低 occupancy 省電', '大 tile + 高 ILP 提供足夠的 latency hiding, 同時帶來更高 reuse', 'occupancy 越低 memory 越快', '這不可能發生'],
       answer: 1,
-      explanation: 'ILP 可替代 occupancy 做 latency hiding; 大 tile 的高 reuse 帶來的收益超過多幾個 warp。',
+      explanation: '64 個 accumulators = 64 條獨立依賴鏈 + 每筆資料重用 8 次; latency hiding 靠 ILP 補足, reuse 的收益超過多幾個 warps。',
     },
     {
-      question: '編譯輸出出現 "spill stores" 代表?',
+      question: '編譯輸出出現 "48 bytes spill stores" 代表?',
       options: ['shared memory 不足', 'register 壓力超過上限, 變數被放到 local memory, 每次存取可能打到 global memory', '編譯失敗', 'occupancy 達到 100%'],
       answer: 1,
-      explanation: 'spill 是 __launch_bounds__ 壓 register 或 kernel 本身太複雜的副作用, 常比降一點 occupancy 更傷效能。',
+      explanation: 'spill 常是 __launch_bounds__ 壓太狠或 kernel 太複雜的副作用, 通常比降一點 occupancy 更傷 — 看到 spill 先處理 spill。',
+    },
+    {
+      question: 'profiler 顯示主要 stall 是 "not selected", 你該?',
+      options: ['提高 occupancy', '認知到 occupancy 已經足夠, 轉而檢查 instruction mix 或用大 tile 換 ILP/reuse', '增加 blocks 數', '加大 shared memory'],
+      answer: 1,
+      explanation: 'not selected 代表 warp ready 但 scheduler 選了別人 — 隊伍已經夠長, 再加 occupancy 沒有幫助, 瓶頸在 issue 端。',
     },
     {
       question: 'achieved occupancy 遠低於 theoretical occupancy, 最可能的原因是?',
       options: ['register 太多', 'grid 太小、block 工作量不均或尾端效應, 執行期填不滿 SM', 'L2 太小', '編譯器 bug'],
       answer: 1,
-      explanation: 'theoretical 只看資源; achieved 反映執行動態。 差距大代表問題在工作分佈 (第 13 章), 不在資源配置。',
+      explanation: 'theoretical 只看資源; achieved 反映執行動態。 8 個 blocks 餵 108 個 SM, 資源再怎麼調都沒用 — 先用 Split-K/batching/persistent scheduler 製造夠多的 blocks。',
     },
   ]}
 />
@@ -122,5 +250,6 @@ Occupancy 相關調參不要只改一個 block size:
     { citation: 'V. Volkov, "Better Performance at Lower Occupancy," in Proc. GPU Technology Conference (GTC), 2010.', href: 'https://www.nvidia.com/content/gtc-2010/pdfs/2238_gtc2010.pdf' },
     { citation: 'NVIDIA Corporation, "Occupancy," in CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#occupancy-calculator' },
     { citation: 'V. Volkov, "Understanding Latency Hiding on GPUs," Ph.D. dissertation, UC Berkeley, 2016.', href: 'https://www2.eecs.berkeley.edu/Pubs/TechRpts/2016/EECS-2016-143.html' },
+    { citation: 'NVIDIA Corporation, "Warp State Statistics," in Nsight Compute Documentation, 2024.', href: 'https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#statistical-sampler' },
   ]}
 />
