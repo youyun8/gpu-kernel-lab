@@ -9,6 +9,8 @@ import { PlatformTabs, Platform } from '@/components/widgets/PlatformTabs';
 import { Callout } from '@/components/widgets/Callout';
 import { LabBox } from '@/components/widgets/LabBox';
 import { FurtherReading } from '@/components/widgets/FurtherReading';
+import { Exercise } from '@/components/widgets/Exercise';
+import { Solution } from '@/components/widgets/Solution';
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
@@ -23,6 +25,8 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     Callout,
     LabBox,
     FurtherReading,
+    Exercise,
+    Solution,
     ...components,
   };
 }

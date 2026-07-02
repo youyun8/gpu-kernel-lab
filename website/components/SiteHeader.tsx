@@ -5,6 +5,7 @@ const navItems = [
   { href: '/', label: '首頁' },
   { href: '/chapters/a1-what-is-a-gpu', label: '開始學習' },
   { href: '/roadmap', label: '學習路線圖' },
+  { href: '/exercises', label: '練習與解答' },
 ];
 
 export function SiteHeader() {

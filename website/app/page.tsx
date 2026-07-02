@@ -22,6 +22,9 @@ export default function HomePage() {
           <Link href="/roadmap" className="rounded-lg border border-surface-border px-5 py-2.5 font-medium text-slate-200 transition hover:border-brand">
             查看學習路線圖
           </Link>
+          <Link href="/exercises" className="rounded-lg border border-surface-border px-5 py-2.5 font-medium text-slate-200 transition hover:border-brand">
+            練習與解答
+          </Link>
         </div>
       </section>
 

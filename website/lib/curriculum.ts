@@ -235,3 +235,57 @@ const repoBase = 'https://github.com/your-org/gpu-kernel-lab/tree/main/';
 export function labUrl(lab: string): string {
   return `${repoBase}${lab}`;
 }
+
+export interface ExerciseSetMeta {
+  slug: string;
+  trackId: string;
+  trackLabel: string;
+  trackColor: string;
+  title: string;
+  summary: string;
+  count: number;
+}
+
+// One exercise set per track. Slugs map to MDX files in content/exercises/.
+export const exerciseSets: ExerciseSetMeta[] = [
+  {
+    slug: 'track-a',
+    trackId: 'a-basics',
+    trackLabel: 'Track A — 入門',
+    trackColor: '#39d353',
+    title: 'Track A 練習:GPU 基礎與效能測量',
+    summary: 'SIMT、thread indexing、memory hierarchy latency、bandwidth 計算、roofline 判讀。',
+    count: 8,
+  },
+  {
+    slug: 'track-b',
+    trackId: 'b-intermediate',
+    trackLabel: 'Track B — 進階',
+    trackColor: '#58a6ff',
+    title: 'Track B 練習:coalescing、bank conflict、occupancy、reduction',
+    summary: 'transaction 計數、bank 對映、occupancy limiter、warp reduce、online softmax。',
+    count: 9,
+  },
+  {
+    slug: 'track-c',
+    trackId: 'c-expert',
+    trackLabel: 'Track C — 專家',
+    trackColor: '#f778ba',
+    title: 'Track C 練習:GEMM、tail effect、pipeline、profiling',
+    summary: 'arithmetic intensity、tile reuse、wave quantization、Split-K、bottleneck 診斷。',
+    count: 8,
+  },
+  {
+    slug: 'track-d',
+    trackId: 'd-pytorch',
+    trackLabel: 'Track D — PyTorch 實戰',
+    trackColor: '#ffa657',
+    title: 'Track D 練習:profiling、custom extension、fusion、Triton',
+    summary: 'launch overhead 估算、tensor 檢查、fused speedup、autograd、custom op 註冊。',
+    count: 7,
+  },
+];
+
+export function getExerciseSet(slug: string): ExerciseSetMeta | undefined {
+  return exerciseSets.find((s) => s.slug === slug);
+}

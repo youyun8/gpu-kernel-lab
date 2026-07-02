@@ -1,0 +1,89 @@
+# Track C 練習:GEMM、tail effect、pipeline、profiling
+
+對應第 12–16 章。GEMM 尺寸以 row-major、`C = A(M×K) · B(K×N)` 為準。
+
+<Exercise id="C1" title="Naive GEMM 的 arithmetic intensity" kind="paper" level="進階">
+naive SGEMM 每個 output element 跑長度 K 的迴圈,每次迭代讀 A、B 各一個 float、做一次 FMA。忽略 output 寫回。(a) 每個 output 的 FLOP 與 bytes;(b) arithmetic intensity;(c) 為什麼它必然 bandwidth-bound?
+
+<Solution>
+(a) 每個 output:FLOP = `2K`(K 次 FMA),bytes = `2K * 4 = 8K`(每次讀 2 個 float)。
+
+(b) AI = `2K / 8K = 0.25 FLOP/byte`,與 K 無關。
+
+(c) 0.25 遠低於典型 ridge point(~10 FLOP/byte),永遠落在 bandwidth roof 下。根因是零 reuse:每個從 global memory 讀進的值只用一次。tiling 的目的就是提高這個 reuse(見 C2)。
+</Solution>
+</Exercise>
+
+<Exercise id="C2" title="Tile reuse factor" kind="paper" level="進階">
+shared-memory tiling 用 `BM×BK` 的 A tile 與 `BK×BN` 的 B tile 算 `BM×BN` 的 C tile。(a) 載入一個 A tile 花多少次 global load?(b) 這個 A tile 被 C tile 內多少個 output 重複使用?(c) 直覺說明為何 tile 越大 AI 越高。
+
+<Solution>
+(a) A tile 有 `BM*BK` 個元素,各載入一次 → `BM*BK` 次 global load。
+
+(b) A tile 的每一列參與該 tile row 的所有 `BN` 個 output 計算 → 每個 A 元素被 reuse `BN` 次(對稱地,每個 B 元素被 reuse `BM` 次)。
+
+(c) reuse 次數正比於 tile 的另一維(`BN` / `BM`)。tile 越大,每筆 global load 被攤到越多次 FMA,AI ≈ O(tile 邊長) 上升,把 roofline 上的點往右推向 compute roof。代價是更多 shared memory / register 壓力。
+</Solution>
+</Exercise>
+
+<Exercise id="C3" title="Wave quantization" kind="paper" level="進階">
+GPU 一 wave 可同時跑 108 個 CTA。某 GEMM 產生 120 個 CTA、每個工作量相同。(a) 需要幾個 wave?(b) 硬體利用率(quantization efficiency)約多少?(c) 為什麼同一 kernel 在 4096×4096 幾乎沒有這個問題?
+
+<Solution>
+(a) `ceil(120 / 108) = 2` waves。
+
+(b) 第一 wave 滿載 108,第二 wave 只有 12 個 CTA 在跑。efficiency = `120 / (2 * 108) = 120/216 ≈ 55.6%`。近半的第二 wave 時間浪費在空轉的執行單元上。
+
+(c) 大矩陣產生成千上萬個 CTA,最後一個未填滿的 wave 佔比極小,quantization 損失被稀釋到可忽略。tail effect 是小矩陣 / 少 wave 的特有痛點(見第 13 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="C4" title="何時該用 Split-K" kind="paper" level="挑戰">
+GEMM 形狀 M = 64、N = 64、K = 8192,tile = 64×64。(a) 不做 Split-K 能產生幾個 output-tile CTA?(b) 若 GPU 有 108 個 SM,這樣夠填滿嗎?(c) Split-K = 16 後 CTA 數變多少?代價是什麼?
+
+<Solution>
+(a) output tiles = `(64/64) * (64/64) = 1` → 只有 **1 個 CTA**。
+
+(b) 完全填不滿:108 個 SM 只有 1 個在工作,利用率 `<1%`。這是典型的「小 M、N + 大 K」under-fill。
+
+(c) Split-K = 16 沿 K 切 16 段,每段一個 CTA → `1 * 16 = 16` 個 CTA(仍不滿 108,但好很多;可再配合多 output tile)。代價:各 CTA 只算 partial sum,需要一次額外的 reduction(atomicAdd 或第二個 kernel)把 16 份部分和合併,並多一點數值誤差風險(見第 13 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="C5" title="Double buffering 的 latency 重疊" kind="paper" level="挑戰">
+GEMM 主迴圈每個 k-tile:load 花 `L` cycles、compute 花 `C` cycles。(a) 單 buffer(load 後才 compute)每 tile 約 `L + C`;double buffering 理想情況每 tile 約多少?(b) 什麼條件下 double buffering 幾乎完全隱藏 load?
+
+<Solution>
+(a) double buffering 讓下一 tile 的 load 與當前 tile 的 compute 重疊,每 tile 約 `max(L, C)`(而非 `L + C`)。
+
+(b) 當 `C >= L`(compute 時間足以覆蓋 load 時間)時,load 幾乎完全被藏在 compute 後面,主迴圈變成 compute-bound。若 `L > C`,則仍受 load 限制,需要更大 tile(提高 C)或更多 pipeline stage。這是 software pipelining 的核心權衡(見第 12、14 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="C6" title="從 metrics 回推 bottleneck" kind="paper" level="挑戰">
+profiler 顯示某 kernel:Memory throughput 92%、Compute (SM) 28%、主要 stall 是 `Long Scoreboard`。(a) 這是哪一類 bound?(b) 下一步優化方向?(c) 若改完後 Memory 降到 40%、Compute 升到 85%,bound 類型如何轉變?
+
+<Solution>
+(a) Memory 高、Compute 低、stall 在等 global memory → **memory-bound**。
+
+(b) 減少 / 加速 memory traffic:提高 coalescing、增加 data reuse(tiling / register blocking 提高 AI)、或用 vectorized load;也可增加 latency hiding(更多 warp 或 prefetch)。
+
+(c) 轉成 **compute-bound**:瓶頸移到算術單元。接下來的優化改看 ILP、FMA 使用率、必要時上 Tensor Core / MFMA。這種 bound 遷移正是 GEMM 各優化步驟的典型軌跡(見第 16 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="C7" title="跑完整 GEMM 階梯" kind="code" level="進階">
+依序執行 `kernels/03-gemm/sgemm_step0_naive` 到 `sgemm_step4_double_buffer`,記錄每一步的 GFLOP/s。畫出(或列表)每步相對前一步的加速比,並指出哪一步在你的硬體上帶來最大跳躍。用本 track 的概念解釋原因。
+
+<Solution>
+典型觀察:step0→step1(shared tiling)因為把零 reuse 變成 tile reuse,通常是最大的單步跳躍;step1→step2(register tiling)再攤薄 shared memory bandwidth;step3(vectorized)、step4(double buffering)提供遞減但實在的增益。實際數字與「哪一步最大」依 GPU 而異——重點是能用 arithmetic intensity(C1/C2)與 latency 重疊(C5)解釋你看到的曲線。把數字餵給 `scripts/bench_all.py` 可產生你自己的 BenchmarkComparison 圖表。
+</Solution>
+</Exercise>
+
+<Exercise id="C8" title="量測 Split-K 對瘦長矩陣的效果" kind="code" level="挑戰">
+執行 `kernels/05-advanced-scheduling/split_k_gemm`(M、N 小、K 大)。比較 `gemm_plain` 與 `gemm_split_k` 的 GFLOP/s。再把 K 改小(例如 512)重新編譯,觀察 Split-K 的優勢是否縮小,並解釋。
+
+<Solution>
+K 大時,plain GEMM 只有極少 output-tile CTA,GPU 嚴重 under-fill,Split-K 用 K 維平行度補足 CTA 數 → 明顯加速(即使多付一次 reduction)。K 變小後,一來 plain 版本身工作量小、二來 Split-K 能切的段數變少、reduction overhead 佔比升高,優勢縮小甚至反轉。這印證 Split-K 的適用時機是「M、N 小且 K 夠大」(見 C4 與第 13 章)。修改 K 後記得同步調整 correctness 容忍度不需要變(邏輯不變)。
+</Solution>
+</Exercise>

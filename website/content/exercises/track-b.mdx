@@ -1,0 +1,129 @@
+# Track B 練習:coalescing、bank conflict、occupancy、reduction
+
+對應第 6–11 章。假設 warp = 32、transaction = 128 bytes、`float` = 4 bytes、shared memory 為 32 banks(每 bank 每 4 bytes 交錯)。
+
+<Exercise id="B1" title="Transaction 計數" kind="paper" level="入門">
+一個 warp 的 32 個 threads 存取 `a[i * stride]`(`float` 陣列,起始對齊)。分別計算 stride = 1、stride = 2、stride = 32 時,需要幾個 128-byte transaction,以及 bandwidth efficiency。
+
+<Solution>
+一個 128-byte segment 容納 32 個 float。
+
+- stride = 1:32 個 threads 落在連續 32 個 float = 1 個 segment → **1 transaction**,efficiency = `128/128 = 100%`。
+- stride = 2:涵蓋 64 個 float 的範圍 = 2 個 segment → **2 transactions**,useful = 128 bytes / moved = 256 bytes → **50%**。
+- stride = 32:每個 thread 各落在不同 segment → **32 transactions**,useful 128 / moved `32*128` → **≈3.1%**。
+
+efficiency 隨 stride 惡化,對 bandwidth-bound kernel 直接壓低天花板。
+</Solution>
+</Exercise>
+
+<Exercise id="B2" title="AoS 轉 SoA" kind="paper" level="入門">
+粒子資料 `struct P { float x, y, z; }` 存成 `P arr[N]`,kernel 只更新每個粒子的 `x`。(a) 一個 warp 讀 `arr[i].x` 的 stride 是多少 float?(b) 改成 SoA(`float x[N], y[N], z[N]`)後 stride 是多少?(c) 這對 transaction 數的影響?
+
+<Solution>
+(a) AoS 下相鄰粒子的 `x` 相隔一整個 struct = 3 個 float,stride = 3 → 一個 warp 的存取散在多個 segment。
+
+(b) SoA 下 `x[i]` 連續,stride = 1。
+
+(c) AoS 大約要 3 倍的 transactions(讀進 y、z 卻用不到);SoA 只需 1 個 transaction、efficiency 100%。改資料佈局往往比改 kernel 邏輯更有效。
+</Solution>
+</Exercise>
+
+<Exercise id="B3" title="Bank conflict 判定" kind="paper" level="進階">
+shared memory 宣告 `__shared__ float tile[32][32]`。一個 warp 的 lane `t` 讀 `tile[t][0]`(即一整欄)。(a) 這些存取落在哪些 bank?會有幾路 conflict?(b) 改成 `tile[32][33]` 後,lane `t` 讀 `tile[t][0]` 的 bank 為何?為什麼 conflict 消失?
+
+<Solution>
+bank = `(address / 4) % 32`,以 float 為單位即 `linearIndex % 32`。
+
+(a) `tile[t][0]` 的線性索引 = `t * 32 + 0 = 32t`,`32t % 32 = 0` → 所有 32 個 lane 都落在 **bank 0** → **32-way conflict**,序列化。
+
+(b) padding 後每列 33 個 float,`tile[t][0]` 索引 = `t * 33`,`(33t) % 32 = t` → lane `t` 落在 bank `t`,32 個 lane 各佔不同 bank → **無 conflict**。這就是 transpose padding trick 的原理。
+</Solution>
+</Exercise>
+
+<Exercise id="B4" title="Occupancy limiter" kind="paper" level="進階">
+某 GPU 每 SM:65536 registers、可容 2048 threads(64 warps)。kernel 用 block = 256 threads、每 thread 64 registers。(a) register 限制下每 SM 能容幾個 block?(b) thread 上限下能容幾個 block?(c) limiter 是誰?theoretical occupancy 約多少?
+
+<Solution>
+(a) 每 block registers = `256 * 64 = 16384`。register 限制的 block 數 = `floor(65536 / 16384) = 4` blocks。
+
+(b) thread 上限:`floor(2048 / 256) = 8` blocks。
+
+(c) 取最小值 → limiter 是 **registers**,只能 4 blocks = `4 * 256 = 1024` threads = 32 warps。theoretical occupancy = `32 / 64 = 50%`。想提高,得降低每 thread 的 register 用量(例如 `__launch_bounds__` 或減少暫存變數)。
+</Solution>
+</Exercise>
+
+<Exercise id="B5" title="Occupancy 不是萬靈丹" kind="paper" level="挑戰">
+B4 的 kernel 若改成每 thread 用更多 register 算一個大 tile(register blocking),occupancy 掉到 25%,但單 thread 的獨立指令變多。為什麼實測反而可能變快?請用 latency hiding 的角度解釋。
+
+<Solution>
+latency hiding 有兩個來源:更多並行 warp(occupancy),或單一 warp 內更多彼此獨立的指令(ILP)。register blocking 讓每 thread 有多個獨立的 FMA 鏈,scheduler 可在等 memory 時切換到同 thread 的其他指令,即使 warp 數變少也能把 pipeline 餵飽。
+
+同時,大 tile 帶來更高的 data reuse 與 arithmetic intensity,收益常超過「少了幾個 warp」的損失。因此 occupancy 是手段不是目的,該看的是 profiler 的 stall 原因而非 occupancy 數字(見第 8 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="B6" title="Warp reduce 的可攜性 bug" kind="paper" level="進階">
+以下 warp reduce 在 NVIDIA 正確,搬到 AMD CDNA(wavefront = 64)卻算錯一半。找出 bug 並改正。
+
+```cpp
+for (int offset = 16; offset > 0; offset >>= 1)
+  val += __shfl_down_sync(0xffffffff, val, offset);
+```
+
+<Solution>
+bug:`16` 是寫死的 `32/2`,只 reduce 前 32 個 lane;wavefront = 64 時上半部從沒被加進來。mask `0xffffffff` 也只有 32 bits。
+
+改正:用 `warpSize` 推導步數,並在 HIP 用不帶 mask 的 `__shfl_down`:
+
+```cpp
+for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+  val += __shfl_down(val, offset);   // warpSize = 64 on CDNA
+```
+
+一律用 `warpSize` 而非常數,是跨平台 warp-level 程式的鐵律(見第 9 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="B7" title="Online softmax 的 rescale" kind="paper" level="挑戰">
+online softmax 逐元素維護 running max `m` 與 running denominator `d`。目前 `m = 3, d = 5`(在舊 max = 3 的基準下),下一個元素 `x = 7`。寫出更新後的 `m'` 與 `d'`,並解釋為什麼要對舊的 `d` 乘上 rescale 因子。
+
+<Solution>
+`m' = max(3, 7) = 7`。rescale:舊的 `d` 是以 `e^{x_i - 3}` 累加的,新基準是 7,必須把每一項乘 `e^{3 - 7}`:
+
+`d' = d * e^{m - m'} + e^{x - m'} = 5 * e^{3-7} + e^{7-7} = 5 * e^{-4} + 1 ≈ 5 * 0.0183 + 1 ≈ 1.0916`。
+
+rescale 讓「之前用舊 max 算的部分和」和「新元素」處於同一個數值基準,才能正確相加,同時全程保持 `exp` 的輸入 ≤ 0 避免 overflow。這是 FlashAttention 的核心(見第 10 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="B8" title="改寫 transpose 消除 bank conflict" kind="code" level="進階">
+`kernels/02-memory/transpose.cpp` 含 naive / shared / padded 三版。編譯執行,記錄三者的 effective bandwidth。然後把 `transposeShared` 的 `tile[32][32]` 改成 `tile[32][33]`,重新量測,確認它追上 padded 版。用 B3 的 bank 分析解釋差異。
+
+<Solution>
+`transposeShared` 的 `tile[32][32]` 在轉置讀取 `tile[threadIdx.x][threadIdx.y]` 時整個 warp 落在同一 bank(見 B3),32-way conflict 拖慢 shared memory 存取。改成 `[32][33]` 後 bank 錯開,conflict 消失,bandwidth 追上 `transposePadded`(後者本來就用 +1 padding)。correctness check 應維持通過,因為 padding 只影響佈局不影響數值。實測數字依硬體而異,但 padded > shared(conflict 版)的趨勢穩定。
+</Solution>
+</Exercise>
+
+<Exercise id="B9" title="實作 block reduce 並比較收尾方式" kind="code" level="挑戰">
+參考 `kernels/04-reductions-softmax/reduction.cpp`,實作一個 block reduction,提供兩種收尾:(a) 純 shared-memory tree 到 `s > 0`;(b) tree 到剩一個 warp、再用 warp shuffle 收尾。對同一輸入比較兩者時間與正確性。
+
+<Solution>
+兩者結果應相同(在浮點容忍度內);warp-shuffle 收尾省掉最後 5(或 6)輪的 `__syncthreads()` 與 shared memory 來回,通常略快。參考解在 <code>kernels/exercises/ex_b_block_reduce.cpp</code>,warp 收尾核心:
+
+```cpp
+// after the tree loop narrows to one warp:
+if (tid < warpSize) {
+  float v = smem[tid];
+  for (int o = warpSize / 2; o > 0; o >>= 1)
+#if defined(USE_CUDA)
+    v += __shfl_down_sync(0xffffffffu, v, o);
+#else
+    v += __shfl_down(v, o);
+#endif
+  if (tid == 0) out[blockIdx.x] = v;
+}
+```
+
+編譯執行:`./build/exercises/ex_b_block_reduce`,兩版都應通過 correctness check。
+</Solution>
+</Exercise>
