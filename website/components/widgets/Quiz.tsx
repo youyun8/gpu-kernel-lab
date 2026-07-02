@@ -1,0 +1,78 @@
+'use client';
+
+import { useId, useState } from 'react';
+
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  answer: number;
+  explanation: string;
+}
+
+export function Quiz({ questions }: { questions: QuizQuestion[] }) {
+  return (
+    <section aria-label="章末測驗" className="my-8 rounded-lg border border-surface-border bg-surface-raised/40 p-5">
+      <p className="mb-4 flex items-center gap-2 text-base font-semibold text-white">
+        <span aria-hidden>📝</span>
+        <span>章末測驗</span>
+      </p>
+      <ol className="space-y-6">
+        {questions.map((q, i) => (
+          <QuizItem key={i} index={i} question={q} />
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function QuizItem({ index, question }: { index: number; question: QuizQuestion }) {
+  const [selected, setSelected] = useState<number | null>(null);
+  const groupId = useId();
+  const answered = selected !== null;
+  const isCorrect = selected === question.answer;
+
+  return (
+    <li className="list-none">
+      <fieldset>
+        <legend className="mb-2 font-medium text-slate-100">
+          {index + 1}. {question.question}
+        </legend>
+        <div className="space-y-2" role="radiogroup" aria-label={`第 ${index + 1} 題選項`}>
+          {question.options.map((option, oi) => {
+            const state =
+              answered && oi === question.answer
+                ? 'border-brand bg-brand/10 text-white'
+                : answered && oi === selected
+                  ? 'border-[#f85149] bg-[#f85149]/10 text-white'
+                  : 'border-surface-border hover:border-slate-500';
+            return (
+              <label
+                key={oi}
+                className={`flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2 text-sm transition ${state}`}
+              >
+                <input
+                  type="radio"
+                  name={groupId}
+                  className="accent-brand"
+                  checked={selected === oi}
+                  onChange={() => setSelected(oi)}
+                />
+                <span>{option}</span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
+      {answered && (
+        <p
+          className={`mt-2 rounded-md px-3 py-2 text-sm ${
+            isCorrect ? 'bg-brand/10 text-brand' : 'bg-[#f85149]/10 text-[#ff7b72]'
+          }`}
+          role="status"
+        >
+          {isCorrect ? '答對了!' : '再想想。'} {question.explanation}
+        </p>
+      )}
+    </li>
+  );
+}
