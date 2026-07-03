@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Memory Fences, In Depth</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --panel: #17212e;
+    --panel-2: #1e2b3a;
+    --ink: #e7edf3;
+    --muted: #9fb0c0;
+    --line: #2c3c4e;
+    --accent: #4fb6ff;
+    --accent-2: #ffcf6b;
+    --green: #57d19a;
+    --red: #ff7a7a;
+    --violet: #b79bff;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.6; }
+  a { color: var(--accent); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 96px; }
+  header.hero {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background:
+      radial-gradient(1200px 300px at 10% -20%, rgba(79,182,255,0.15), transparent),
+      linear-gradient(180deg, var(--panel-2), var(--panel));
+    padding: 28px 26px;
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: 0; }
+  header.hero p { margin: 4px 0 0; color: var(--muted); max-width: 70ch; }
+  h2 { margin: 44px 0 10px; font-size: 22px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  h3 { margin: 26px 0 8px; font-size: 17px; color: var(--accent-2); }
+  p { max-width: 78ch; }
+  code, pre { font-family: var(--mono); }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 0.92em; }
+  pre {
+    background: #0b1119; border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13.5px; line-height: 1.55;
+  }
+  pre .k { color: var(--violet); }
+  pre .c { color: #6f8296; font-style: italic; }
+  pre .s { color: var(--green); }
+  pre .f { color: var(--accent-2); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin: 16px 0; }
+  .note { border-left: 3px solid var(--accent); background: var(--panel-2); padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 14px 0; color: var(--ink); }
+  .warn { border-left: 3px solid var(--red); }
+  .good { border-left: 3px solid var(--green); }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .toc a { text-decoration: none; font-size: 13px; border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; color: var(--muted); }
+  .toc a:hover { color: var(--ink); border-color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--accent-2); font-weight: 600; }
+  .btn {
+    font-family: var(--sans); font-size: 13px; cursor: pointer; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 7px 13px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: #1c3d55; border-color: var(--accent); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); padding: 7px 12px; cursor: pointer; font-size: 13px; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: #1c3d55; color: var(--ink); }
+  canvas { display: block; width: 100%; border-radius: 8px; background: #0b1119; border: 1px solid var(--line); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .stat { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .stat b { color: var(--accent-2); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .kbd { font-family: var(--mono); font-size: 12px; background: #0b1119; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; }
+  .tag { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  footer { margin-top: 60px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag">Concurrency &middot; Memory Model</span>
+  <h1>Memory Fences, In Depth</h1>
+  <p>A memory fence (a.k.a. memory barrier) is an instruction that constrains the <em>order</em> in which memory
+  operations become visible to other threads. This page builds the intuition from the ground up: why reordering
+  happens, what a fence actually forbids, the four fence flavors, and how it all maps onto GPUs. Diagrams are
+  interactive: press the buttons, drag sliders, and watch the reorderings appear and disappear.</p>
+  <div class="toc">
+    <a href="#why">1. Why ordering breaks</a>
+    <a href="#what">2. What a fence is</a>
+    <a href="#store-buffer">3. Store-buffer demo</a>
+    <a href="#kinds">4. Four kinds of fence</a>
+    <a href="#acqrel">5. Acquire / Release</a>
+    <a href="#messagepassing">6. Message-passing demo</a>
+    <a href="#gpu">7. Fences on GPUs</a>
+    <a href="#cheatsheet">8. Cheat sheet</a>
+  </div>
+</header>
+
+<h2 id="why">1. Why memory ordering breaks in the first place</h2>
+<p>You wrote your program as an ordered list of statements. Almost nothing below you honors that order literally.
+Three separate layers are each allowed to reshuffle memory operations, as long as a <em>single</em> thread
+running alone cannot tell the difference:</p>
+
+<table>
+  <tr><th>Layer</th><th>What it reorders</th><th>Why</th></tr>
+  <tr><td>Compiler</td><td>Loads/stores across each other; hoists reads into registers</td><td>Optimization: register allocation, common-subexpression elimination, scheduling</td></tr>
+  <tr><td>CPU core (out-of-order)</td><td>Issues and completes instructions out of program order</td><td>Keep execution units busy while waiting on slow loads</td></tr>
+  <tr><td>Cache / store buffer</td><td>Delays a store's visibility; lets later loads pass earlier stores</td><td>Writes are buffered so the core need not stall on cache-coherence traffic</td></tr>
+</table>
+
+<p>The key phrase is <b>"single thread cannot tell."</b> The guarantee that reordering preserves single-thread
+behavior is called <em>sequential consistency per thread</em>. The moment a <b>second</b> thread observes your
+memory, all those hidden reorderings become visible and your assumptions fall apart. A fence is how you claw back
+the ordering guarantees you need, exactly where you need them, and nowhere else (because ordering is expensive).</p>
+
+<div class="note">
+  <b>Mental model.</b> Think of each thread as shouting its writes into a long hallway (the memory system).
+  Other threads hear those shouts, but not necessarily in the order you shouted them, and not immediately.
+  A fence is a rule like "everything I shouted before this point must be heard before anything I shout after it."
+</div>
+
+<h2 id="what">2. What a fence actually is (and is not)</h2>
+<p>A fence is a <b>one-sided or two-sided ordering constraint</b> placed <em>between</em> two memory operations in
+the same thread. It does three things and refuses to do a fourth:</p>
+<p><b>It does:</b> prevent specific reorderings across the fence line; force buffered writes to drain toward
+coherence; and (for acquire/release) create a synchronizes-with relationship that another thread can latch onto.</p>
+<p><b>It does not:</b> make an operation "instant," push data to other threads by itself, or lock anything.
+A fence is pure ordering, not mutual exclusion and not a broadcast. Two threads still have to <em>cooperate</em>:
+one releases, the other acquires, on the <em>same</em> variable.</p>
+
+<div class="panel">
+  <h3 style="margin-top:4px">The fence as a "no-cross" line</h3>
+  <p style="margin-top:0">Drag the fence up and down. Memory operations (blue = load, amber = store) can float
+  past each other freely, <em>except</em> they can never cross the red fence line. Hit <b>Shuffle</b> to let the
+  hardware reorder everything it legally can.</p>
+  <div class="controls">
+    <button class="btn primary" id="fenceShuffle">Shuffle (reorder)</button>
+    <button class="btn" id="fenceReset">Reset to program order</button>
+    <label class="stat">Fence position: <b id="fencePosLabel">4</b> / 8</label>
+    <input id="fenceSlider" type="range" min="1" max="7" value="4" style="flex:1; min-width:160px" />
+  </div>
+  <canvas id="fenceCanvas" height="300"></canvas>
+  <div class="legend">
+    <span><i class="dot" style="background:#4fb6ff"></i> load</span>
+    <span><i class="dot" style="background:#ffcf6b"></i> store</span>
+    <span><i class="dot" style="background:#ff7a7a"></i> fence line (nothing crosses)</span>
+    <span id="fenceStatus" style="color:var(--green)"></span>
+  </div>
+</div>
+
+<h2 id="store-buffer">3. The classic bug: store buffering</h2>
+<p>This is the canonical example that convinces people fences are real. Two threads, two flags, both start at 0:</p>
+<pre><span class="c">// x and y both start at 0.</span>
+<span class="f">Thread A</span>              <span class="f">Thread B</span>
+x = 1;                y = 1;
+r1 = y;              r2 = x;
+<span class="c">// Can r1 == 0 AND r2 == 0 at the end?</span></pre>
+<p>Intuitively "no": for both reads to see 0, both would have to run before both writes, which is impossible if the
+writes come first in each thread. Yet on x86, ARM, and every GPU, <b>r1 == 0 and r2 == 0 does happen.</b>
+Each core's store sits in its private <em>store buffer</em> while its own later load reads straight from memory,
+which still holds 0. The store hasn't reached the other core yet.</p>
+
+<div class="panel">
+  <h3 style="margin-top:4px">Interactive store-buffer simulator</h3>
+  <p style="margin-top:0">Run the two threads many times. With <b>no fence</b>, the store buffer sometimes delays
+  each write past the paired load, producing the "impossible" <code>(0,0)</code>. Insert a full fence between the
+  store and the load in each thread and that outcome disappears.</p>
+  <div class="controls">
+    <div class="seg" id="sbFenceSeg">
+      <button data-v="off" class="on">No fence</button>
+      <button data-v="on">Full fence between store &amp; load</button>
+    </div>
+    <button class="btn primary" id="sbRun">Run 1000 trials</button>
+    <button class="btn" id="sbStep">Single step (animate)</button>
+    <button class="btn" id="sbClear">Clear counts</button>
+  </div>
+  <canvas id="sbCanvas" height="260"></canvas>
+  <div class="legend" style="margin-top:12px">
+    <span class="stat">(r1,r2) = (1,0): <b id="sb10">0</b></span>
+    <span class="stat">(0,1): <b id="sb01">0</b></span>
+    <span class="stat">(1,1): <b id="sb11">0</b></span>
+    <span class="stat" style="color:var(--red)">(0,0) "impossible": <b id="sb00">0</b></span>
+    <span class="stat">total: <b id="sbTot">0</b></span>
+  </div>
+</div>
+
+<h2 id="kinds">4. The four kinds of fence</h2>
+<p>Fences are classified by which pairs of operations they keep in order. Read these as "the earlier operation
+cannot sink below the fence, and/or the later one cannot rise above it."</p>
+<table>
+  <tr><th>Fence</th><th>Guarantees</th><th>Cost</th><th>Typical use</th></tr>
+  <tr><td><b>LoadLoad</b></td><td>Loads before the fence complete before loads after it</td><td>cheap</td><td>After reading a flag, before reading the data it guards</td></tr>
+  <tr><td><b>StoreStore</b></td><td>Stores before the fence are visible before stores after it</td><td>cheap</td><td>After writing data, before writing the "ready" flag</td></tr>
+  <tr><td><b>LoadStore</b></td><td>Loads before the fence happen before stores after it</td><td>cheap</td><td>Rare on its own; prevents a later write leaking past an earlier read</td></tr>
+  <tr><td><b>StoreLoad</b></td><td>Stores before the fence are visible before loads after it</td><td><b>expensive</b></td><td>The store-buffer fix above; the only barrier a full fence really needs on x86</td></tr>
+</table>
+<div class="note warn">
+  <b>StoreLoad is the pricey one.</b> It is the only ordering x86 does <em>not</em> give you for free, because it
+  requires draining the store buffer. That is exactly why <code>mfence</code> / <code>LOCK</code>-prefixed atomics
+  are the costly instructions, and why the store-buffer bug above needs a genuine full fence to fix.
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:4px">Which reorderings each fence blocks</h3>
+  <p style="margin-top:0">Pick a fence type. The matrix shows every "earlier op &rarr; later op" pair; green cells
+  are pairs the fence keeps in order, faded cells are pairs it still lets the hardware reorder.</p>
+  <div class="controls">
+    <div class="seg" id="matrixSeg">
+      <button data-v="LoadLoad" class="on">LoadLoad</button>
+      <button data-v="StoreStore">StoreStore</button>
+      <button data-v="LoadStore">LoadStore</button>
+      <button data-v="StoreLoad">StoreLoad</button>
+      <button data-v="Full">Full (all four)</button>
+    </div>
+  </div>
+  <canvas id="matrixCanvas" height="240"></canvas>
+</div>
+
+<h2 id="acqrel">5. Acquire and release: the usable abstraction</h2>
+<p>Nobody wants to hand-pick LoadLoad vs StoreStore all day. Modern languages package the two useful combinations
+into <b>acquire</b> and <b>release</b> semantics, which pair up like a lock:</p>
+<p><b>Release</b> (used on a store) = LoadStore + StoreStore. Everything you did before the release stays before it.
+Nothing sinks below. It "publishes" your prior writes.</p>
+<p><b>Acquire</b> (used on a load) = LoadLoad + LoadStore. Everything after the acquire stays after it. Nothing
+rises above. It "subscribes" to writes published by a release on the same variable.</p>
+
+<pre><span class="c">// The one pattern to remember. flag is atomic.</span>
+<span class="f">Producer</span>                          <span class="f">Consumer</span>
+data = 42;                        <span class="k">while</span> (flag.load(<span class="s">acquire</span>) == 0) {}
+flag.store(1, <span class="s">release</span>);   <span class="k"></span>       assert(data == 42);  <span class="c">// guaranteed</span></pre>
+
+<p>The release on <code>flag</code> guarantees <code>data = 42</code> is visible <em>before</em> the flag flips.
+The acquire on <code>flag</code> guarantees the consumer's read of <code>data</code> happens <em>after</em> it
+sees the flag. Together they form a <b>synchronizes-with</b> edge: a promise that everything before the release is
+visible to everything after the matching acquire. This is the backbone of lock-free queues, spinlocks, and
+one-time initialization.</p>
+
+<div class="note good">
+  <b>Rule of thumb.</b> Release when you <em>publish</em> (write data, then flip a flag). Acquire when you
+  <em>consume</em> (read a flag, then read the data). They must operate on the <em>same</em> atomic variable to
+  synchronize. A lone release or lone acquire orders your own thread but syncs with nothing.
+</div>
+
+<h2 id="messagepassing">6. Message-passing demo (release/acquire vs relaxed)</h2>
+<div class="panel">
+  <p style="margin-top:0">The producer writes a payload, then raises a flag. The consumer waits on the flag, then
+  reads the payload. Watch what happens when the flag is raised with <b>relaxed</b> ordering (the payload write can
+  still be in flight) versus <b>release/acquire</b> (the payload is guaranteed published first). Faded boxes are
+  writes still stuck in the store buffer / not yet visible.</p>
+  <div class="controls">
+    <div class="seg" id="mpSeg">
+      <button data-v="relaxed" class="on">relaxed flag</button>
+      <button data-v="acqrel">release / acquire</button>
+    </div>
+    <button class="btn primary" id="mpPlay">Play</button>
+    <button class="btn" id="mpReset">Reset</button>
+  </div>
+  <canvas id="mpCanvas" height="300"></canvas>
+  <div class="legend">
+    <span><i class="dot" style="background:#ffcf6b"></i> store</span>
+    <span><i class="dot" style="background:#4fb6ff"></i> load</span>
+    <span><i class="dot" style="background:#57d19a"></i> visible / consistent</span>
+    <span><i class="dot" style="background:#ff7a7a"></i> torn read (bug)</span>
+    <span id="mpStatus" class="stat"></span>
+  </div>
+</div>
+
+<h2 id="gpu">7. Memory fences on GPUs</h2>
+<p>This repo is a GPU kernel lab, so here is where fences bite in CUDA / HIP. GPUs have a <b>weak</b> memory model
+and an extra dimension CPUs lack: a <em>scope hierarchy</em>. A fence must specify not just <em>what</em> to order
+but <em>how far</em> the ordering reaches.</p>
+
+<table>
+  <tr><th>Primitive</th><th>Scope</th><th>Orders visibility to...</th></tr>
+  <tr><td><code>__threadfence_block()</code></td><td>Thread block (CTA)</td><td>Other threads in the same block</td></tr>
+  <tr><td><code>__threadfence()</code></td><td>Device</td><td>All threads on the GPU (global + shared memory)</td></tr>
+  <tr><td><code>__threadfence_system()</code></td><td>System</td><td>Other GPUs and the host CPU (over PCIe/NVLink)</td></tr>
+  <tr><td><code>__syncthreads()</code></td><td>Block</td><td><b>Barrier + fence:</b> waits for all threads AND orders shared memory</td></tr>
+</table>
+
+<div class="note warn">
+  <b>Fence vs barrier, a common mix-up.</b> <code>__syncthreads()</code> is a <em>barrier</em>: every thread in the
+  block waits until all arrive, and it also fences shared memory. <code>__threadfence()</code> is <em>only</em> a
+  fence: it orders one thread's memory operations but waits for nobody. You need the fence (not just a barrier)
+  when threads in different blocks communicate through global memory, because <code>__syncthreads()</code> cannot
+  synchronize across blocks.
+</div>
+
+<h3>The canonical GPU example: the last-block reduction</h3>
+<p>Many blocks each write a partial result to global memory, then atomically increment a counter. The <em>last</em>
+block to finish reads all partials and combines them. Without a fence, the last block may read partials that are
+still sitting in another block's write path, even though the counter says "everyone's done."</p>
+<pre><span class="k">__global__</span> <span class="k">void</span> <span class="f">reduce</span>(<span class="k">float</span>* partials, <span class="k">int</span>* count, <span class="k">float</span>* out) {
+  partials[blockIdx.x] = blockLocalSum();   <span class="c">// 1. publish my partial</span>
+  <span class="f">__threadfence</span>();                          <span class="c">// 2. make it visible device-wide BEFORE the counter bump</span>
+  <span class="k">if</span> (threadIdx.x == 0) {
+    <span class="k">int</span> done = <span class="f">atomicAdd</span>(count, 1) + 1;    <span class="c">// 3. announce completion</span>
+    <span class="k">if</span> (done == gridDim.x) {                 <span class="c">// 4. I'm last: everyone's partial is visible</span>
+      <span class="k">float</span> total = 0;
+      <span class="k">for</span> (<span class="k">int</span> i = 0; i &lt; gridDim.x; i++) total += partials[i];
+      *out = total;
+    }
+  }
+}</pre>
+<p>Remove line 2 and the code compiles, runs, and gives the right answer almost every time, which is what makes the
+bug so nasty. The fence is what guarantees the store on line 1 is globally visible before the <code>atomicAdd</code>
+on line 3 tells the world you finished.</p>
+
+<div class="panel">
+  <h3 style="margin-top:4px">GPU scope explorer</h3>
+  <p style="margin-top:0">Two threads want to communicate. Pick where they live and which fence the writer uses.
+  The diagram shows whether the fence's scope is wide enough to guarantee the reader sees the write.</p>
+  <div class="controls">
+    <label class="stat">Threads are in:</label>
+    <div class="seg" id="gpuWhere">
+      <button data-v="same-block" class="on">same block</button>
+      <button data-v="diff-block">different blocks, same GPU</button>
+      <button data-v="diff-gpu">different GPUs</button>
+    </div>
+  </div>
+  <div class="controls">
+    <label class="stat">Writer uses:</label>
+    <div class="seg" id="gpuFence">
+      <button data-v="none" class="on">no fence</button>
+      <button data-v="block">__threadfence_block</button>
+      <button data-v="device">__threadfence</button>
+      <button data-v="system">__threadfence_system</button>
+    </div>
+  </div>
+  <canvas id="gpuCanvas" height="280"></canvas>
+  <div class="legend"><span id="gpuVerdict" class="stat"></span></div>
+</div>
+
+<h2 id="cheatsheet">8. Cheat sheet</h2>
+<div class="grid2">
+  <div class="panel">
+    <h3 style="margin-top:2px">C++ / std::atomic</h3>
+    <pre><span class="c">// publish</span>
+data = v;
+flag.store(1, <span class="s">memory_order_release</span>);
+
+<span class="c">// consume</span>
+<span class="k">while</span>(!flag.load(<span class="s">memory_order_acquire</span>));
+use(data);
+
+<span class="c">// full standalone fence</span>
+std::atomic_thread_fence(<span class="s">memory_order_seq_cst</span>);</pre>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:2px">CUDA / HIP</h3>
+    <pre><span class="f">__threadfence_block</span>();   <span class="c">// within block</span>
+<span class="f">__threadfence</span>();         <span class="c">// whole device</span>
+<span class="f">__threadfence_system</span>();  <span class="c">// device + host</span>
+<span class="f">__syncthreads</span>();         <span class="c">// barrier + shared fence</span>
+
+<span class="c">// scoped atomics (CUDA)</span>
+atomicAdd_block(p, 1);
+atomicAdd_system(p, 1);</pre>
+  </div>
+</div>
+
+<div class="note">
+  <b>The whole page in four sentences.</b> Hardware and compilers reorder memory to go fast, and that only shows up
+  when a second thread looks. A fence forbids specific reorderings across a line in one thread. Acquire/release pair
+  a publisher and a subscriber on one variable to hand data over safely. On GPUs you additionally choose a
+  <em>scope</em> (block, device, system) so the ordering reaches as far as the reader lives, and remember that
+  <code>__syncthreads()</code> is a barrier while <code>__threadfence()</code> is only a fence.
+</div>
+
+<footer>
+  Interactive explainer. All simulations run locally in your browser; the "hardware" here is a small probabilistic
+  model that mimics store-buffer and weak-ordering behavior for teaching, not a cycle-accurate simulator.
+</footer>
+
+</div>
+
+<script>
+"use strict";
+const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+function fit(canvas) {
+  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const cssH = canvas.height;
+  canvas.width = Math.round(cssW * DPR);
+  canvas.height = Math.round(cssH * DPR);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  return { ctx, w: cssW, h: cssH };
+}
+const C = {
+  bg:"#0b1119", panel:"#17212e", ink:"#e7edf3", muted:"#9fb0c0", line:"#2c3c4e",
+  load:"#4fb6ff", store:"#ffcf6b", red:"#ff7a7a", green:"#57d19a", violet:"#b79bff"
+};
+function roundRect(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+
+/* ---------- 1. Fence no-cross diagram ---------- */
+(function(){
+  const canvas = document.getElementById("fenceCanvas");
+  const slider = document.getElementById("fenceSlider");
+  const posLabel = document.getElementById("fencePosLabel");
+  const status = document.getElementById("fenceStatus");
+  const N = 8;
+  // op: type L/S, original index; y is animated slot
+  let ops = [];
+  function reset(){
+    ops = [];
+    for(let i=0;i<N;i++){ ops.push({ type: (i%2===0?"S":"L"), slot:i, target:i }); }
+    draw();
+    status.textContent = "program order";
+  }
+  function shuffle(){
+    const fence = +slider.value; // ops with slot<fence are "above", >=fence "below"
+    // Reorder freely within each side of the fence, but never across it.
+    const top=[], bot=[];
+    ops.forEach(o=>{ (o.slot<fence?top:bot).push(o); });
+    shuffleArr(top); shuffleArr(bot);
+    let s=0; top.forEach(o=>o.slot=s++); bot.forEach(o=>o.slot=s++);
+    draw();
+    status.textContent = "reordered (nothing crossed the fence)";
+  }
+  function shuffleArr(a){ for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} }
+  function draw(){
+    const {ctx,w,h}=fit(canvas);
+    ctx.clearRect(0,0,w,h);
+    const fence=+slider.value;
+    const laneX=w*0.5, boxW=200, boxH=24, gap=6, top=24;
+    const slotY=s=>top+s*(boxH+gap);
+    // fence line
+    const fy=top+fence*(boxH+gap)-gap/2;
+    ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.setLineDash([7,5]);
+    ctx.beginPath();ctx.moveTo(20,fy);ctx.lineTo(w-20,fy);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=C.red; ctx.font="12px system-ui"; ctx.textAlign="left";
+    ctx.fillText("FENCE", w-72, fy-6);
+    // boxes
+    ctx.textAlign="left";
+    ops.forEach(o=>{
+      const y=slotY(o.slot);
+      const x=laneX-boxW/2;
+      ctx.fillStyle = o.type==="L"?C.load:C.store;
+      roundRect(ctx,x,y,boxW,boxH,5); ctx.globalAlpha=0.92; ctx.fill(); ctx.globalAlpha=1;
+      ctx.fillStyle="#0b1119"; ctx.font="bold 12px "+"ui-monospace,monospace";
+      const label=(o.type==="L"?"LOAD  r"+o.target:"STORE x"+o.target+" = "+o.target);
+      ctx.fillText(label, x+10, y+16);
+    });
+    posLabel.textContent=fence;
+  }
+  slider.addEventListener("input",draw);
+  document.getElementById("fenceShuffle").onclick=shuffle;
+  document.getElementById("fenceReset").onclick=reset;
+  window.addEventListener("resize",draw);
+  reset();
+})();
+
+/* ---------- 3. Store buffer simulator ---------- */
+(function(){
+  const canvas=document.getElementById("sbCanvas");
+  let fence=false;
+  const counts={"10":0,"01":0,"11":0,"00":0};
+  const seg=document.getElementById("sbFenceSeg");
+  seg.addEventListener("click",e=>{ const b=e.target.closest("button"); if(!b)return;
+    [...seg.children].forEach(c=>c.classList.remove("on")); b.classList.add("on");
+    fence=(b.dataset.v==="on"); draw(); });
+  function trial(){
+    // Model: without fence, each thread's store lands in buffer; its own later load
+    // may read old value 0. With fence, store is drained before load -> load sees fresh.
+    // Global memory sees stores in some interleave.
+    if(fence){
+      // StoreLoad ordering enforced: at least one thread's store is globally visible
+      // before the other's load. (0,0) impossible.
+      const opts=["10","01","11"];
+      return opts[Math.floor(Math.random()*3)];
+    } else {
+      // 4 microarchitectural interleavings, ~equal, including the (0,0) delayed-store case.
+      const r=Math.random();
+      if(r<0.25) return "00";
+      if(r<0.50) return "10";
+      if(r<0.75) return "01";
+      return "11";
+    }
+  }
+  function run(n){ for(let i=0;i<n;i++){counts[trial()]++;} render(); }
+  function render(){
+    document.getElementById("sb10").textContent=counts["10"];
+    document.getElementById("sb01").textContent=counts["01"];
+    document.getElementById("sb11").textContent=counts["11"];
+    document.getElementById("sb00").textContent=counts["00"];
+    const t=counts["10"]+counts["01"]+counts["11"]+counts["00"];
+    document.getElementById("sbTot").textContent=t;
+    draw();
+  }
+  function draw(){
+    const {ctx,w,h}=fit(canvas);
+    ctx.clearRect(0,0,w,h);
+    const keys=["10","01","11","00"];
+    const labels=["(1,0)","(0,1)","(1,1)","(0,0)"];
+    const colors=[C.store,C.load,C.green,C.red];
+    const total=Math.max(1,keys.reduce((s,k)=>s+counts[k],0));
+    const bw=(w-100)/keys.length, base=h-40, maxH=h-80;
+    ctx.font="12px system-ui";
+    keys.forEach((k,i)=>{
+      const x=60+i*bw, val=counts[k], bh=(val/total)*maxH;
+      ctx.fillStyle=colors[i]; ctx.globalAlpha=(k==="00"&&fence)?0.25:0.9;
+      roundRect(ctx,x,base-bh,bw-24,bh,4); ctx.fill(); ctx.globalAlpha=1;
+      ctx.fillStyle=C.ink; ctx.textAlign="center";
+      ctx.fillText(labels[i], x+(bw-24)/2, base+18);
+      ctx.fillStyle=C.muted;
+      const pct=total?((val/total)*100).toFixed(1)+"%":"0%";
+      ctx.fillText(pct, x+(bw-24)/2, base-bh-6);
+    });
+    ctx.fillStyle=fence?C.green:C.red; ctx.textAlign="left"; ctx.font="13px system-ui";
+    ctx.fillText(fence? "Full fence ON: (0,0) can never occur"
+                      : "No fence: (0,0) occurs ~25% of the time", 60, 20);
+  }
+  document.getElementById("sbRun").onclick=()=>run(1000);
+  document.getElementById("sbStep").onclick=()=>run(1);
+  document.getElementById("sbClear").onclick=()=>{for(const k in counts)counts[k]=0;render();};
+  window.addEventListener("resize",draw);
+  render();
+})();
+
+/* ---------- 4. Reordering matrix ---------- */
+(function(){
+  const canvas=document.getElementById("matrixCanvas");
+  let mode="LoadLoad";
+  const seg=document.getElementById("matrixSeg");
+  seg.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
+    [...seg.children].forEach(c=>c.classList.remove("on"));b.classList.add("on");
+    mode=b.dataset.v;draw();});
+  const ops=["Load","Store"];
+  function blocked(a,b){
+    const pair=a+b;
+    if(mode==="Full") return true;
+    return pair===mode;
+  }
+  function draw(){
+    const {ctx,w,h}=fit(canvas);
+    ctx.clearRect(0,0,w,h);
+    const cell=Math.min(90,(h-70)/2), ox=180, oy=50;
+    ctx.font="13px system-ui"; ctx.fillStyle=C.muted; ctx.textAlign="center";
+    ctx.fillText("later operation \u2193 / earlier \u2192", ox+cell, 22);
+    ctx.save();
+    for(let r=0;r<2;r++){ for(let c=0;c<2;c++){
+      const x=ox+c*cell, y=oy+r*cell;
+      const isB=blocked(ops[c],ops[r]);
+      ctx.fillStyle=isB?C.green:"#20303f";
+      ctx.globalAlpha=isB?0.85:1;
+      roundRect(ctx,x+3,y+3,cell-6,cell-6,7);ctx.fill();ctx.globalAlpha=1;
+      ctx.fillStyle=isB?"#062018":C.muted; ctx.font="bold 12px system-ui";
+      ctx.fillText(isB?"kept in order":"may reorder", x+cell/2, y+cell/2+4);
+    }}
+    ctx.restore();
+    ctx.fillStyle=C.accent||C.load; ctx.font="13px system-ui";
+    ctx.textAlign="right";
+    ctx.fillText("earlier: Load", ox-14, oy+cell*0.5);
+    ctx.fillText("earlier: Store", ox-14, oy+cell*1.5);
+    ctx.textAlign="center";
+    ctx.fillStyle=C.store;
+    ctx.fillText("later Load", ox+cell*0.5, oy-8);
+    ctx.fillText("later Store", ox+cell*1.5, oy-8);
+  }
+  window.addEventListener("resize",draw);
+  draw();
+})();
+
+/* ---------- 6. Message passing ---------- */
+(function(){
+  const canvas=document.getElementById("mpCanvas");
+  const status=document.getElementById("mpStatus");
+  let mode="relaxed", t=0, playing=false, raf=null;
+  const seg=document.getElementById("mpSeg");
+  seg.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
+    [...seg.children].forEach(c=>c.classList.remove("on"));b.classList.add("on");
+    mode=b.dataset.v;reset();});
+  function reset(){ t=0; playing=false; if(raf)cancelAnimationFrame(raf); status.textContent=""; draw(); }
+  function play(){ if(playing)return; playing=true; t=0; loop(); }
+  function loop(){ t+=0.012; if(t>=1){t=1;playing=false;draw();return;} draw(); raf=requestAnimationFrame(loop); }
+  // timeline: producer writes data (0-0.3), flips flag (0.35-0.5).
+  // relaxed: data visibility lags flag -> consumer may read stale.
+  function draw(){
+    const {ctx,w,h}=fit(canvas); ctx.clearRect(0,0,w,h);
+    const pY=70, cY=210;
+    ctx.font="13px system-ui"; ctx.fillStyle=C.violet; ctx.textAlign="left";
+    ctx.fillText("PRODUCER (core 0)", 20, 30);
+    ctx.fillStyle=C.violet; ctx.fillText("CONSUMER (core 1)", 20, 170);
+    // producer boxes
+    const dataDone=t>0.3, flagDone=t>0.5;
+    box(ctx, 20, pY, 150, "data = 42", C.store, dataDone?1:0.35);
+    if(mode==="acqrel"){
+      // release forces data visible before flag
+      box(ctx, 190, pY, 190, "flag.store(1, release)", C.store, flagDone?1:0.35);
+    } else {
+      box(ctx, 190, pY, 200, "flag.store(1, relaxed)", C.store, flagDone?1:0.35);
+    }
+    // visibility markers to memory (middle)
+    const midY=140;
+    ctx.strokeStyle=C.line; ctx.beginPath(); ctx.moveTo(20,midY);ctx.lineTo(w-20,midY);ctx.stroke();
+    ctx.fillStyle=C.muted; ctx.font="11px system-ui"; ctx.fillText("shared memory", w-110, midY-6);
+    // In relaxed, data becomes globally visible LATER than flag (the bug)
+    let dataVisT = (mode==="acqrel") ? 0.3 : 0.75;
+    let flagVisT = 0.5;
+    const dataVisible = t>dataVisT, flagVisible = t>flagVisT;
+    tick(ctx, 90, midY, "data\u2713", C.store, dataVisible);
+    tick(ctx, 300, midY, "flag\u2713", C.store, flagVisible);
+    // consumer
+    const seesFlag = flagVisible && t>0.6;
+    box(ctx, 20, cY, 220, "while(flag.acquire==0){}", C.load, seesFlag?1:0.5);
+    if(seesFlag){
+      const good = dataVisible; // did data arrive before we read it?
+      box(ctx, 260, cY, 150, good?"read data = 42":"read data = 0 !", good?C.green:C.red, 1);
+      status.textContent = good ? "consumer saw data = 42 (correct)"
+                                : "TORN READ: flag seen but data still stale";
+      status.style.color = good?C.green:C.red;
+    }
+  }
+  function box(ctx,x,y,wd,label,col,alpha){
+    ctx.globalAlpha=alpha; ctx.fillStyle=col; roundRect(ctx,x,y,wd,30,6);ctx.fill();
+    ctx.globalAlpha=1; ctx.fillStyle="#0b1119"; ctx.font="bold 12px ui-monospace,monospace";
+    ctx.textAlign="left"; ctx.fillText(label,x+10,y+20);
+  }
+  function tick(ctx,x,y,label,col,on){
+    ctx.fillStyle=on?C.green:"#33465a"; ctx.beginPath();ctx.arc(x,y,7,0,7);ctx.fill();
+    ctx.fillStyle=on?C.green:C.muted; ctx.font="11px system-ui"; ctx.textAlign="center";
+    ctx.fillText(label,x,y-12);
+  }
+  document.getElementById("mpPlay").onclick=play;
+  document.getElementById("mpReset").onclick=reset;
+  window.addEventListener("resize",draw);
+  reset();
+})();
+
+/* ---------- 7. GPU scope explorer ---------- */
+(function(){
+  const canvas=document.getElementById("gpuCanvas");
+  const verdict=document.getElementById("gpuVerdict");
+  let where="same-block", fence="none";
+  bindSeg("gpuWhere", v=>{where=v;draw();});
+  bindSeg("gpuFence", v=>{fence=v;draw();});
+  function bindSeg(id,cb){ const seg=document.getElementById(id);
+    seg.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
+      [...seg.children].forEach(c=>c.classList.remove("on"));b.classList.add("on");cb(b.dataset.v);});
+  }
+  const reach={none:0, block:1, device:2, system:3};
+  const need={"same-block":1, "diff-block":2, "diff-gpu":3};
+  function draw(){
+    const {ctx,w,h}=fit(canvas); ctx.clearRect(0,0,w,h);
+    // draw two GPUs as big rounded rects, blocks inside
+    const gpuW=(w-60)/2, gpuH=h-70, gy=20;
+    drawGPU(ctx, 20, gy, gpuW, gpuH, "GPU 0");
+    drawGPU(ctx, 40+gpuW, gy, gpuW, gpuH, "GPU 1");
+    // writer position
+    const writer={gpu:0, block:0};
+    let reader;
+    if(where==="same-block") reader={gpu:0,block:0};
+    else if(where==="diff-block") reader={gpu:0,block:1};
+    else reader={gpu:1,block:0};
+    thread(ctx, pos(writer,20,gy,gpuW,gpuH), "W", C.store, "writes x");
+    thread(ctx, pos(reader,20,gy,gpuW,gpuH,40+gpuW), "R", C.load, "reads x");
+    const ok = reach[fence] >= need[where];
+    verdict.textContent = ok
+      ? "\u2713 Guaranteed: "+fenceName()+" reaches "+scopeName()+" \u2265 the reader."
+      : "\u2717 Not guaranteed: "+fenceName()+" is too narrow to reach "+scopeName()+".";
+    verdict.style.color = ok?C.green:C.red;
+    // reach halo around writer
+    const wp=pos(writer,20,gy,gpuW,gpuH);
+    ctx.strokeStyle= ok?C.green:C.red; ctx.setLineDash([5,4]); ctx.lineWidth=2;
+    let radius = fence==="none"?26 : fence==="block"?70 : fence==="device"?gpuW*0.55 : gpuW*1.6;
+    ctx.beginPath();ctx.arc(wp.x,wp.y,radius,0,7);ctx.stroke();ctx.setLineDash([]);
+  }
+  function fenceName(){return {none:"no fence", block:"__threadfence_block", device:"__threadfence", system:"__threadfence_system"}[fence];}
+  function scopeName(){return {none:"nothing", block:"block scope", device:"device scope", system:"system scope"}[fence];}
+  function drawGPU(ctx,x,y,wd,ht,label){
+    ctx.fillStyle="#111b26"; ctx.strokeStyle=C.line; ctx.lineWidth=1.5;
+    roundRect(ctx,x,y,wd,ht,10);ctx.fill();ctx.stroke();
+    ctx.fillStyle=C.muted;ctx.font="12px system-ui";ctx.textAlign="left";ctx.fillText(label,x+12,y+20);
+    // two blocks
+    const bw=(wd-40)/2, bh=ht-60, by=y+34;
+    for(let i=0;i<2;i++){
+      const bx=x+14+i*(bw+12);
+      ctx.fillStyle="#182634";ctx.strokeStyle=C.line;
+      roundRect(ctx,bx,by,bw,bh,7);ctx.fill();ctx.stroke();
+      ctx.fillStyle=C.muted;ctx.font="11px system-ui";ctx.fillText("block "+i,bx+8,by+16);
+    }
+  }
+  function pos(t,x,y,wd,ht,gpu1x){
+    const gx = t.gpu===0? x : (gpu1x!==undefined?gpu1x:x);
+    // recompute block box center
+    const bw=(wd-40)/2, bh=ht-60, by=y+34;
+    const bx=gx+14+t.block*(bw+12);
+    return {x:bx+bw/2, y:by+bh/2+10};
+  }
+  function thread(ctx,p,letter,col,label){
+    ctx.fillStyle=col; ctx.beginPath();ctx.arc(p.x,p.y,16,0,7);ctx.fill();
+    ctx.fillStyle="#0b1119";ctx.font="bold 14px system-ui";ctx.textAlign="center";
+    ctx.fillText(letter,p.x,p.y+5);
+    ctx.fillStyle=C.ink;ctx.font="11px system-ui";ctx.fillText(label,p.x,p.y+32);
+  }
+  window.addEventListener("resize",draw);
+  draw();
+})();
+</script>
+</body>
+</html>
