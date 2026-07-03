@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Menu, X } from 'lucide-react';
-import { SettingsNavButton } from '@/components/SettingsModal';
+import { SettingsDialog } from '@/components/SettingsModal';
 import { ThemeToggle } from '@/components/ThemeToggle';
 
 interface NavItem {
@@ -19,6 +19,7 @@ interface NavItem {
  */
 export function MobileNav({ navItems, repo }: { navItems: NavItem[]; repo: string }) {
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -82,12 +83,23 @@ export function MobileNav({ navItems, repo }: { navItems: NavItem[]; repo: strin
                 </a>
               </li>
             </ul>
-            <div className="mt-3 border-t border-border pt-3" onClick={() => setOpen(false)}>
-              <SettingsNavButton />
+            <div className="mt-3 border-t border-border pt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  setSettingsOpen(true);
+                }}
+                className="block w-full rounded border border-border px-3 py-2.5 text-left text-sm text-muted-foreground transition hover:border-primary hover:text-foreground"
+              >
+                設定
+              </button>
             </div>
           </nav>
         </>
       )}
+
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
