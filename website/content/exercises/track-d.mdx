@@ -64,7 +64,7 @@ SiLU 導數: `d/dx [x·σ(x)] = σ(x) + x·σ(x)·(1−σ(x))`。 Forward 寫 `y
 </Exercise>
 
 <Exercise id="D7" title="Triton softmax 對照" kind="code" level="進階">
-執行 `kernels/06-pytorch-integration/triton/softmax_triton.py`, 確認它與 `torch.softmax` 的最大絕對誤差在容忍度內。 然後回答: Triton 版為了 numerical stability 做了什麼? 它比第 10 章手寫的 CUDA softmax 少寫了哪些底層細節?
+執行 `kernels/06-pytorch-integration/triton_examples/softmax_triton.py`, 確認它與 `torch.softmax` 的最大絕對誤差在容忍度內。 然後回答: Triton 版為了 numerical stability 做了什麼? 它比第 10 章手寫的 CUDA softmax 少寫了哪些底層細節?
 
 <Solution>
 Numerical stability: kernel 內 `x = x - tl.max(x, axis=0)` 先減 row max, 再 `exp`, 與手寫版一致 (避免 overflow)。

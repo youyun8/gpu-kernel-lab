@@ -18,7 +18,7 @@ pip install triton           # 第 20 章需要
 python profile_model.py
 python cpp_extension/test_gelu.py
 python load_inline/fused_bias_gelu.py
-python triton/softmax_triton.py
+python triton_examples/softmax_triton.py
 python custom_op_autograd/test_custom_op.py
 ```
 

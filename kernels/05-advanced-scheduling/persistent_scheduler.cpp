@@ -42,8 +42,17 @@ __global__ void runTasksStatic(const int* costs, unsigned int* out, int numTasks
 }
 
 __global__ void runTasksPersistent(const int* costs, unsigned int* out, int* nextTask, int numTasks) {
+  // The whole block must agree on which chunk it owns. Only thread 0 performs
+  // the atomic dequeue; the result is broadcast through shared memory so every
+  // thread takes the same control-flow path through the block-wide barriers in
+  // runTask()/blockReduceSum(). Letting every thread call atomicAdd() would give
+  // each thread a different `begin`, diverge them across the loop, and corrupt
+  // the __syncthreads()-based reduction (and can hang the block).
+  __shared__ int beginShared;
   while (true) {
-    int begin = atomicAdd(nextTask, kChunkSize);
+    if (threadIdx.x == 0) beginShared = atomicAdd(nextTask, kChunkSize);
+    __syncthreads();
+    int begin = beginShared;
     if (begin >= numTasks) break;
     int end = min(begin + kChunkSize, numTasks);
     for (int task = begin; task < end; ++task) {

@@ -77,14 +77,14 @@ Triton 仍需要你做 kernel 工程判斷:
 
 把 Triton 當成「幫你管理 thread 細節的 kernel language」, 而不是自動最佳化魔法。 Profiler 看到的 coalescing、occupancy、L2 hit、register spill, 仍然用前面章節的方式解讀。
 
-<LabBox path="kernels/06-pytorch-integration/triton">
+<LabBox path="kernels/06-pytorch-integration/triton_examples">
 `triton/` 目錄有 `softmax_triton.py` 與 `matmul_triton.py`, 各自對 PyTorch reference 做正確性比對並 benchmark, 印出 GB/s 或 GFLOP/s 與相對 `torch` 內建的比值。 若安裝了 Triton (CUDA 或 ROCm 版), 直接跑; 比較它和第 10、12 章手寫版本的效能與程式碼長度。
 </LabBox>
 
 <Solution>
 預期結果與判讀: softmax 的 Triton 版通常能打平甚至超越 `torch.softmax` (fused 單 kernel vs 內建的多 kernel 路徑), 而程式碼只有手寫 CUDA 版的三分之一長 — 這就是 block-level 抽象的槓桿。 matmul 的 Triton 版經 autotune 後常到 cuBLAS 的 80–95%, 首次執行慢是 `@triton.autotune` 在實測候選 config (冷啟動), 第二次起命中快取。 值得做的對照: 用 `ncu` 對 Triton kernel profiling — 你會看到它自動做了 coalescing 與 software pipelining, 但 register/occupancy 的取捨仍然可讀可調 (`num_warps`、`num_stages`)。
 
-完整程式: [softmax_triton.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/triton/softmax_triton.py)、[matmul_triton.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/triton/matmul_triton.py)。
+完整程式: [softmax_triton.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/triton_examples/softmax_triton.py)、[matmul_triton.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/triton_examples/matmul_triton.py)。
 </Solution>
 
 <Quiz

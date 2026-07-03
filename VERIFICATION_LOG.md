@@ -2,6 +2,38 @@
 
 每個階段的驗證結果與修復記錄 (依 prompt 的 Verification Gate 要求)。
 
+## 2026-07-03 Update — 全量 clean re-verification (獨立重跑, 非信任前次 log)
+
+環境: 8 × AMD Instinct MI355X (gfx950)、ROCm 7.2 (hipcc / AMD clang 22.0.0)、RCCL、cmake 3.31、g++ 11.4、PyTorch 2.9.1+rocm7.2.0 (8 GPUs visible)、Triton 3.6.0。
+
+方法: 從乾淨 build dir 重新 `cmake -B <dir> -S kernels -DCMAKE_BUILD_TYPE=Release` (自動偵測 HIP) + `cmake --build -j`, 逐一執行所有產出的 executable, 不信任前次 log 的宣稱。
+
+### Compiled kernels — 49/49 pass (修完 1 個 bug 後)
+
+- Clean build 0 error, 產生 49 個 executable (tracks 00–07 + exercises + access-patterns)。
+- 逐一實跑結果: 48 支首輪即 OK; **`05-advanced-scheduling/persistent_scheduler` 首輪 FAIL** (見下), 修復後 49/49 全 pass。
+- `07-multi-gpu-collectives/allreduce_bench` (RCCL) 在 8 GPU 實跑, correctness OK on all ranks, busbw 由 ~35 GB/s 升至 ~366 GB/s (1MB→256MB)。
+- data-race demos: 壞版仍可觀察 race, 修復版穩定正確 (與前次一致)。
+
+### Bug 1 (已修) — persistent_scheduler 正確性錯誤
+
+- 症狀: `tasks_persistent FAILED: task 0 got 204482 want 133693440` (static 版正確)。
+- 根因: `runTasksPersistent` 讓 block 內**每個 thread** 都呼叫 `atomicAdd(nextTask, kChunkSize)`, 造成各 thread 拿到不同 chunk、control flow 分歧, 導致 `blockReduceSum` 內的 `__syncthreads()` 執行次數不一致 → reduction 損壞 (亦有 barrier hang 風險)。
+- 修法: 僅 thread 0 做 atomic dequeue 寫入 `__shared__ int beginShared`, `__syncthreads()` 後全 block 讀同一 `begin`。 修復後 static/persistent 皆 correctness OK, 且 persistent 略快 (0.110 ms vs 0.125 ms), 正好印證章節論點。
+
+### Bug 2 (已修) — 目錄名 `triton/` 遮蔽已安裝的 triton 套件
+
+- 症狀: 依 README 於 `06-pytorch-integration/` 執行時, `import triton` 解析到 repo 目錄 (namespace package, `__file__=None`) 而非套件。 Triton 範例因此**誤報 "not installed; skipping"** (kernel 根本沒跑); 且該目錄下任何 torch 程式會在 `torch._dynamo` → `import triton.language` 崩潰 (`AttributeError`)。
+- 修法: `git mv kernels/06-pytorch-integration/triton kernels/.../triton_examples`, 並更新 4 處引用 (README、`d20-triton-intro.mdx` 兩處含 GitHub 連結、`exercises/track-d.mdx`)。
+
+### PyTorch integration (ch. 06) — 全 pass (CMake 外, 另跑)
+
+於 documented 目錄實跑全部通過: `load_inline/fused_bias_gelu` (fused 2.66×, torch.compile 3.63×)、`triton_examples/softmax_triton` (max abs err 7.5e-09)、`triton_examples/matmul_triton` (8.4e-05)、`custom_op_autograd/test_custom_op` (forward + torch.compile OK)、`profile_model` (輸出 trace)、`cpp_extension/test_gelu` (JIT 以 `--offload-arch=gfx950` 編譯, forward/backward max abs err 0)。
+
+### 清理 (stale files)
+
+移除 stale 產物: 舊 `build/` (6.7M)、`website/.next`、`website/out`、`website/tsconfig.tsbuildinfo`、`website/next-env.d.ts`、`kernels/06-pytorch-integration/trace.json`、以及 JIT hipify 產物 `gelu_kernel.hip` 與 test 產物 `baseline.json`。 保留 `node_modules` (live deps) 與 `.codex` (tooling state)。
+
 ## 2026-07-03 Update — 收尾批次 (任務 8 補完 + 全面實機驗證)
 
 環境: ROCm 7.2 (hipcc / AMD clang 22)、64 × AMD Instinct MI355X (gfx950)、RCCL `librccl.so.1` (7.2.0)、cmake 3.31.10、g++ 11.4、OpenMP、pthread。 Node v22 (容器內既有), npm 以 registry.npmjs.org tarball bootstrap 出 10.9.2。
