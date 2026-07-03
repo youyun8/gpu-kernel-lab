@@ -1,0 +1,98 @@
+# CTA Scheduling: Swizzle 與 Persistent Kernel
+
+第 5 章處理「tile 數**不夠**」的情況。 這一章相反: 當 tile 數**夠多**時, 它們被排上 SM 的**順序**會大幅影響 L2 cache 的命中率與尾端行為。 同一組 tile、同樣的 compute, 只是換個排程順序, 就能差 10–30%。
+
+## CTA Swizzle — 換 launch 順序換 L2 命中
+
+GEMM 的每個 output tile 都要讀一整條 A 的 row-band 與一整條 B 的 column-band。 相鄰的 output tile 共享這些 band。 問題是: **哪些 tile 同時在跑**, 決定了它們共享的 band 能不能留在 L2 被重複命中。
+
+預設的 row-major launch 順序讓同時活躍的 CTA 攤在 C 的一整列上 — 它們各自需要不同的 B column, 共享的 A row 很快被擠出 L2。 **Swizzle (rasterization)** 把 launch 順序重排成一塊塊, 讓鄰近時間啟動的 tile 在空間上也相鄰:
+
+<CtaSwizzleFigure />
+
+```cpp
+// Map the linear blockIdx to a swizzled (tileRow, tileCol) so consecutively
+// scheduled CTAs stay in a compact 2D block -> shared A/B bands hit in L2.
+int tilesN   = (n + BN - 1) / BN;
+int groupSz  = kSwizzle * tilesN;          // kSwizzle rows form one group
+int group    = blockIdx.x / groupSz;
+int inGroup  = blockIdx.x % groupSz;
+int tileRow  = group * kSwizzle + inGroup % kSwizzle;
+int tileCol  = inGroup / kSwizzle;
+```
+
+這個 `kSwizzle` (一組幾列) 是個純排程旋鈕, 不改變任何計算結果, 卻能顯著改善 L2 reuse。 它也是第 7 章 autotuning 會一起搜的參數之一。
+
+<Callout variant="insight" title="Swizzle 是免費的午餐嗎">
+幾乎是: 它不增加 FLOP、不增加 memory traffic, 只重排順序。 但最佳的 swizzle 因數依賴 L2 大小、tile 尺寸與矩陣形狀, 沒有一體適用的值 — 所以 library 用 heuristic 或 autotune 來挑。
+</Callout>
+
+## Persistent Kernel — 常駐 CTA 自己領工作
+
+傳統 GEMM 一個 output tile 一個 CTA, tile 多時就 launch 成千上萬個 CTA, 靠硬體排程器一波波換上換下。 每次 CTA 上下場都有 overhead, 而且 tile 之間無法共享已載入 register/shared 的資料。
+
+**Persistent kernel** 反過來: 只 launch 剛好填滿 GPU 的 CTA 數 (= SM 數 × 每 SM CTA 數), 讓它們**常駐**, 每個 CTA 跑一個迴圈, 從一個 **work queue** 反覆領取下一個 tile:
+
+```cpp
+// Persistent GEMM: launch exactly gridSize = numSMs * ctasPerSM CTAs, then
+// each one loops pulling tile indices from a shared atomic counter until drained.
+__global__ void sgemmPersistent(/* ... */, int numTiles, int* nextTile) {
+    for (int tile = atomicAdd(nextTile, 1); tile < numTiles; tile = atomicAdd(nextTile, 1)) {
+        int tileRow = tile / tilesN, tileCol = tile % tilesN;
+        computeOneTile(tileRow, tileCol);   // full tiled/MMA mainloop for this tile
+    }
+}
+```
+
+好處:
+
+- **省下反覆的 CTA launch / teardown overhead**, 尤其對很多小 tile 的情境。
+- **動態負載平衡**: 快的 CTA 自然領到更多 tile, 天然抵抗 tail effect (和 Stream-K 精神相通, Stream-K 常就是 persistent kernel 的一種)。
+- **跨 tile 保留狀態**: 常駐 CTA 可以攤銷 prologue、甚至在 tile 間 pipeline。
+
+代價是要自己管 work queue 的 atomic counter, 且 occupancy 要抓準 (launch 太多會回到被換上換下的老問題, 太少則填不滿)。 這是第 9 章 track「persistent kernels 與 work queues」的核心, 也是現代 library GEMM 的預設結構。
+
+## 把第 5、6 章接起來
+
+| 問題 | 症狀 | 工具 |
+| --- | --- | --- |
+| tile 數 < 硬體並行度 | 大半 SM 空轉 | Split-K / Stream-K (第 5 章) |
+| tile 數 ≫ 並行度, 但 L2 沒吃好 | memory 反覆重載同樣的 band | CTA swizzle (本章) |
+| 很多小 tile, launch overhead 高 / tail | 排程開銷、尾端不平衡 | persistent kernel (本章) |
+
+這三者可以疊加: 一個 production GEMM 常常是「persistent kernel + swizzle 排程 + 在 skinny shape 時切到 Stream-K」的組合 — 而選哪個組合、參數設多少, 就交給第 7 章的 autotuning。
+
+<LabBox path="kernels/05-advanced-scheduling">
+`kernels/05-advanced-scheduling` 內含 CTA swizzle 與 persistent scheduler 的範例。 拿一個大方陣 (tile 數遠多於 SM), 對比 row-major 與 swizzled 排程的 L2 hit rate (profiler 的 `lts__t_sector_hit_rate` 或 omniperf 對應 metric), 感受純排程改動帶來的差異。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'CTA swizzle 改善效能的機制是?',
+      options: ['減少 FLOP', '重排 CTA launch 順序, 讓同時活躍的 tile 在空間上相鄰, 共享的 A/B band 留在 L2 被重複命中', '降低精度', '增加 register'],
+      answer: 1,
+      explanation: 'Swizzle 不改變計算, 只改排程順序來提升 L2 reuse, 是接近免費的優化。',
+    },
+    {
+      question: 'Persistent kernel 的核心結構是?',
+      options: ['每個 tile launch 一個新 kernel', 'launch 剛好填滿 GPU 的常駐 CTA, 各自從 work queue 反覆領 tile 直到清空', '只用一個 CTA 算全部', '禁用 shared memory'],
+      answer: 1,
+      explanation: '常駐 CTA 從 atomic work queue 動態領工作, 省 launch overhead 並天然負載平衡。',
+    },
+    {
+      question: '以下哪個是 persistent kernel 的優勢, 而非 CTA swizzle 的?',
+      options: ['提高 L2 命中率', '動態負載平衡, 抵抗 tail effect', '減少 FLOP 數', '提高數值精度'],
+      answer: 1,
+      explanation: 'Swizzle 針對 L2 reuse; persistent kernel 針對 launch overhead 與動態負載平衡。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Threadblock Rasterization / Swizzling," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+    { citation: 'M. Osama et al., "Stream-K: Work-centric Parallel Decomposition," PPoPP 2023.', href: 'https://arxiv.org/abs/2301.03598' },
+    { citation: 'NVIDIA Corporation, "Persistent Kernels," CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html' },
+  ]}
+/>

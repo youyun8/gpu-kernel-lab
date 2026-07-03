@@ -21,6 +21,13 @@ import B9 from './b9-warp-level-programming.mdx';
 import B10 from './b10-reduction-softmax.mdx';
 import B11 from './b11-instruction-level-optimization.mdx';
 import C12 from './c12-gemm-optimization.mdx';
+import GM1 from './gm1-gemm-reuse-and-roofline.mdx';
+import GM2 from './gm2-hierarchical-tiling.mdx';
+import GM3 from './gm3-memory-pipeline.mdx';
+import GM4 from './gm4-tensor-core-mfma.mdx';
+import GM5 from './gm5-split-k-stream-k.mdx';
+import GM6 from './gm6-cta-scheduling-tail.mdx';
+import GM7 from './gm7-epilogue-lowprecision-autotuning.mdx';
 import C13 from './c13-small-matrices-tail-effects.mdx';
 import C14 from './c14-warp-specialization-pipelines.mdx';
 import C15 from './c15-kernel-library-ecosystem.mdx';
@@ -64,6 +71,13 @@ export const chapterComponents: Record<string, ComponentType> = {
   'b10-reduction-softmax': B10,
   'b11-instruction-level-optimization': B11,
   'c12-gemm-optimization': C12,
+  'gm1-gemm-reuse-and-roofline': GM1,
+  'gm2-hierarchical-tiling': GM2,
+  'gm3-memory-pipeline': GM3,
+  'gm4-tensor-core-mfma': GM4,
+  'gm5-split-k-stream-k': GM5,
+  'gm6-cta-scheduling-tail': GM6,
+  'gm7-epilogue-lowprecision-autotuning': GM7,
   'c13-small-matrices-tail-effects': C13,
   'c14-warp-specialization-pipelines': C14,
   'c15-kernel-library-ecosystem': C15,

@@ -18,7 +18,7 @@ export interface TrackMeta {
 export const tracks: TrackMeta[] = [
   {
     id: 'p-parallelization',
-    label: 'Track 0 — 平行化基礎',
+    label: 'Track 1 — 平行化基礎',
     level: 'Foundations',
     color: '#d29922',
     description:
@@ -60,7 +60,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'm-memory-hierarchy',
-    label: 'Track M — Memory Hierarchy',
+    label: 'Track 2 — Memory Hierarchy',
     level: 'Foundations',
     color: '#6e7681',
     description:
@@ -102,7 +102,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'a-basics',
-    label: 'Track A — 入門',
+    label: 'Track 3 — 入門',
     level: 'Beginner',
     color: '#39d353',
     description: '建立 GPU 的心智模型: 從硬體設計哲學到第一個能跑的 kernel, 以及如何正確測量效能。',
@@ -146,7 +146,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'b-intermediate',
-    label: 'Track B — 進階',
+    label: 'Track 4 — 進階',
     level: 'Intermediate',
     color: '#58a6ff',
     description: '深入 memory 與 execution model: coalescing、bank conflicts、occupancy、warp-level programming 與 reduction。',
@@ -197,7 +197,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'c-expert',
-    label: 'Track C — 專家',
+    label: 'Track 5 — 專家',
     level: 'Expert',
     color: '#f778ba',
     description: '貫穿式 GEMM 優化、小矩陣尾端效應、warp specialization pipeline, 以及 profiling 的系統化 workflow。',
@@ -240,8 +240,74 @@ export const tracks: TrackMeta[] = [
     ],
   },
   {
+    id: 'gemm-deep-dive',
+    label: 'Track 6 — GEMM 優化深入',
+    level: 'Expert',
+    color: '#39c5cf',
+    description:
+      '把 GEMM 拆成獨立技巧, 每個一節: reuse/roofline、block/warp/thread tiling、vectorized load 與 double buffering/cp.async pipeline、Tensor Core/MFMA、Split-K 與 Stream-K、CTA swizzle 與 persistent kernel, 以及 epilogue fusion/量化/autotuning。 每節都附視覺化圖解。',
+    chapters: [
+      {
+        slug: 'gm1-gemm-reuse-and-roofline',
+        num: 1,
+        title: 'GEMM 為什麼難: Reuse 與 Arithmetic Intensity',
+        summary:
+          'naive kernel 為何卡在 bandwidth roof、reuse 是唯一解藥、arithmetic intensity 與 roofline 框架, 以及整條優化階梯的全景。',
+        lab: 'kernels/03-gemm',
+      },
+      {
+        slug: 'gm2-hierarchical-tiling',
+        num: 2,
+        title: 'Tiling 階層: Block、Warp、Thread Tiling',
+        summary:
+          '同一塊 C 的三層切分: shared memory block tiling、register/thread tiling 的 outer product, 以及對齊 MMA 的 warp tiling。',
+        lab: 'kernels/03-gemm',
+      },
+      {
+        slug: 'gm3-memory-pipeline',
+        num: 3,
+        title: 'Memory Pipeline: Vectorized Load、Double Buffering、Async Copy',
+        summary:
+          'float4 向量化載入、double buffering software pipelining、cp.async/TMA 多 stage 非同步複製, 以及 swizzle 消除 bank conflict。',
+        lab: 'kernels/03-gemm',
+      },
+      {
+        slug: 'gm4-tensor-core-mfma',
+        num: 4,
+        title: 'Tensor Core / MFMA GEMM',
+        summary:
+          'warp 共同持有 fragment 的 MMA 抽象、硬體規定的 layout 與 swizzle 要求, 以及 fp16/bf16/tf32/fp8/int8 各精度路徑。',
+        lab: 'kernels/03-gemm',
+      },
+      {
+        slug: 'gm5-split-k-stream-k',
+        num: 5,
+        title: 'K 維平行化: Split-K 與 Stream-K',
+        summary:
+          'wave quantization 與尾端效應的動機、Split-K 沿 K 切段加 reduction、Stream-K 的 work-centric 均分, 以及 atomic vs 確定性 reduction。',
+        lab: 'kernels/05-advanced-scheduling',
+      },
+      {
+        slug: 'gm6-cta-scheduling-tail',
+        num: 6,
+        title: 'CTA Scheduling: Swizzle 與 Persistent Kernel',
+        summary:
+          'CTA swizzle/rasterization 提升 L2 reuse、persistent kernel 的 work queue 與動態負載平衡, 以及三種 scheduling 工具的取捨。',
+        lab: 'kernels/05-advanced-scheduling',
+      },
+      {
+        slug: 'gm7-epilogue-lowprecision-autotuning',
+        num: 7,
+        title: 'Epilogue、Low Precision 與 Autotuning',
+        summary:
+          'epilogue fusion 省尾端 traffic、量化 GEMM 的 scale/packing/dequant epilogue, 以及 template specialization 與 autotuning 收束所有旋鈕。',
+        lab: 'kernels/03-gemm',
+      },
+    ],
+  },
+  {
     id: 'd-pytorch',
-    label: 'Track D — PyTorch 實戰',
+    label: 'Track 7 — PyTorch 實戰',
     level: 'Practical',
     color: '#ffa657',
     description: '把前面所學帶進 PyTorch: profiler 找瓶頸、custom extension、autograd、fused kernel、Triton 與 torch.compile 整合。',
@@ -285,7 +351,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'e-libraries',
-    label: 'Track E — 生產級 library',
+    label: 'Track 8 — 生產級 library',
     level: 'Production',
     color: '#a371f7',
     description:
@@ -327,7 +393,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'f-production',
-    label: 'Track F — Production Tactics',
+    label: 'Track 9 — Production Tactics',
     level: 'Production',
     color: '#db6d28',
     description:
@@ -393,7 +459,7 @@ export const tracks: TrackMeta[] = [
   },
   {
     id: 'g-multi-gpu',
-    label: 'Track G — Multi-GPU / Collectives',
+    label: 'Track 10 — Multi-GPU / Collectives',
     level: 'Production',
     color: '#2f81f7',
     description:
@@ -461,9 +527,9 @@ export const exerciseSets: ExerciseSetMeta[] = [
   {
     slug: 'track-p',
     trackId: 'p-parallelization',
-    trackLabel: 'Track 0 — 平行化基礎',
+    trackLabel: 'Track 1 — 平行化基礎',
     trackColor: '#d29922',
-    title: 'Track 0 練習: Parallelization Foundations',
+    title: 'Track 1 練習: Parallelization Foundations',
     summary:
       'Decomposition、lost update interleaving、mutex/atomic/reduction/semaphore 選型、barrier 正確性, 以及 CPU/GPU race demos。',
     count: 8,
@@ -471,9 +537,9 @@ export const exerciseSets: ExerciseSetMeta[] = [
   {
     slug: 'track-m',
     trackId: 'm-memory-hierarchy',
-    trackLabel: 'Track M — Memory Hierarchy',
+    trackLabel: 'Track 2 — Memory Hierarchy',
     trackColor: '#6e7681',
-    title: 'Track M 練習: Memory Hierarchy',
+    title: 'Track 2 練習: Memory Hierarchy',
     summary:
       'Latency cycle 換算、bandwidth/roofline 計算、cache-line/transaction counting、tile 容量估算, 以及 stride/transpose/roofline programming labs。',
     count: 10,
@@ -481,45 +547,45 @@ export const exerciseSets: ExerciseSetMeta[] = [
   {
     slug: 'track-a',
     trackId: 'a-basics',
-    trackLabel: 'Track A — 入門',
+    trackLabel: 'Track 3 — 入門',
     trackColor: '#39d353',
-    title: 'Track A 練習: GPU 基礎與效能測量',
+    title: 'Track 3 練習: GPU 基礎與效能測量',
     summary: 'SIMT、thread indexing、memory hierarchy latency、bandwidth 計算、roofline 判讀。',
     count: 8,
   },
   {
     slug: 'track-b',
     trackId: 'b-intermediate',
-    trackLabel: 'Track B — 進階',
+    trackLabel: 'Track 4 — 進階',
     trackColor: '#58a6ff',
-    title: 'Track B 練習: Coalescing、Bank Conflict、Occupancy、Reduction',
+    title: 'Track 4 練習: Coalescing、Bank Conflict、Occupancy、Reduction',
     summary: 'transaction 計數、bank 對映、occupancy limiter、warp reduce、online softmax。',
     count: 9,
   },
   {
     slug: 'track-c',
     trackId: 'c-expert',
-    trackLabel: 'Track C — 專家',
+    trackLabel: 'Track 5 — 專家',
     trackColor: '#f778ba',
-    title: 'Track C 練習: GEMM、Tail Effect、Pipeline、Profiling',
+    title: 'Track 5 練習: GEMM、Tail Effect、Pipeline、Profiling',
     summary: 'arithmetic intensity、tile reuse、wave quantization、Split-K、bottleneck 診斷。',
     count: 8,
   },
   {
     slug: 'track-d',
     trackId: 'd-pytorch',
-    trackLabel: 'Track D — PyTorch 實戰',
+    trackLabel: 'Track 7 — PyTorch 實戰',
     trackColor: '#ffa657',
-    title: 'Track D 練習: Profiling、Custom Extension、Fusion、Triton',
+    title: 'Track 7 練習: Profiling、Custom Extension、Fusion、Triton',
     summary: 'launch overhead 估算、tensor 檢查、fused speedup、autograd、custom op 註冊。',
     count: 9,
   },
   {
     slug: 'track-e',
     trackId: 'e-libraries',
-    trackLabel: 'Track E — 生產級 library',
+    trackLabel: 'Track 8 — 生產級 library',
     trackColor: '#a371f7',
-    title: 'Track E 練習: CUTLASS、AMD 生態、Attention、推論引擎',
+    title: 'Track 8 練習: CUTLASS、AMD 生態、Attention、推論引擎',
     summary: 'CUTLASS 分層與 CuTe layout、CK/hipBLASLt/AITER 對照、FlashAttention 推導、prefill/decode 判讀。',
     count: 8,
   },

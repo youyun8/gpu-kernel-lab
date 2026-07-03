@@ -15,7 +15,7 @@ export default function RoadmapPage() {
     <AppWidthContainer as="main" className="px-4 py-12">
       <h1 className="text-3xl font-bold text-foreground">學習路線圖</h1>
       <p className="mt-3 max-w-2xl text-muted-foreground">
-        建議依序完成 Track A → B → C, 建立完整的 mental model; Track D → F 會把技巧延伸到 PyTorch、library 與 production kernel。 每章都附互動元件、動手實驗與章末測驗。
+        建議依序完成 Track 1 → 6, 建立完整的 mental model 並深入 GEMM 優化; Track 7 → 10 會把技巧延伸到 PyTorch、library 與 production kernel。 每章都附互動元件、動手實驗與章末測驗。
       </p>
       <div className="mt-5 flex flex-wrap items-center gap-3">
         <Link

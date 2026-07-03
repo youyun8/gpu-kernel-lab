@@ -2,8 +2,13 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BookText, PanelLeft, PanelLeftClose, X } from 'lucide-react';
+import { BookText, ChevronRight, PanelLeft, PanelLeftClose, X } from 'lucide-react';
 import { tracks } from '@/lib/curriculum';
+
+/** Which track owns a given chapter slug — used to auto-expand the active track. */
+function trackIdForSlug(slug: string): string | undefined {
+  return tracks.find((track) => track.chapters.some((chapter) => chapter.slug === slug))?.id;
+}
 
 const kSidebarWidthKey = 'chapter-sidebar-width';
 const kMinWidth = 180;
@@ -16,7 +21,12 @@ interface PageAnchor {
 }
 
 /** Shared track list + "On This Page" markup, reused by the desktop rail and
- * the mobile drawer. `onNavigate` lets the drawer close itself on selection. */
+ * the mobile drawer. `onNavigate` lets the drawer close itself on selection.
+ *
+ * The track list is a collapsible tree: each track is a disclosure header that
+ * expands to reveal its nested chapters. The track owning the active chapter is
+ * expanded by default (and re-expanded whenever navigation changes it), so the
+ * reader always sees where they are without hunting through a long flat list. */
 function SidebarLists({
   activeSlug,
   anchors,
@@ -26,36 +36,76 @@ function SidebarLists({
   anchors: PageAnchor[];
   onNavigate?: () => void;
 }) {
+  const activeTrackId = trackIdForSlug(activeSlug);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
+    activeTrackId ? { [activeTrackId]: true } : {},
+  );
+
+  // Keep the active track open as the reader navigates between chapters. Other
+  // tracks retain whatever open/closed state the reader last chose.
+  useEffect(() => {
+    if (activeTrackId) setExpanded((prev) => (prev[activeTrackId] ? prev : { ...prev, [activeTrackId]: true }));
+  }, [activeTrackId]);
+
+  const toggle = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
   return (
     <>
-      <nav aria-label="章節目錄" className="space-y-5 text-sm">
-        {tracks.map((track) => (
-          <div key={track.id}>
-            <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: track.color }} />
-              {track.label}
-            </p>
-            <ul className="space-y-0.5">
-              {track.chapters.map((chapter) => {
-                const active = chapter.slug === activeSlug;
-                return (
-                  <li key={chapter.slug}>
-                    <Link
-                      href={`/chapters/${chapter.slug}`}
-                      aria-current={active ? 'page' : undefined}
-                      onClick={onNavigate}
-                      className={`block rounded px-2 py-1.5 transition ${
-                        active ? 'bg-primary/15 font-medium text-primary' : 'text-muted-foreground hover:bg-card hover:text-foreground'
-                      }`}
-                    >
-                      <span className="font-mono text-xs opacity-60">{String(chapter.num).padStart(2, '0')}</span> {chapter.title}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
+      <nav aria-label="章節目錄" className="space-y-1 text-sm">
+        {tracks.map((track) => {
+          const open = expanded[track.id] ?? false;
+          const hasActive = track.id === activeTrackId;
+          const panelId = `track-panel-${track.id}`;
+          return (
+            <div key={track.id}>
+              <button
+                type="button"
+                onClick={() => toggle(track.id)}
+                aria-expanded={open}
+                aria-controls={panelId}
+                className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wide transition hover:bg-card ${
+                  hasActive ? 'text-foreground' : 'text-muted-foreground'
+                }`}
+              >
+                <ChevronRight
+                  aria-hidden
+                  className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+                />
+                <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: track.color }} />
+                <span className="min-w-0 flex-1 truncate normal-case">{track.label}</span>
+                <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {track.chapters.length}
+                </span>
+              </button>
+
+              {open && (
+                <ul
+                  id={panelId}
+                  className="mb-1 ml-[15px] space-y-0.5 border-l border-border pl-2"
+                  style={{ borderColor: hasActive ? track.color : undefined }}
+                >
+                  {track.chapters.map((chapter) => {
+                    const active = chapter.slug === activeSlug;
+                    return (
+                      <li key={chapter.slug}>
+                        <Link
+                          href={`/chapters/${chapter.slug}`}
+                          aria-current={active ? 'page' : undefined}
+                          onClick={onNavigate}
+                          className={`block rounded px-2 py-1.5 transition ${
+                            active ? 'bg-primary/15 font-medium text-primary' : 'text-muted-foreground hover:bg-card hover:text-foreground'
+                          }`}
+                        >
+                          <span className="font-mono text-xs opacity-60">{String(chapter.num).padStart(2, '0')}</span> {chapter.title}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
       </nav>
 
       {anchors.length > 0 && (

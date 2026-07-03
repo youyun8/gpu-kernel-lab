@@ -1,0 +1,114 @@
+# Memory Pipeline: Vectorized Load、Double Buffering、Async Copy
+
+Tiling (第 2 章) 把 global traffic 壓了下來, 但 kernel 還是會週期性地卡在「等 tile 從 memory 進來」。 這一章的四個技巧都在做同一件事: **讓資料的搬運與計算重疊**, 把 memory latency 藏起來。 每一個技巧獨立一節。
+
+## Vectorized (128-bit) Loads
+
+用 `float4` 一次搬 128 bits, 減少 load 指令數與 address 計算 overhead。 GEMM 裡它有兩個用武之地: global → shared 的搬運, 以及 shared → register 的讀取。 搭配 tile 尺寸設計, 讓每個 thread 的 load 都對齊 128-bit:
+
+```cpp
+// Global-to-shared copy, four floats at a time. Tile sizes are chosen so each
+// thread's slice is 16-byte aligned; the K dimension must be divisible by 4.
+const float4* src = reinterpret_cast<const float4*>(&A[row * k + t]);
+float4 v = src[threadIdx.x];
+sA[threadIdx.y][threadIdx.x * 4 + 0] = v.x;
+sA[threadIdx.y][threadIdx.x * 4 + 1] = v.y;
+sA[threadIdx.y][threadIdx.x * 4 + 2] = v.z;
+sA[threadIdx.y][threadIdx.x * 4 + 3] = v.w;
+```
+
+一次 128-bit transaction 取代四次 32-bit, memory 子系統的請求數少了 4 倍, 對已經 coalesced 的存取尤其有效。 代價是對齊要求變嚴: base pointer 與 K 都要能被 4 整除, 尾端 (第 6 章) 得特別處理。
+
+## Double Buffering — 把 load 藏進 compute
+
+單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著。 Double buffering 配置兩組 shared memory buffer: 算 buffer 0 的同時, 預取下一個 k-tile 進 buffer 1, 每輪交換 — 這就是 software pipelining。
+
+<DoubleBufferingFigure />
+
+```cpp
+// Two shared-memory stages: compute on `cur` while prefetching into `nxt`.
+__shared__ float sA[2][kTile][kTile];
+__shared__ float sB[2][kTile][kTile];
+int cur = 0;
+loadTile(sA[cur], sB[cur], /*t=*/0);
+__syncthreads();
+for (int t = kTile; t < k; t += kTile) {
+    int nxt = cur ^ 1;
+    loadTile(sA[nxt], sB[nxt], t);   // issue loads for the next tile
+    computeTile(sA[cur], sB[cur]);   // FMAs overlap the loads in flight
+    __syncthreads();
+    cur = nxt;
+}
+computeTile(sA[cur], sB[cur]);       // epilogue: last tile
+```
+
+理想情況每個 k-tile 的成本從 `L + C` 變成 `max(L, C)` — 當 compute 足以覆蓋 load, memory latency 就被完全藏掉。
+
+## Multi-stage Async Copy — cp.async 與 TMA
+
+傳統的 global → shared 搬運會先把資料經過 register 中轉 (load 到 register, 再 store 到 shared)。 這佔用 register、也讓 load 阻塞 warp。 Ampere 引入的 `cp.async` 讓資料**直接 DRAM → shared, 繞過 register**, 且是非同步的 — issue 出去後 warp 可以繼續算, 到需要時才 `cp.async.wait`。
+
+```cpp
+// Ampere+ cp.async: DRAM -> shared without staging through registers.
+// Kicks off N stages of prefetch, then waits one stage behind the compute.
+#include <cuda_pipeline.h>
+__pipeline_memcpy_async(&sA[stage][ty][tx], &A[row * k + t], sizeof(float4));
+__pipeline_commit();
+// ... later, before consuming `stage`:
+__pipeline_wait_prior(kStages - 1);
+__syncthreads();
+```
+
+因為 prefetch 不再佔用 register, pipeline 可以疊到 **3–5 個 stage** (不只 double)。 Hopper 的 **TMA** (Tensor Memory Accelerator) 更進一步, 用一個 descriptor 描述整塊 tile 的 copy, 連 address 計算都交給硬體。 AMD 側對應的機制是 LDS 的 direct-to-LDS 載入路徑與 `buffer_load` 系列指令。
+
+<Callout variant="warn" title="stage 數不是越多越好">
+每多一個 stage 就多一份 shared memory buffer, 直接吃掉 occupancy。 3-stage 通常是甜蜜點; 要疊更多得先確認 shared memory 容量與 register 壓力還有餘裕。 這是第 7 章 autotuning 的一個重要旋鈕。
+</Callout>
+
+## Swizzle — 讓 pipeline 不被 bank conflict 拖住
+
+把 tile 搬進 shared memory 後, thread (或 MMA 指令) 讀回來時若多個 lane 撞到同一個 bank, 就 serialize 了。 最簡單的解法是 **padding** (每列多補一個 element 讓 stride 錯開); 更進階、且 MMA 必需的是 **swizzle** — 用 XOR 之類的位元重排把 element 打散到不同 bank:
+
+```cpp
+// XOR swizzle: permute the column so threads of a warp hit distinct banks.
+// Common in MMA pipelines where the fragment layout is fixed by hardware.
+int swizzledCol = col ^ ((row & 7) << 2);
+sA[row][swizzledCol] = value;
+```
+
+Padding 簡單但浪費 shared memory 且對 128-bit 存取不一定夠; swizzle 不浪費容量, 但 index 計算較複雜 — 這也是第 4 章手寫 MMA kernel 困難、CUTLASS/CK 有價值的原因之一。
+
+<LabBox path="kernels/03-gemm">
+`sgemm_step3_vectorized` 與 `sgemm_step4_double_buffer` 對應本章前兩節。 用 `scripts/profile_ncu.sh` 觀察: 向量化後看 load 指令數下降、double buffering 後看 stall (long scoreboard) 減少。 cp.async / 多 stage 版本屬進階練習, 可在 double buffering 之上改寫。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'float4 向量化 load 的主要效益是?',
+      options: ['提高數值精度', '一次 128-bit transaction 取代四次 32-bit, 減少請求數與 address 計算', '自動避免 bank conflict', '減少 register 使用'],
+      answer: 1,
+      explanation: '128-bit 存取讓 memory 請求數少 4 倍, 對已 coalesced 的存取特別有效, 但對齊要求變嚴。',
+    },
+    {
+      question: 'Double buffering 的目的是?',
+      options: ['減少 register 使用', '讓下一個 k-tile 的 load 與當前 compute 重疊以隱藏 latency', '避免 bank conflict', '提高精度'],
+      answer: 1,
+      explanation: '兩組 buffer 一邊算一邊預取, 每個 k-tile 成本從 L+C 攤成 max(L,C)。',
+    },
+    {
+      question: 'cp.async 相對傳統 global→shared 搬運的關鍵優勢是?',
+      options: ['資料直接 DRAM→shared 繞過 register, 且非同步, 讓 pipeline 能疊更多 stage', '自動做 fp16 轉換', '不需要 __syncthreads', '把 shared memory 變大'],
+      answer: 0,
+      explanation: '不經 register 中轉, 省下 register 壓力並讓 prefetch 與 compute 真正非同步重疊。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Controlling Data Movement to Boost Performance on the NVIDIA Ampere Architecture," 2020.', href: 'https://developer.nvidia.com/blog/controlling-data-movement-to-boost-performance-on-ampere-architecture/' },
+    { citation: 'NVIDIA Corporation, "CUDA C++ Programming Guide: Asynchronous Data Copies," 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-data-copies' },
+    { citation: 'NVIDIA Corporation, "Efficient GEMM in CUDA (pipelining & swizzle)," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+  ]}
+/>

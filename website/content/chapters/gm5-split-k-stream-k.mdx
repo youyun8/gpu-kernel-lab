@@ -1,0 +1,116 @@
+# K 維平行化: Split-K 與 Stream-K
+
+前四章優化的是「一塊夠大的 GEMM 怎麼算得快」。 但真實世界的 GEMM 常是**怪形狀**: M、N 很小而 K 很長 (例如 attention 的某些投影、GEMV-like 的 shape)。 這時 output tile 的數量不足以填滿所有 SM, 大半的硬體在空轉 — 這是本章要解的問題, 而 Split-K 與 Stream-K 是兩個核心武器。
+
+## 尾端效應與 Wave Quantization (動機)
+
+GPU 一次能同時跑的 CTA 數有上限 (由 SM 數 × 每 SM 能容納的 CTA 數決定)。 CTA 以 **wave** 為單位排上去: 如果 output tile 數不是這個並行度的整數倍, 最後一波就只有半滿, 另一半 slot 空轉, 但整個 kernel 的時間仍以完整一波計。
+
+<WaveQuantizationFigure />
+
+當 M×N 的 tile 數本來就少 (skinny GEMM), 情況更糟: 可能連一波都填不滿, 大部分 SM 從頭到尾閒著。 傳統 tiling 沿 M、N 切分已經無能為力, 因為 output 就這麼大。 唯一還沒被利用的維度是 **K** — 那正是 Split-K / Stream-K 下手的地方。
+
+## Split-K
+
+Split-K 的想法很直接: 把每個 output tile 的 K-loop **切成 `splitK` 段, 每段交給一個不同的 CTA** 各算一份 partial sum, 最後把這些 partial 相加。 用平行度換一次額外的 reduction。
+
+<SplitKFigure />
+
+原本一個 CTA 從頭跑到尾的 K-loop, 現在被 `splitK` 個 CTA 分攤 — 活躍的 CTA 數瞬間乘上 `splitK`, 把空轉的 SM 填起來。 partial 的累加方式有兩種, 各有取捨:
+
+```cpp
+// Option A: atomic accumulation straight into C. Simple, one kernel, but
+// floating-point atomicAdd is non-associative -> results vary run to run.
+atomicAdd(&C[row * n + col], partial);
+
+// Option B: each split writes to a private slice of a workspace buffer, then a
+// separate deterministic reduction kernel sums the splits. More memory + a
+// second launch, but reproducible.
+workspace[splitId * (m * n) + row * n + col] = partial;
+// ... later: reduceKernel sums workspace[0..splitK) -> C
+```
+
+<Callout variant="warn" title="Split-K 的兩個代價">
+1. **數值**: `atomicAdd` 路徑因 float 加法非結合, 每次執行的 rounding 順序可能不同, 結果非確定 (deterministic 需求見第 9 章 track)。 2. **記憶體 / 額外 kernel**: workspace 路徑要多一塊 M×N×splitK 的暫存與一次 reduction launch。 `splitK` 也不是越大越好 — 切太細, reduction 與 launch overhead 會吃掉平行度的收益。
+</Callout>
+
+## Stream-K
+
+Split-K 仍以「整塊 tile 的整段 K」為分配單位, `splitK` 挑不好還是會有尾巴 (某些 CTA 早收工、某些還在跑)。 **Stream-K** 更進一步, 把負載平衡做到極致:
+
+> 把**所有 output tile 的所有 K-iterations 接成一條連續的工作流 (stream)**, 再平均切給**固定數量**的常駐 CTA (通常 = SM 數 × 每 SM 的 CTA 數)。
+
+<StreamKFigure />
+
+每個 CTA 拿到幾乎等量的 MAC 工作, 不管 GEMM 的形狀怎麼歪。 一個 output tile 可能由多個 CTA **接力**完成: CTA 0 算了它的前半段 K, CTA 1 算後半段, 兩者在交界處做一次 partial 的 fix-up reduction。 因為工作是「按總量均分」而非「按 tile 分」, wave quantization 的尾端浪費幾乎被消除。
+
+```cpp
+// Stream-K sketch: total work = numTiles * kIters, split evenly across a fixed
+// grid. Each CTA walks a contiguous [begin, end) slice of the global iteration
+// space; tiles straddling a CTA boundary get a partial fix-up at the seam.
+int totalWork = numTiles * kIters;
+int perCta    = (totalWork + gridDim.x - 1) / gridDim.x;
+int begin     = blockIdx.x * perCta;
+int end       = min(begin + perCta, totalWork);
+for (int w = begin; w < end; /* advance by whole tiles or partial spans */) {
+    int tile   = w / kIters;
+    int kStart = w % kIters;
+    int kStop  = min(kIters, (tile + 1) * kIters - tile * kIters); // clamp to tile end
+    accumulatePartial(tile, kStart, kStop);   // may be a fragment of a tile
+    // if this CTA finished a tile that another CTA started, reduce the seam
+}
+```
+
+代價是**排程與 fix-up 邏輯明顯更複雜**: 要處理跨界 tile 的 partial 累加、決定哪個 CTA 負責寫最終結果、以及 workspace 管理。 這也是為什麼 Stream-K 幾乎只在 library (CUTLASS 的 Stream-K scheduler) 裡見到, 而不是手寫。
+
+## 什麼時候用哪個
+
+| 情境 | 建議 |
+| --- | --- |
+| M、N 夠大, tile 數 ≫ SM 數 | 都不用, 標準 tiling 即可 |
+| K 長、M×N 中等, tile 數略少於整數波 | **Split-K** (簡單, splitK 取 2–8) |
+| 形狀極歪 / tile 數遠少於 SM / 追求極致負載平衡 | **Stream-K** (或直接用 library) |
+| 需要 bit-exact 可重現 | Split-K 走 workspace + deterministic reduction, 避開 atomic |
+
+第 6 章接著談另一組正交的 scheduling 技巧 (CTA swizzle、persistent kernel), 它們處理的是「當 tile 數**夠多**時, 怎麼排它們的順序來提高 L2 reuse」— 和本章「tile 數**不夠**時怎麼補平行度」互補。
+
+<LabBox path="kernels/05-advanced-scheduling">
+`kernels/05-advanced-scheduling` 下有 Split-K 與 CTA swizzle 的可執行範例。 用一個 skinny shape (例如 M=N=256, K=16384) 對比標準 tiling 與 Split-K 的 % of peak, 你會看到 Split-K 在這種形狀下把閒置的 SM 補起來的效果; 大方陣 shape 則幾乎沒差 (甚至因 reduction overhead 略降) — 這正說明 Split-K 是 shape-specific 的工具。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Wave quantization (尾端效應) 指的是?',
+      options: ['warp 內的 divergence', 'output tile 數不是硬體並行度的整數倍時, 最後一波半滿、其餘 slot 空轉', 'bank conflict 造成的 serialize', 'K 太長造成的 register spill'],
+      answer: 1,
+      explanation: 'CTA 以 wave 為單位排程, tile 數非並行度整數倍時最後一波浪費, kernel 時間仍以完整一波計。',
+    },
+    {
+      question: 'Split-K 的核心做法是?',
+      options: ['沿 M 切給多個 CTA', '把每個 output tile 的 K-loop 切成多段, 各 CTA 算 partial sum 後再 reduce', '把多個 GEMM 合成一次 launch', '降低精度以提高吞吐'],
+      answer: 1,
+      explanation: 'Split-K 沿 K 維平行化, 用一次額外 reduction 換取更多活躍 CTA 來填滿 SM。',
+    },
+    {
+      question: 'Stream-K 相對 Split-K 的主要差異是?',
+      options: ['Stream-K 不需要 reduction', 'Stream-K 把所有 tile 的 K-iterations 接成一條 stream 平均分給固定數量 CTA, 負載平衡更徹底但排程更複雜', 'Stream-K 只支援 fp16', 'Stream-K 不能跨 tile'],
+      answer: 1,
+      explanation: 'Stream-K 按總工作量均分而非按 tile 分, 一個 tile 可由多 CTA 接力, 幾乎消除尾端浪費。',
+    },
+    {
+      question: 'Split-K 用 atomicAdd 累加 partial 的主要副作用是?',
+      options: ['會 crash', 'float 加法非結合, 結果變成非確定 (run-to-run 不同)', '需要更多 register', '無法用於大矩陣'],
+      answer: 1,
+      explanation: 'atomicAdd 的 rounding 順序不定, 破壞可重現性; 需要 deterministic 時改走 workspace + reduction kernel。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'M. Osama et al., "Stream-K: Work-centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU," PPoPP 2023.', href: 'https://arxiv.org/abs/2301.03598' },
+    { citation: 'NVIDIA Corporation, "Parallelized Reduction (Split-K) in CUTLASS," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md#parallelized-reductions' },
+    { citation: 'NVIDIA Corporation, "CUTLASS 2.11: Stream-K," GitHub, 2023.', href: 'https://github.com/NVIDIA/cutlass/tree/main/examples/47_ampere_gemm_universal_streamk' },
+  ]}
+/>

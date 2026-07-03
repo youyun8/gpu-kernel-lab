@@ -1,0 +1,108 @@
+# Epilogue、Low Precision 與 Autotuning
+
+前六章把「主迴圈」榨乾了。 這一章收尾三件把手寫 kernel 變成 production GEMM 的事: 輸出端的 **epilogue fusion**、貫穿的 **low-precision / quantization**, 以及讓一份 kernel 適應千百種形狀的 **autotuning**。
+
+## Epilogue Fusion
+
+完整的 GEMM 不只是 $C = AB$, 而是 $C = \alpha AB + \beta C$, 尾端還常掛 bias、activation、dtype cast。 這段「accumulator 算完後、寫回 global memory 前」的程式叫 **epilogue**。
+
+<EpilogueFigure />
+
+如果把 bias + GELU 這類 elementwise 當成獨立 kernel, 就得把剛寫出的 C **再從 global memory 讀回來**做一次、再寫出去 — 一次多餘的完整 C 讀寫。 把它們融進 epilogue, 全部在 register 上就地做完, 省掉這趟 traffic:
+
+```cpp
+// Epilogue applied to the register-resident accumulator before the single
+// store. bias/activation/cast are fused -> C is written exactly once.
+float out = alpha * acc + beta * C[row * n + col];  // scale + (optional) residual
+out += bias[col];                                    // broadcast bias
+out = gelu(out);                                     // fused activation
+reinterpret_cast<half*>(C)[row * n + col] = __float2half(out);  // fused cast
+```
+
+這正是 cuBLASLt 的 epilogue 選項、CUTLASS 的 **epilogue visitor tree** 提供 fused GEMM 的機制 — 它們讓你用組合的方式描述一串 elementwise, library 幫你把它接在 mainloop 後、共用同一次 store。
+
+<Callout variant="warn" title="epilogue 也可能變成瓶頸">
+當 epilogue 太重 (複雜 activation、多個 residual、per-element scale), 或 vector width 太寬使 register 不夠, epilogue 本身會拖慢 store 階段。 對策: 拆 epilogue、降低 vector width, 或改用 library 的 visitor tree 讓它自動 tile。
+</Callout>
+
+## Low-Precision 與 Quantization
+
+低精度 (fp16/bf16/fp8/int8/int4) 在第 4 章談了 MMA 吞吐面; 這裡談**資料面**。 量化 GEMM 的瓶頸常從 FMA pipe 轉移到 scale 與 layout:
+
+- **Scale 粒度**: per-tensor (一個 scalar)、per-channel/per-row、per-block (如 fp8 的 block scaling)。 粒度越細越準, 但要 load 更多 scale、epilogue 更複雜。
+- **Packing / prepack**: int4 要把兩個值塞進一個 byte; weight 常在 offline **prepack** 成 kernel 偏好的 layout (interleave、swizzle), 避免 runtime 轉換。
+- **Dequant / requant epilogue**: int8 GEMM 的 accumulator 是 int32, epilogue 要 `* scale` 轉回 float (dequant), 或再量化成下一層的 int8 (requant)。
+- **Validation**: 低精度必然有誤差, correctness check 要用**相對 tolerance** 而非 bit-exact, 並注意 outlier channel。
+
+```cpp
+// int8 GEMM epilogue: int32 accumulator -> dequantized fp, per-row * per-col
+// scales (a common symmetric-quantization scheme), then requantize to int8.
+int32_t acc = /* MMA accumulator */;
+float deq   = acc * (aScale[row] * bScale[col]);   // dequant
+int8_t q    = quantize(deq * outInvScale);         // requant for the next layer
+```
+
+## Autotuning 與 Shape Specialization
+
+到這裡累積了一大堆旋鈕: tile 尺寸 (BM/BN/BK)、register tile (TM/TN)、pipeline stage 數、swizzle 因數、split-K 段數、vector width… 這些的最佳組合**強烈依賴 GPU 型號與矩陣形狀**, 沒有單一最佳 kernel。 這就是為什麼 cuBLAS/hipBLASLt 內含成千上萬個 kernel 變體。
+
+處理這個組合爆炸的手段:
+
+- **Template specialization**: 用 C++ template 把 tile 尺寸等編成編譯期常數, 產生多個特化 kernel, runtime 依 shape 用 **dispatch table** 選一個。
+- **Search + pruning**: 不可能試遍所有組合, 用 heuristic 或 cost model 先剪掉不合理的 (超過 shared memory 容量、occupancy 過低的), 只 benchmark 剩下的候選。
+- **Tuning cache**: 把「(GPU, shape) → 最佳 config」的結果快取起來 (Triton 的 autotune decorator、hipBLASLt 的 tuning file), 避免每次重搜。
+- **Codegen**: Triton / CUTLASS Python / Composable Kernel 用 code generation 從一份模板產生大量特化, 而不是手寫每一個。
+
+<Callout variant="insight" title="自己寫 vs. 用 library">
+到第 6 章為止的技巧, 手寫得到八九成 library 效能是可行的。 但最後一兩成、以及「對任意 shape 都穩」這件事, 幾乎必然要靠 autotuning 與大量特化 — 這正是 CUTLASS/CK/Triton 這類 library (第 8 章 track) 的核心價值。 知道每個旋鈕在做什麼 (前六章), 才有能力在 library 選錯、或需要客製 epilogue 時介入。
+</Callout>
+
+## 這個 Track 的總結
+
+| 章 | 一句話 |
+| --- | --- |
+| 1 | GEMM 慢是因為 reuse 太少, arithmetic intensity 太低 |
+| 2 | Block / warp / thread 三層 tiling 把 reuse 一層層放大 |
+| 3 | Vectorized load、double buffer、cp.async 把 memory latency 藏進 compute |
+| 4 | Tensor Core / MFMA 換更快的引擎, 代價是嚴格的 layout |
+| 5 | Split-K / Stream-K 用 K 維平行化救 skinny shape 的低 occupancy |
+| 6 | CTA swizzle 提升 L2 reuse, persistent kernel 動態負載平衡 |
+| 7 | Epilogue fusion 省尾端 traffic, 量化換吞吐, autotuning 收束所有旋鈕 |
+
+一句話收尾: **先讓 load coalesced, 再確保 tile reuse, 接著調 register tile 與 pipeline, 然後才碰 MMA 與 epilogue fusion; shape 歪就上 Split-K/Stream-K, 最後用 autotuning 把旋鈕鎖死。**
+
+<LabBox path="kernels/03-gemm">
+`kernels/03-gemm` 的 quantized epilogue 與 autotuning 範例對應本章。 試著在 `sgemm` 階梯上加一個 fused bias+ReLU epilogue, 量測相對「分離 elementwise kernel」的 end-to-end 節省; 再用 `scripts/bench_all.py` 掃幾組 tile 尺寸, 親眼看到不同 shape 的最佳 config 並不相同。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Epilogue fusion 省下的主要成本是?',
+      options: ['FLOP 數', '把 elementwise 融進 store 前, 省掉一次把 C 從 global memory 讀回再寫出的完整 traffic', 'register 使用', 'kernel 編譯時間'],
+      answer: 1,
+      explanation: '不 fuse 就要用獨立 kernel 讀回 C 再處理; fuse 後在 register 上就地做完, C 只寫一次。',
+    },
+    {
+      question: 'int8 量化 GEMM 的 epilogue 通常要做什麼?',
+      options: ['什麼都不用', '把 int32 accumulator 乘 scale 轉回 float (dequant), 視需要再 requantize', '重新做一次矩陣乘法', '把結果轉成 fp64'],
+      answer: 1,
+      explanation: 'int8 GEMM 累加在 int32, epilogue 負責 dequant (乘 row/col scale), 常再 requant 給下一層。',
+    },
+    {
+      question: '為什麼 GEMM library 內含成千上萬個 kernel 變體?',
+      options: ['為了佔硬碟空間', '最佳的 tile/pipeline/swizzle 等 config 強烈依賴 GPU 型號與矩陣形狀, 需要特化 + autotuning', '因為每個 GPU 廠商不同', 'fp16 與 fp32 需要完全不同的演算法'],
+      answer: 1,
+      explanation: '沒有單一最佳 kernel, library 用 template 特化 + 搜索 + tuning cache 覆蓋各種 (GPU, shape)。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Epilogue Visitor Trees," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/gemm_api_3x.md' },
+    { citation: 'NVIDIA Corporation, "cuBLASLt Epilogues," cuBLAS Library User Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cublas/index.html#cublasltepilogue-t' },
+    { citation: 'P. Tillet, H. T. Kung, D. Cox, "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations," MAPL 2019.', href: 'https://dl.acm.org/doi/10.1145/3315508.3329973' },
+    { citation: 'Advanced Micro Devices, Inc., "hipBLASLt," ROCm Documentation, 2024.', href: 'https://github.com/ROCm/hipBLASLt' },
+  ]}
+/>

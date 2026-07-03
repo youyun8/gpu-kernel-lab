@@ -1,0 +1,134 @@
+# Tiling 階層: Block、Warp、Thread Tiling
+
+第 1 章說 reuse 是唯一的解藥。 這一章把 reuse 具體化成三層 tiling: 同一塊 output $C$ 依序被 threadblock、warp、thread 三層切分, 每往下一層就把 operand 搬進更靠近 ALU、更快的儲存, reuse 再乘一次。 這是所有高效能 GEMM 的骨架。
+
+<HierarchicalTilingFigure />
+
+## Block Tiling — 進 shared memory
+
+第一層: 把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。 每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
+
+<TilingAnimator />
+
+<PlatformTabs>
+<Platform name="CUDA">
+
+```cpp
+// One block cooperatively loads BM x BK and BK x BN tiles into shared memory,
+// then every thread reuses them from there. Reuse factor grows with tile dim.
+constexpr int kTile = 32;
+__global__ void sgemmTiled(const float* A, const float* B, float* C, int m, int n, int k) {
+    __shared__ float sA[kTile][kTile];
+    __shared__ float sB[kTile][kTile];
+    int row = blockIdx.y * kTile + threadIdx.y;
+    int col = blockIdx.x * kTile + threadIdx.x;
+    float acc = 0.0f;
+    for (int t = 0; t < k; t += kTile) {
+        sA[threadIdx.y][threadIdx.x] = A[row * k + (t + threadIdx.x)];
+        sB[threadIdx.y][threadIdx.x] = B[(t + threadIdx.y) * n + col];
+        __syncthreads();
+        for (int p = 0; p < kTile; ++p) acc += sA[threadIdx.y][p] * sB[p][threadIdx.x];
+        __syncthreads();
+    }
+    if (row < m && col < n) C[row * n + col] = acc;
+}
+```
+
+</Platform>
+<Platform name="HIP / ROCm">
+
+```cpp
+// Identical logic under HIP; LDS is the AMD counterpart of shared memory.
+// Portable as-is because it uses no vendor intrinsics.
+constexpr int kTile = 32;
+__global__ void sgemmTiled(const float* A, const float* B, float* C, int m, int n, int k) {
+    __shared__ float sA[kTile][kTile];
+    __shared__ float sB[kTile][kTile];
+    int row = blockIdx.y * kTile + threadIdx.y;
+    int col = blockIdx.x * kTile + threadIdx.x;
+    float acc = 0.0f;
+    for (int t = 0; t < k; t += kTile) {
+        sA[threadIdx.y][threadIdx.x] = A[row * k + (t + threadIdx.x)];
+        sB[threadIdx.y][threadIdx.x] = B[(t + threadIdx.y) * n + col];
+        __syncthreads();
+        for (int p = 0; p < kTile; ++p) acc += sA[threadIdx.y][p] * sB[p][threadIdx.x];
+        __syncthreads();
+    }
+    if (row < m && col < n) C[row * n + col] = acc;
+}
+```
+
+</Platform>
+</PlatformTabs>
+
+global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。 但 shared memory 的 bandwidth 也有限, 而且每個 thread 只算一個 output — 下一層要解掉這個。
+
+## Thread / Register Tiling — outer product
+
+第二層 (跳過 warp tiling 先看最有感的一步): 讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 **register** 反覆用, 把 shared memory 的存取次數再攤薄。 這一步通常帶來整條階梯上最大的單步跳躍。
+
+<OuterProductFigure />
+
+```cpp
+// Each thread now computes a TM x TN block of C, holding a/b slices and the
+// accumulator in registers. Per k-step: read TM+TN values, do TM*TN FMAs.
+constexpr int kTM = 4, kTN = 4;
+float acc[kTM][kTN] = {};
+for (int p = 0; p < kTile; ++p) {
+    float a[kTM], b[kTN];
+    #pragma unroll
+    for (int i = 0; i < kTM; ++i) a[i] = sA[threadIdx.y * kTM + i][p];
+    #pragma unroll
+    for (int j = 0; j < kTN; ++j) b[j] = sB[p][threadIdx.x * kTN + j];
+    #pragma unroll
+    for (int i = 0; i < kTM; ++i)
+        #pragma unroll
+        for (int j = 0; j < kTN; ++j) acc[i][j] += a[i] * b[j];
+}
+```
+
+注意 outer-product 結構: 每一步從 shared memory 讀 `TM + TN` 個值, 做 `TM × TN` 次 FMA — shared memory 存取相對 FLOP 的比例又下降一階。 這也是「低 occupancy + 高 ILP」路線的實例: `acc[TM][TN]` 吃掉大量 register, 但 4×4 = 16 條獨立 FMA 鏈本身就是絕佳的 latency hiding。
+
+## Warp Tiling — 中間那層
+
+Block tile 與 thread tile 之間還有一層 warp tile。 為什麼需要它? 因為現代 kernel 的第三層 compute 是 Tensor Core / MFMA (第 4 章), 而那些指令的操作單位就是 **warp / wavefront**, 不是單一 thread。 即使不用 MMA, 明確的 warp tile 也能:
+
+- 讓一個 warp 負責的 output 在空間上連續, **shared memory 讀取更 coalesced、bank conflict 更可控**。
+- 把 register tiling 的 micro-tile 對齊到 warp 邊界, 方便 `float4` 向量化 (第 3 章)。
+
+一個常見的三層尺寸: threadblock tile `128×128×8`, 內含 `2×4 = 8` 個 warp, 每個 warp tile `64×32`, warp 內每個 thread 算 `8×4` 的 register tile。 這些數字不是魔法, 是被 register 檔案大小、shared memory 容量與 occupancy 三方拉扯出來的 — 第 7 章的 autotuning 就是在搜這個空間。
+
+<Callout variant="insight" title="三層對應三種儲存">
+Block tile ↔ shared memory / LDS; warp tile ↔ 決定 MMA 與 coalesced 存取的粒度; thread tile ↔ register。 每一層的存在, 都是為了讓資料在被丟棄前, 於更快的那層儲存裡被多用幾次。
+</Callout>
+
+<Quiz
+  questions={[
+    {
+      question: 'Shared memory (block) tiling 主要改善哪個量?',
+      options: ['Register 數量', '每筆 global load 的 reuse 次數, 進而拉高 arithmetic intensity', 'Kernel launch overhead', 'L2 cache 大小'],
+      answer: 1,
+      explanation: 'Tile 進 shared memory 後被 block 內多個 thread 共用, global traffic 下降、intensity 上升。',
+    },
+    {
+      question: 'Register (thread) tiling 相對純 shared memory tiling 的主要好處?',
+      options: ['降低 shared memory 存取次數, 提高 compute 使用率', '完全不需要 __syncthreads', '自動啟用 Tensor Core', '減少 global memory 容量需求'],
+      answer: 0,
+      explanation: '把 operand 放進 register 反覆使用, 攤薄 shared memory bandwidth, 讓 FMA pipe 更飽和。',
+    },
+    {
+      question: '為什麼現代 GEMM 需要一層明確的 warp tile?',
+      options: ['warp 是 __syncthreads 的單位', 'Tensor Core / MFMA 指令的操作粒度就是 warp / wavefront, 且能讓 shared memory 存取更 coalesced', 'warp tile 能減少 register 使用', 'warp tile 讓 kernel 不需要 shared memory'],
+      answer: 1,
+      explanation: 'MMA 以 warp 共同持有 fragment 運算, warp tile 把 output 對齊到這個粒度並改善存取模式。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Efficient GEMM in CUDA," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+    { citation: 'S. Boehm, "How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance," 2022.', href: 'https://siboehm.com/articles/22/CUDA-MMM' },
+    { citation: 'Advanced Micro Devices, Inc., "AMD Matrix Cores," ROCm Blogs, 2023.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html' },
+  ]}
+/>

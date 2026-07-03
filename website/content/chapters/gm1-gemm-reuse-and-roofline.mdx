@@ -1,0 +1,96 @@
+# GEMM 為什麼難: Reuse 與 Arithmetic Intensity
+
+矩陣乘法 $C = A \times B$ 的 FLOP 數是死的 ($2MNK$), 但一個「照數學公式寫」的 SGEMM 常常只跑出 cuBLAS 的 2–5%。 問題從來不是算得不夠快, 而是**資料搬得太多、用得太少**。 這是整個 GEMM 優化 track 的第一性原理, 之後每一章 (tiling、pipeline、Tensor Core、Split-K…) 都是同一句話的不同實作。
+
+<Callout variant="insight" title="貫穿整個 Track 的一句話">
+GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global memory 搬進來的資料被重複使用更多次」。 把 arithmetic intensity 從 naive 的 O(1) 拉到 O(tile size), roofline 上的點才會從 bandwidth roof 爬到 compute roof。
+</Callout>
+
+## naive kernel 錯在哪
+
+最直觀的寫法: 每個 thread 算一個 $C_{ij}$, 跑一個長度 $K$ 的迴圈。
+
+```cpp
+// Each thread computes one C element. It streams a full row of A and a full
+// column of B from global memory -- 2K loads for 2K flops, essentially zero
+// reuse -> memory-bound, far below peak.
+__global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int n, int k) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < m && col < n) {
+        float acc = 0.0f;
+        for (int p = 0; p < k; ++p) acc += A[row * k + p] * B[p * n + col];
+        C[row * n + col] = acc;
+    }
+}
+```
+
+每個 output 讀 $2K$ 個 float (8K bytes)、只做 $2K$ 個 FLOP, arithmetic intensity ≈ $2K / 8K = 0.25$ FLOP/byte。 對照 roofline 的 ridge point (現代 GPU 常在 10–100+ FLOP/byte), 0.25 牢牢卡在 bandwidth roof 的最左邊 — 再多 SM 也沒用, 因為 DRAM 餵不動。
+
+## Reuse 是唯一的解藥
+
+同一筆 $A_{row,p}$ 會被 $C$ 的一整列用到 ($N$ 次), 同一筆 $B_{p,col}$ 會被一整行用到 ($M$ 次)。 Naive kernel 卻每次都重新從 global memory 讀 — reuse factor = 1。 只要讓一筆 load 被重複使用 $R$ 次, 有效 arithmetic intensity 就乘上 $R$, global traffic 就除以 $R$。
+
+<GemmReuseFigure />
+
+這就是接下來所有技巧的共同母題:
+
+- **Tiling (第 2 章)**: 把 A/B 的 tile 搬進 shared memory 與 register 反覆讀, reuse ∝ tile 尺寸。
+- **Memory pipeline (第 3 章)**: 用 vectorized load、double buffering 把「搬」的成本藏進「算」。
+- **Tensor Core / MFMA (第 4 章)**: 換更快的 compute 引擎, 前提是已經不再 memory-bound。
+- **Split-K / Stream-K (第 5 章)** 與 **scheduling (第 6 章)**: 當形狀怪、tile 數不足時, 換一種平行化維度把 SM 填滿。
+- **Epilogue / low precision / autotuning (第 7 章)**: 收尾與跨形狀的自動化。
+
+## 優化階梯的全景
+
+把 naive 到 library 的路拆成獨立、可量測的步驟, 每一步只解決一個明確的 bottleneck:
+
+| 步驟 | 技巧 | 解決的 bottleneck | 章節 |
+| --- | --- | --- | --- |
+| 0 | naive | (基準) | 本章 |
+| 1 | shared memory tiling | global memory traffic | 第 2 章 |
+| 2 | register / thread tiling | shared memory traffic | 第 2 章 |
+| 3 | vectorized load | load 指令數 / address 計算 | 第 3 章 |
+| 4 | double buffering / cp.async | memory latency 暴露 | 第 3 章 |
+| 5 | Tensor Core / MFMA | FMA pipe 吞吐上限 | 第 4 章 |
+| 6 | Split-K / Stream-K | 低 occupancy / tail effect | 第 5、6 章 |
+| 7 | epilogue fusion | 尾端 elementwise 的額外 traffic | 第 7 章 |
+
+<Callout variant="warn" title="tuning 的順序很重要">
+先讓 global load/store coalesced, 再確保 tile reuse 足夠, 接著調 register tile 與 pipeline stage 數, 最後才碰 Tensor Core/MFMA 與 epilogue fusion。 若還沒爬過 ridge point 就直接上 MMA, 只會讓更快的 compute pipe 空等 memory。
+</Callout>
+
+<LabBox path="kernels/03-gemm">
+`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step4_double_buffer` 的完整優化階梯, 以及 `blas_baseline` (cuBLAS/hipBLAS 參考)。 每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。 先跑 `step0_naive`, 記下它的 % of peak 與 profiler 的 memory throughput — 那是本 track 之後每一步的比較基準。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Naive SGEMM 效能低落的根本原因是?',
+      options: ['FLOP 數太多', 'Arithmetic intensity 太低 (≈0.25), 卡在 bandwidth roof', 'Occupancy 太高', 'Register 用太少'],
+      answer: 1,
+      explanation: '每個 output 讀 2K 個值只做 2K FLOP, intensity ≈ 0.25 FLOP/byte, 是典型 memory-bound。',
+    },
+    {
+      question: '把一筆 global load 的 reuse factor 從 1 提高到 R, 對 arithmetic intensity 的影響是?',
+      options: ['不變', '乘上 R (global traffic 除以 R)', '除以 R', '只影響 latency 不影響 intensity'],
+      answer: 1,
+      explanation: '同一筆資料被用 R 次, 等效於用 1/R 的 bytes 做同樣的 FLOP, intensity 乘 R。',
+    },
+    {
+      question: '為什麼不該在 kernel 還 memory-bound 時就先上 Tensor Core?',
+      options: ['Tensor Core 不支援 fp32', '更快的 compute pipe 只會空等餵不動的 memory', 'Tensor Core 會降低精度', 'Tensor Core 需要更多 global memory'],
+      answer: 1,
+      explanation: '沒爬過 ridge point 前瓶頸在 memory, 換更快的 compute 引擎不會提升整體吞吐。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'S. Boehm, "How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance," 2022.', href: 'https://siboehm.com/articles/22/CUDA-MMM' },
+    { citation: 'S. Williams, A. Waterman, D. Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures," CACM, 2009.', href: 'https://dl.acm.org/doi/10.1145/1498765.1498785' },
+    { citation: 'NVIDIA Corporation, "Efficient GEMM in CUDA," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+  ]}
+/>

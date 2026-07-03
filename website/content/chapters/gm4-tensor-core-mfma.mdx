@@ -1,0 +1,94 @@
+# Tensor Core / MFMA GEMM
+
+到這裡, kernel 已經不再 memory-bound: tiling 拉高了 reuse, pipeline 藏住了 latency。 瓶頸移到 FMA pipe 本身的吞吐。 最後一步是**換引擎**: 用矩陣乘加硬體單元 (NVIDIA Tensor Core / AMD Matrix Core) 取代純量 FMA。 對 half/bf16, 這是相對 fp32 FMA 數量級的吞吐提升。
+
+## MMA Fragment 抽象
+
+Tensor Core (NVIDIA `wmma` / PTX `mma`) 與 AMD `MFMA` intrinsic 都以「warp / wavefront **共同持有一塊小矩陣 fragment**」為運算單位: 一條指令完成一整塊 $M \times N \times K$ 的乘加。
+
+<TensorCoreFragmentFigure />
+
+```cpp
+// WMMA sketch (CUDA): a warp cooperatively multiplies 16x16x16 fp16 fragments
+// and accumulates into an fp32 fragment. One mma_sync = 16x16x16 MACs.
+#include <mma.h>
+using namespace nvcuda::wmma;
+fragment<matrix_a, 16, 16, 16, half, row_major> fa;
+fragment<matrix_b, 16, 16, 16, half, col_major> fb;
+fragment<accumulator, 16, 16, 16, float> facc;
+fill_fragment(facc, 0.0f);
+for (int t = 0; t < k; t += 16) {
+    load_matrix_sync(fa, &A[row * k + t], k);
+    load_matrix_sync(fb, &B[t + col * k], k);
+    mma_sync(facc, fa, fb, facc);    // one instruction, 16x16x16 MACs
+}
+store_matrix_sync(&C[row * n + col], facc, n, mem_row_major);
+```
+
+AMD 的對應寫法用 `__builtin_amdgcn_mfma_*` intrinsic (或 rocWMMA 這層可攜封裝), 概念相同: 一個 wavefront 持有 fragment, 一條 MFMA 指令做一塊矩陣乘加。
+
+## Layout 與 Swizzle 要求
+
+MMA 的代價是**資料佈局被指令規定死了**。 fragment 在 register 的擺放由硬體決定, 每個 lane 持有哪幾個 element 不由你選。 這帶來兩個約束:
+
+- **shared memory layout 必須配合**: 餵進 `load_matrix_sync` 的 shared memory 區塊要用 swizzle (第 3 章) 排好, 否則載入 fragment 時就是 bank conflict, 或更糟 — 佈局錯就是**錯誤結果**。
+- **K 方向與 transpose flag**: A 通常要 row-major、B 要 col-major (或反過來, 視指令而定), 若輸入 layout 不符, 得在 shared memory 階段轉置。
+
+這正是手寫 MMA kernel 最容易出錯的地方, 也是 CUTLASS 的 CuTe layout 代數與 AMD Composable Kernel (第 8 章) 的核心價值: 它們把 fragment ↔ shared memory ↔ global memory 的 layout 對應關係, 用型別系統與 layout algebra 幫你算對。
+
+<Callout variant="warn" title="佈局錯誤是 silent bug">
+MMA 佈局配錯不會 crash, 只會給出數值錯誤或偶發的 bank conflict 拖慢。 一定要對 CPU / cuBLAS reference 做 correctness check (第 9 章 track 的 determinism 主題), 不能只看跑得快不快。
+</Callout>
+
+## 精度路徑: fp16 / bf16 / tf32 / fp8
+
+MMA 單元對不同精度提供不同吞吐, 選錯精度就吃不到加速:
+
+| 輸入精度 | 累加精度 | 典型用途 | 備註 |
+| --- | --- | --- | --- |
+| fp16 | fp32 | 訓練 / 推論 | 動態範圍小, 需 loss scaling |
+| bf16 | fp32 | 訓練 | 範圍同 fp32, 精度較低, 現代預設 |
+| tf32 | fp32 | fp32 的 drop-in 加速 | 尾數截斷, 幾乎免改程式 |
+| fp8 (e4m3/e5m2) | fp32/fp16 | 推論 / 大模型 | 需 per-tensor/per-block scale |
+| int8 | int32 | 量化推論 | 搭配 dequant epilogue |
+
+fp32 輸入也能透過 **TF32** (NVIDIA) 或 xf32 模式吃到部分加速 — 幾乎不用改程式, 只是尾數被截短。 低精度路徑的瓶頸常從 FMA pipe 轉成 **scale load、layout conversion 或 accumulator store** (第 7 章 low-precision 一節細談)。
+
+<Callout variant="insight" title="什麼時候 MMA 效益最大">
+half/bf16 且矩陣夠大、intensity 已接近 compute roof 時, 換 MMA 提升最明顯。 極小矩陣或還在 memory-bound 的 kernel, 先回頭把前三章做好。
+</Callout>
+
+<LabBox path="kernels/03-gemm">
+`kernels/03-gemm` 的 Tensor Core / MFMA 範例展示 `wmma` 與 MFMA 兩條路徑的最小可跑骨架, 並對 library reference 做 correctness check。 注意觀察 profiler 的 Tensor / Matrix pipe 使用率 — 那是判斷「有沒有真的吃到 MMA」的關鍵 metric。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Tensor Core / MFMA 的運算單位是?',
+      options: ['單一 thread', '一個 warp / wavefront 共同持有 fragment', '整個 threadblock', '整個 grid'],
+      answer: 1,
+      explanation: 'MMA 指令以 warp/wavefront 共同持有一塊 fragment 為單位, 一條指令做整塊矩陣乘加。',
+    },
+    {
+      question: '為什麼手寫 MMA kernel 特別困難?',
+      options: ['指令太慢', 'Fragment 的 register/記憶體佈局由硬體規定, shared memory layout 必須用 swizzle 精確配合, 錯了就是錯誤結果', '不支援 fp16', '只能單 thread 呼叫'],
+      answer: 1,
+      explanation: 'MMA 對資料擺放有嚴格要求, 佈局配錯是 silent 的數值錯誤, 這正是 CUTLASS/CK 封裝的價值。',
+    },
+    {
+      question: 'TF32 模式的特點是?',
+      options: ['需要重寫 kernel', '對 fp32 輸入幾乎 drop-in, 靠截短尾數換取部分 MMA 加速', '精度比 fp32 高', '只能用於推論'],
+      answer: 1,
+      explanation: 'TF32 截短尾數、保留 fp32 範圍, 讓 fp32 GEMM 幾乎不改程式就吃到 Tensor Core 加速。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Warp Matrix Functions (WMMA)," CUDA C++ Programming Guide, 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-matrix-functions' },
+    { citation: 'Advanced Micro Devices, Inc., "AMD Matrix Cores," ROCm Blogs, 2023.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html' },
+    { citation: 'NVIDIA Corporation, "CuTe Layout Algebra," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/00_quickstart.md' },
+  ]}
+/>
