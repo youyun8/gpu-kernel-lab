@@ -87,6 +87,10 @@ sem_post(&empty_slots);
 
 `kernels/00-parallel-foundations/cpu_semaphore_pipeline.cpp` 實作一個 bounded producer/consumer queue: `empty_slots` 防止 producer 覆蓋尚未消費的 slot, `full_slots` 防止 consumer 讀空 slot。 同一段 shared queue index 仍然用 mutex 保護, 因為 semaphore 管數量, mutex 管資料結構一致性。
 
+下圖逐步播放這個 bounded buffer 的執行過程, 特別留意兩個會讓 thread 卡住的時刻: buffer 滿了 producer 被擋、buffer 空了 consumer 被擋。
+
+<ProducerConsumerDiagram />
+
 ## Condition Variable
 
 **Condition variable** 適合等待某個 predicate 變成 true, 例如 queue not empty 或 shutdown flag。 它必須搭配 mutex, 並用 `while` 或 predicate 版本處理 spurious wakeup。
@@ -139,6 +143,62 @@ ready.store(true, std::memory_order_release);
 while (!ready.load(std::memory_order_acquire)) {}
 use(payload);
 ```
+
+## 經典同步問題
+
+前面幾節的 primitive (mutex、semaphore、condition variable) 可以組合出幾個教科書等級的經典問題。 它們之所以「經典」, 是因為幾乎每個真實系統的同步 bug 都能歸類成其中一種。
+
+### Readers / Writers
+
+多個 reader 可以同時讀共享資料, 但 writer 寫入時必須獨佔; 天真的做法 (reader 優先) 會讓 writer 在 reader 絡繹不絕時永遠排不到, 也就是 **writer starvation**。 修法是引入 writer-preference: 只要有 writer 在排隊, 新來的 reader 就跟著排隊, 不能插隊。
+
+```cpp
+std::shared_mutex rw_mutex;
+
+void reader() {
+    std::shared_lock<std::shared_mutex> lock(rw_mutex); // 多個 reader 可同時持有
+    readSharedData();
+}
+
+void writer() {
+    std::unique_lock<std::shared_mutex> lock(rw_mutex); // 獨佔, 等所有 reader 離開
+    writeSharedData();
+}
+```
+
+`std::shared_mutex` (C++17) 直接對應這個模式: `shared_lock` 是 reader 用的共享鎖, `unique_lock` 是 writer 用的獨佔鎖。 底下動畫示範 writer-preference 如何避免 writer 被無限插隊的 reader 餓死。
+
+<ReadersWritersDiagram />
+
+### Dining Philosophers
+
+五位哲學家圍著圓桌, 每人左右各有一支叉子, 吃飯前要同時拿到兩支。 如果每個人都用同樣的順序去拿 (先左後右), 而且剛好同時伸手, 每個人都會拿到左手那支、卡在等右手那支 —— 右手那支正好是鄰居剛拿走的, 形成**環狀等待 (circular wait)**, deadlock 的四個必要條件全部成立, 沒有人能吃。
+
+```cpp
+// naive: 每個人固定先搶左手、再搶右手 → 可能全部同時卡住
+std::mutex forks[5];
+
+void philosopherNaive(int i) {
+    std::lock_guard<std::mutex> left(forks[i]);
+    std::lock_guard<std::mutex> right(forks[(i + 1) % 5]); // deadlock risk
+    eat();
+}
+
+// fixed: 打破對稱, 讓其中一人用相反順序拿, 或直接讓 std::lock
+// 用免死鎖演算法一次拿好兩把鎖。
+void philosopherFixed(int i) {
+    std::mutex& first = (i == 4) ? forks[(i + 1) % 5] : forks[i];
+    std::mutex& second = (i == 4) ? forks[i] : forks[(i + 1) % 5];
+    std::lock(first, second); // 不會有兩個 thread 以相反順序卡住彼此
+    std::lock_guard<std::mutex> l1(first, std::adopt_lock);
+    std::lock_guard<std::mutex> l2(second, std::adopt_lock);
+    eat();
+}
+```
+
+打破環狀等待不需要每個人都改順序, 只要有一人反過來, 迴圈就永遠無法完整閉合 —— 底下的圖比較「全部先左後右」(會 deadlock) 跟「一人反向拿」(保證有人吃得到) 兩種情境。
+
+<DiningPhilosophersDiagram />
 
 ## CPU Checklist
 
