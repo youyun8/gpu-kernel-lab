@@ -16,8 +16,7 @@ GEMM 優化的核心不是「算得更快」, 而是「讓每一筆從 global me
 ```cpp
 // Each thread computes one C element. Reads 2K values from global memory per
 // output, with essentially zero reuse -> memory-bound, far below peak.
-__global__ void sgemmNaive(const float* A, const float* B, float* C,
-                           int m, int n, int k) {
+__global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int n, int k) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < m && col < n) {
@@ -35,8 +34,7 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 
 ```cpp
 // Same kernel under HIP; portable as-is because it uses no vendor intrinsics.
-__global__ void sgemmNaive(const float* A, const float* B, float* C,
-                           int m, int n, int k) {
+__global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int n, int k) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < m && col < n) {
@@ -64,8 +62,7 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C,
 // One block cooperatively loads BM x BK and BK x BN tiles into shared memory,
 // then every thread reuses them. Reuse factor grows with the tile dimension.
 constexpr int kTile = 32;
-__global__ void sgemmTiled(const float* A, const float* B, float* C,
-                           int m, int n, int k) {
+__global__ void sgemmTiled(const float* A, const float* B, float* C, int m, int n, int k) {
     __shared__ float sA[kTile][kTile];
     __shared__ float sB[kTile][kTile];
     int row = blockIdx.y * kTile + threadIdx.y;

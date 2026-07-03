@@ -70,11 +70,11 @@ CPU matrix multiply 也靠 blocking:
 ```cpp
 for (int ii = 0; ii < n; ii += B)
     for (int jj = 0; jj < n; jj += B)
-    for (int kk = 0; kk < n; kk += B)
-      for (int i = ii; i < ii + B; ++i)
-        for (int j = jj; j < jj + B; ++j)
-          for (int k = kk; k < kk + B; ++k)
-            C[i][j] += A[i][k] * B[k][j];
+        for (int kk = 0; kk < n; kk += B)
+            for (int i = ii; i < ii + B; ++i)
+                for (int j = jj; j < jj + B; ++j)
+                    for (int k = kk; k < kk + B; ++k)
+                        C[i][j] += A[i][k] * B[k][j];
 ```
 
 目標是讓 A/B/C 的 active block 放進 cache, 減少 DRAM reload。

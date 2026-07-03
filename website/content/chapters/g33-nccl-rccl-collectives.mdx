@@ -101,7 +101,7 @@ CCL_CHECK(ncclCommInitAll(comms.data(), num_gpus, nullptr));
 CCL_CHECK(ncclGroupStart());
 for (int g = 0; g < num_gpus; ++g) {
     CCL_CHECK(ncclAllReduce(send_bufs[g], recv_bufs[g], count, ncclFloat, ncclSum,
-                          comms[g], streams[g]));
+        comms[g], streams[g]));
 }
 CCL_CHECK(ncclGroupEnd());
 for (int g = 0; g < num_gpus; ++g) {
