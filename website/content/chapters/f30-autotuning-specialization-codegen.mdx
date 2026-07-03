@@ -24,8 +24,7 @@ C++ template 讓編譯器看到常數, 才能 unroll、消除 branch、分配靜
 
 ```cpp
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int STAGES>
-__global__ void matmulKernel(const half* A, const half* B, float* C,
-                             int m, int n, int k) {
+__global__ void matmulKernel(const half* A, const half* B, float* C, int m, int n, int k) {
     static_assert(BLOCK_K % 16 == 0);
     __shared__ half smem[STAGES][BLOCK_M * BLOCK_K + BLOCK_K * BLOCK_N];
     // ...

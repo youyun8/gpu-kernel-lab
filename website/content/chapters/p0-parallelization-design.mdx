@@ -15,11 +15,11 @@
 void saxpyCpu(int num_threads, int n, float a, const float* x, float* y) {
     std::vector<std::thread> pool;
     for (int t = 0; t < num_threads; ++t) {
-    pool.emplace_back([=]() {
-      int begin = static_cast<long long>(n) * t / num_threads;
-      int end = static_cast<long long>(n) * (t + 1) / num_threads;
-      for (int i = begin; i < end; ++i) y[i] = a * x[i] + y[i];
-    });
+        pool.emplace_back([=]() {
+            int begin = static_cast<long long>(n) * t / num_threads;
+            int end = static_cast<long long>(n) * (t + 1) / num_threads;
+            for (int i = begin; i < end; ++i) y[i] = a * x[i] + y[i];
+        });
     }
     for (auto& thread : pool) thread.join();
 }

@@ -17,6 +17,7 @@ import { DataLayoutVisualizer } from '@/components/widgets/DataLayoutVisualizer'
 import { GatherScatterVisualizer } from '@/components/widgets/GatherScatterVisualizer';
 import { CollectiveAnimator } from '@/components/widgets/CollectiveAnimator';
 import { DataRaceTimeline } from '@/components/widgets/DataRaceTimeline';
+import { ProducerConsumerDiagram, ReadersWritersDiagram, DiningPhilosophersDiagram } from '@/components/widgets/ClassicPatternDiagrams';
 
 // Route internal markdown links through next/link so the static-export
 // basePath is applied; external links open in a new tab.
@@ -56,6 +57,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     GatherScatterVisualizer,
     CollectiveAnimator,
     DataRaceTimeline,
+    ProducerConsumerDiagram,
+    ReadersWritersDiagram,
+    DiningPhilosophersDiagram,
     ...components,
   };
 }

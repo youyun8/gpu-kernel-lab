@@ -16,7 +16,7 @@ cublasHandle_t handle;
 BLAS_CHECK(cublasCreate(&handle));
 const float alpha = 1.0f, beta = 0.0f;
 BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k,
-                       &alpha, dev_a, m, dev_b, k, &beta, dev_c, m));
+    &alpha, dev_a, m, dev_b, k, &beta, dev_c, m));
 
 // hipBLAS mirrors the API one-to-one:
 // hipblasSgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N, m, n, k, ...)
