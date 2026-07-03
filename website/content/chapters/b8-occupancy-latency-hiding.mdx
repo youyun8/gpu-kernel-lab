@@ -160,7 +160,21 @@ Block 是資源分配的單位, 顆粒太大或太小都會在整數除法上吃
 - **太小**: 64-thread blocks (= 2 warps), 硬體每 SM 最多 32 個 blocks → 最多 32 × 2 = 64 warps, 剛好夠; 但若上限是 16 blocks 的架構, 就只有 32 warps = 50% — **block slots 先用完, warps 沒滿**。
 - **太大**: 1024-thread block (= 32 warps), SM 上限 64 warps → 只能放 2 個 blocks。 若 kernel 還要 100 KB shared memory (剩 64 KB 塞不下第二個), 就只剩 1 個 block = 50%, 而且 `__syncthreads()` 時整個 SM 一半的 warps 一起卡住。
 
-實務: 從 **256** 開始, 只試 128 / 256 / 512 三個值, 每次用 occupancy API 驗證。 Block size 幾乎從不值得更細的搜索。
+實務: 從 **256** 開始, 只試 128 / 256 / 512 三個值, 每次用 occupancy API 驗證 — 不要用眼睛猜:
+
+```cpp
+// Before: pick a block size blindly and hope for the best.
+int block = 256;
+myKernel<<<(n + block - 1) / block, block>>>(/* ... */);
+
+// After: ask the runtime what occupancy each candidate actually reaches,
+// then keep the winner. (This is exactly what tuning_levers_demo prints.)
+for (int block : {128, 256, 512}) {
+  int blocks_per_sm = 0;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, myKernel, block, 0);
+  // occupancy = blocks_per_sm * (block / warpSize) / maxWarpsPerSM
+}
+```
 
 ### 2. Register cap — 用 __launch_bounds__ 換駐留數
 
@@ -169,6 +183,18 @@ Block 是資源分配的單位, 顆粒太大或太小都會在整數除法上吃
 ### 3. Tile size — occupancy 換 reuse
 
 GEMM 每 thread 的輸出 tile 從 4×4 加大到 8×8: accumulator registers 從 16 個變 64 個, occupancy 大概砍半; 但每筆載入的重用次數從 4 變 8, **memory traffic 直接減半**。 對 compute-bound kernel 這通常是淨賺 — 第 12 章的 step2 → step3 實測就是這一步。 反過來, memory-bound kernel 吃不到 reuse 的好處, 就別付 occupancy 的代價。
+
+```cpp
+// Before: 4x4 output tile -> 16 accumulator registers, each loaded value reused 4x.
+constexpr int kTile = 4;
+float acc[kTile][kTile] = {};   // 16 registers
+
+// After: 8x8 output tile -> 64 accumulator registers, each loaded value reused 8x.
+// Occupancy roughly halves, but global-memory traffic also halves. Net win when
+// the kernel is compute-bound; a loss when it is memory-bound.
+constexpr int kTile = 8;
+float acc[kTile][kTile] = {};   // 64 registers
+```
 
 ### 4. Independent accumulators — 不動 tile 也能買 ILP
 
@@ -182,6 +208,16 @@ Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3
 - **Batching**: 很多小問題合併成一個 kernel launch, blocks 數 = 問題數 × 每問題 blocks。
 - **Persistent scheduler**: 固定數量的 blocks 常駐, 從 work queue 領工作, 消除尾端只剩幾個 blocks 的浪費。
 
+```cpp
+// Before: one block per output tile. A 256x256 GEMM with 128x128 tiles makes a
+// 2x2 = 4-block grid -> 4 blocks trying to fill 100+ SMs. Achieved occupancy tanks.
+dim3 grid(ceilDiv(m, kBM), ceilDiv(n, kBN));
+
+// After: split the K dimension kSplit ways so every SM gets work. Each block now
+// computes a partial sum over its K-slice and atomic-adds into the output tile.
+dim3 grid(ceilDiv(m, kBM), ceilDiv(n, kBN), kSplit);  // 4 * kSplit blocks
+```
+
 ## 用 profiler 決定下一步: 三種 stall 的診斷表
 
 調參的順序不該是「把五個旋鈕都轉一遍」, 而是先問 profiler: **warps 到底在等什麼?** Nsight Compute 的 Warp State Statistics (omniperf 有對應的 wave state 分析) 最常見三種:
@@ -192,16 +228,41 @@ Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3
 | `not selected` | warp 已經 ready, 只是 scheduler 這個 cycle 選了別人 | **occupancy 已經夠了**, 再加只是排更長的隊; 瓶頸在 issue 端, 去看 instruction mix 或降 occupancy 換大 tile |
 | `mio/math pipe throttle` | 算術/特殊功能 pipeline 滿載, 發不進去 | 恭喜, 執行單元已經吃飽 — occupancy 不是問題; 要更快只能減少計算量、換更高吞吐的指令 (FMA、MMA/Tensor Core) |
 
-一個 practical loop: profile → 看主要 stall → 對表選一個旋鈕 → 改 → 重新 profile。 每次只動一個旋鈕, 用第 4 章的 benchmark 方法確認淨效果。
+把上面的 practical loop 攤成一張決策樹, 每個葉子直接對應前面某個旋鈕的 code:
 
-<LabBox path="kernels/01-basics">
-`occupancy_experiment` 用同一個 compute-heavy kernel, 透過不同的 `__launch_bounds__` 與 tile size 產生高/低 occupancy 兩種配置, 各自量測執行時間。 你會看到低 occupancy + 大 tile 的版本反而更快 — 親手驗證本章的反直覺結論。 用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` / HIP 對應 API 印出理論 occupancy 對照, 並用 `-Xptxas=-v` 檢查兩種配置的 register 用量與 spill。
+```text
+profiler: 主要 stall 是哪一種?
+│
+├─ long scoreboard  (warps 在等 global memory)
+│    └─ 目標: 增加 in-flight loads
+│         ├─ 每 warp 多發獨立 load  → Lever 4 (independent accumulators)
+│         ├─ 一次搬更寬            → Lever 3 (tile size) + 第 11 章 vectorized load
+│         ├─ 還是不夠 warps        → Lever 1/2 (block size / register cap) 拉高 occupancy
+│         └─ 別忘了               → 第 6 章 coalescing (存取型態本身是否浪費頻寬)
+│
+├─ not selected  (warp ready, 但這個 cycle scheduler 選了別人)
+│    └─ occupancy 已經夠了, 再加只是排更長的隊
+│         ├─ 看 instruction mix   → 是否有冗餘指令可刪
+│         └─ 拿 occupancy 換 reuse → Lever 3 (放大 tile) / Lever 4 (更多 ILP)
+│
+└─ math / mio pipe throttle  (算術 pipeline 滿載, 發不進去)
+     └─ occupancy 不是瓶頸, 別再調它
+          ├─ 減少計算量           → 演算法層面
+          └─ 換更高吞吐的指令     → MMA / Tensor Core (第 12、14 章)
+```
+
+規則: profile → 落到某一支 → 執行該葉子的 code 改動 → 只動這一個旋鈕 → 用第 4 章的 benchmark 方法確認淨效果 → 重新 profile。
+
+<LabBox path="kernels/03-occupancy">
+`tuning_levers_demo` 把上面五個旋鈕做成一支可跑的實驗: 它對 128 / 256 / 512 三種 block size 各印出 runtime 回報的理論 occupancy (Lever 1)、比較有無 `__launch_bounds__` 的駐留數 (Lever 2)、對照「1 output/thread」與「kTile outputs/thread」兩種 tile (Lever 3+4), 最後計時「高 occupancy scalar」對「低 occupancy + 高 ILP tiled」兩種配置。 搭配 `hipcc -Rpass-analysis=kernel-resource-usage` (或 `nvcc -Xptxas=-v`) 看每個 kernel 的 register 用量與 spill, 你會在自己的 GPU 上重現本章的取捨。 另可對照 `kernels/01-basics/occupancy_experiment` 更精簡的高 occupancy vs 高 ILP 版本。
 </LabBox>
 
 <Solution>
 預期結果與判讀: 低 occupancy 配置 (大 tile、多 register) 反而更快 — 因為每個 thread 的 ILP (多個獨立 accumulator) 已經把 pipeline 餵飽, in-flight 工作量 = warps × 每 warp 的獨立操作, 用第二項補了第一項。 檢查點: (1) `-Xptxas=-v` 輸出裡兩種配置的 `registers` 差異, 且都沒有 `spill stores/loads` (一旦 spill, 結論反轉); (2) occupancy API 印出的理論值和 profiler 的 achieved 接近, 表示不是 tail effect 在干擾; (3) profiler 的 stall 原因 — 高 occupancy 版若卡在 `not selected`, 正是「warp 太多沒得排」的訊號, 印證本章的「occupancy 是手段不是目的」。
 
-完整程式: [occupancy_experiment.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/occupancy_experiment.cpp)。
+在 MI355X (gfx950) 上實跑 `tuning_levers_demo` 的一段輸出: register file 極大, 三種 block size 與有無 cap 都報 100% occupancy (資源根本沒吃緊), 但計時仍顯示 `low_occ_high_ilp_tiled` (0.067 ms) 比 `high_occupancy_scalar` (0.118 ms) 快約 1.8 倍 — 印證「餵飽 pipeline 的是 in-flight 工作量, 不是 occupancy 數字」。 換到 register 較吃緊的 GPU, 你會同時看到 occupancy 隨 tile/cap 變動。
+
+完整程式: [tuning_levers_demo.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/03-occupancy/tuning_levers_demo.cpp) (另有精簡版 [occupancy_experiment.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/occupancy_experiment.cpp))。
 </Solution>
 
 <Quiz

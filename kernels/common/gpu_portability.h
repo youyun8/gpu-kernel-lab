@@ -48,6 +48,14 @@ inline GpuError gpuStreamSynchronize(GpuStream stream) { return hipStreamSynchro
 inline GpuError gpuGetMultiprocessorCount(int* count) {
   return hipDeviceGetAttribute(count, hipDeviceAttributeMultiprocessorCount, 0);
 }
+inline GpuError gpuGetMaxThreadsPerMultiprocessor(int* count) {
+  return hipDeviceGetAttribute(count, hipDeviceAttributeMaxThreadsPerMultiProcessor, 0);
+}
+template <typename KernelFn>
+inline GpuError gpuOccupancyMaxActiveBlocksPerMultiprocessor(int* num_blocks, KernelFn kernel,
+                                                             int block_size, size_t dynamic_smem) {
+  return hipOccupancyMaxActiveBlocksPerMultiprocessor(num_blocks, kernel, block_size, dynamic_smem);
+}
 inline GpuError gpuSetDevice(int device) { return hipSetDevice(device); }
 inline GpuError gpuGetDeviceCount(int* count) { return hipGetDeviceCount(count); }
 
@@ -98,6 +106,14 @@ inline GpuError gpuStreamDestroy(GpuStream stream) { return cudaStreamDestroy(st
 inline GpuError gpuStreamSynchronize(GpuStream stream) { return cudaStreamSynchronize(stream); }
 inline GpuError gpuGetMultiprocessorCount(int* count) {
   return cudaDeviceGetAttribute(count, cudaDevAttrMultiProcessorCount, 0);
+}
+inline GpuError gpuGetMaxThreadsPerMultiprocessor(int* count) {
+  return cudaDeviceGetAttribute(count, cudaDevAttrMaxThreadsPerMultiProcessor, 0);
+}
+template <typename KernelFn>
+inline GpuError gpuOccupancyMaxActiveBlocksPerMultiprocessor(int* num_blocks, KernelFn kernel,
+                                                             int block_size, size_t dynamic_smem) {
+  return cudaOccupancyMaxActiveBlocksPerMultiprocessor(num_blocks, kernel, block_size, dynamic_smem);
 }
 inline GpuError gpuSetDevice(int device) { return cudaSetDevice(device); }
 inline GpuError gpuGetDeviceCount(int* count) { return cudaGetDeviceCount(count); }
