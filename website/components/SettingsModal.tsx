@@ -21,7 +21,7 @@ export function SettingsNavButton() {
   );
 }
 
-function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
