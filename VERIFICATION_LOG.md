@@ -2,7 +2,63 @@
 
 每個階段的驗證結果與修復記錄 (依 prompt 的 Verification Gate 要求)。
 
-## 2026-07-02 Update (current container)
+## 2026-07-03 Update — 收尾批次 (任務 8 補完 + 全面實機驗證)
+
+環境: ROCm 7.2 (hipcc / AMD clang 22)、64 × AMD Instinct MI355X (gfx950)、RCCL `librccl.so.1` (7.2.0)、cmake 3.31.10、g++ 11.4、OpenMP、pthread。 Node v22 (容器內既有), npm 以 registry.npmjs.org tarball bootstrap 出 10.9.2。
+
+### 全域 gate
+
+- 網站 `npm run build` (`output: 'export'`): 通過, 產生 45 靜態頁 (含 34 章 + /exercises + roadmap)。 `npm run typecheck` (tsc --noEmit) 與 `npm run lint` (next lint): 皆通過, 0 warning/error。 加上 basePath 的既有結構未動。
+- `grep -rn "your-org"` 於 website/kernels/scripts/docker/README/.github: 0 命中 (僅 prompt 檔本身提到字串)。
+- Kernel 全量 build: `cmake -B build -S kernels -DCMAKE_BUILD_TYPE=Release` configure 通過, 平台自動偵測為 HIP; `cmake --build build -j` 成功產生 **56 個 executable**, 無 error。 RCCL / OpenMP / pthread 皆被找到 (無 skip 訊息)。
+
+### 任務 8 (Occupancy Tuning Levers)
+
+- 新增 `kernels/03-occupancy/tuning_levers_demo.cpp` + `CMakeLists.txt`, 已納入上層 `kernels/CMakeLists.txt`。 HIP 實機 build + run 通過, 兩段 correctness check `max relative error 1.192e-07`。
+- 實跑輸出 (MI355X, HIP_VISIBLE_DEVICES=0): 三種 block size 與有無 `__launch_bounds__` 均報 100% occupancy (該 GPU register file 極大, 資源未吃緊), 但計時顯示 `low_occ_high_ilp_tiled` **0.067 ms** vs `high_occupancy_scalar` **0.118 ms** (約 1.8×), 印證「in-flight 工作量 (ILP) 決定 latency hiding, 非 occupancy 數字」。
+- 章節 `b8-occupancy-latency-hiding.mdx`: 五個旋鈕現各有 before/after code fence (block size / register cap / tile size / accumulators / grid size); stall 診斷表後補上 decision-tree 文字 flowchart, 每葉連回對應 Lever 的 code; `OccupancyCalculator` widget 已嵌入 (line 40); LabBox 改指 `kernels/03-occupancy`; Solution 貼上實機數字。
+
+### 任務 5 (平行化 / data race) — 硬性 gate: 壞版不穩定、正確版穩定
+
+- 修正 `race_demo.cpp`: 改用 `volatile long long` 讓 race 在 Release (-O2) 下仍可觀察, 結論改為依實際 wrong_trials 判斷 (不再無條件宣稱 unstable)。
+- 實機執行 (256 核):
+  - `race_demo` (壞版): 5/5 trials 損失 ~78–84% 更新, 每次不同 → `5/5 trials lost updates -> data race`。
+  - `race_fixed_mutex` / `race_fixed_atomic`: 每 trial 皆 = 8000000, 穩定正確。
+  - `openmp_reduction`: racy=WRONG (每次不同), `critical`=正確但慢 (~12 s), `reduction`=正確且快 (~10 ms)。
+  - `pthread_race`: racy 版每 trial 不同, mutex 版全部 8000000。
+  - GPU twins: `gpu_histogram_race` racy 版 counted ~400/4194304 (WRONG), atomic 版 4194304/4194304 (OK); `gpu_block_reduce` / `gpu_threadfence` correctness OK。
+
+### 任務 6 (NCCL/RCCL) — 硬性 gate: 實機 busbw
+
+- `allreduce_bench` (RCCL, `ncclCommInitAll`, single-process multi-device) 在 **8 × MI355X** 實跑, correctness OK on all ranks。 真實一輪輸出 (float sum, 20 timed iters/size):
+
+  | size(B) | time(us) | algbw(GB/s) | busbw(GB/s) |
+  | --- | --- | --- | --- |
+  | 1048576 | 53.2 | 19.69 | 34.47 |
+  | 2097152 | 52.3 | 40.09 | 70.15 |
+  | 4194304 | 57.0 | 73.58 | 128.77 |
+  | 8388608 | 78.6 | 106.69 | 186.70 |
+  | 16777216 | 126.3 | 132.79 | 232.37 |
+  | 33554432 | 198.2 | 169.32 | 296.31 |
+  | 67108864 | 348.1 | 192.81 | 337.41 |
+  | 134217728 | 657.0 | 204.27 | 357.48 |
+  | 268435456 | 1279.0 | 209.87 | 367.28 |
+
+  busbw 依 all-reduce 公式 `busbw = algbw * 2*(n-1)/n` (n=8) 計算; 隨 message size 增大趨近互連峰值, 符合 ring all-reduce bandwidth-bound 的預期。
+
+### 任務 1/2 抽樣實機驗證 (b6 access-patterns, 前批次未實跑)
+
+於 MI355X 實跑 `kernels/02-memory/access-patterns/` 全部 6 支, 皆正常且呈現預期對照:
+- `aosoa_layout`: AoS strided (1956 GB/s) < SoA (4905) ≈ AoSoA chunk32 (5138)。
+- `vectorized_tail`: scalar/float4 皆 correctness OK, 尾端 3 個 scalar 由 cleanup kernel 處理。
+- `cooperative_tile_load`: shared tile (2755 GB/s) 明顯快於 naive 17-load (1032), correctness OK。
+- `gather_scatter`: gather (4516 GB/s) 快; scatter naive (27 GB/s) 慢, block aggregation (108 GB/s) 改善。
+- `row_padding`: 128B 對齊 ld=1024 (8039 GB/s) 快於未對齊 ld=1000 (5994)。
+- `embedding_lookup`: sorted (5344 GB/s) 快於 random (4200), inverse permutation 還原順序正確。
+
+(% of peak 仍以 illustrative 常數計, 故偶見 >100%, 屬預期; 讀者應替換自身硬體峰值。)
+
+## 2026-07-02 Update (previous container)
 
 - Current tools: Node.js v22.22.2, npm 10.9.7, `/usr/bin/g++` present.
 - Current missing tools: `cmake`, `hipcc`, and `nvcc` are not installed in this container, so the expanded kernel CMake build could not be executed here.
