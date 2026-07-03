@@ -24,8 +24,7 @@ CUTLASS 3.x 重寫的核心是 **CuTe** — 一套描述「layout」的代數。
 ```cpp
 // CuTe: a layout maps logical coordinates to memory offsets.
 // A 8x16 row-major tile:
-auto layout = make_layout(make_shape(Int<8>{}, Int<16>{}),
-                          make_stride(Int<16>{}, Int<1>{}));
+auto layout = make_layout(make_shape(Int<8>{}, Int<16>{}), make_stride(Int<16>{}, Int<1>{}));
 // Compose with a swizzle to avoid bank conflicts (ch. 7) while keeping the
 // logical view unchanged:
 auto swizzled = composition(Swizzle<3, 3, 3>{}, layout);

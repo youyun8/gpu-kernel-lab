@@ -67,9 +67,10 @@ GPU_CHECK(gpuGetDeviceCount(&device_count));
 for (int dev = 0; dev < device_count; ++dev) {
     GPU_CHECK(gpuSetDevice(dev));
     int sm_count = 0;
-    GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));  // cudaDeviceGetAttribute / hipDeviceGetAttribute
+    // cudaDeviceGetAttribute / hipDeviceGetAttribute
+    GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));
     std::printf("device %d: %d SM/CU, ~%d threads to fill at 2048 resident/SM\n",
-              dev, sm_count, sm_count * 2048);
+        dev, sm_count, sm_count * 2048);
 }
 ```
 

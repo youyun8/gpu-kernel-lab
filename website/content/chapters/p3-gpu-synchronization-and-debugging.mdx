@@ -18,10 +18,9 @@ GPU kernel 通常用 grid-stride loop 讓同一份 code 支援任意 `n`:
 
 ```cpp
 __global__ void scale(float* x, int n, float a) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
-       i < n;
-       i += blockDim.x * gridDim.x) {
-    x[i] *= a;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+            i += blockDim.x * gridDim.x) {
+        x[i] *= a;
     }
 }
 ```
