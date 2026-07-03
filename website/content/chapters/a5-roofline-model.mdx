@@ -65,13 +65,13 @@ $$
 // fmaIters controls arithmetic intensity: 2 FLOP per iteration on the
 // same loaded element, so AI = 2 * fmaIters / 8 bytes (one read + one write).
 __global__ void variableIntensity(const float* in, float* out, int n, int fmaIters) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
-  float acc = in[i];
-  for (int t = 0; t < fmaIters; ++t) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float acc = in[i];
+    for (int t = 0; t < fmaIters; ++t) {
     acc = acc * 1.0000001f + 0.5f;  // one FMA
-  }
-  out[i] = acc;
+    }
+    out[i] = acc;
 }
 ```
 

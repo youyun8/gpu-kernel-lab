@@ -1,0 +1,75 @@
+# Memory Hierarchy: DRAM、Cache、SRAM
+
+Memory hierarchy 的核心事實是: 越快的記憶體越小、越靠近 compute; 越大的記憶體越慢、越需要批次化與重用。 CPU 與 GPU 名稱不同, 但物理限制相同。
+
+| 層級 | CPU 常見名稱 | GPU 常見名稱 | 粗略 latency | 設計重點 |
+| --- | --- | --- | --- | --- |
+| Register | register file | register file | ~1 cycle | 最快, 但數量有限 |
+| SRAM scratch | stack/L1-managed temporaries | shared memory / LDS | ~20-40 cycles | 程式可控制 reuse |
+| Cache SRAM | L1/L2/L3 cache | L1/L2 cache | ~20-300 cycles | 硬體自動保存 locality |
+| DRAM/HBM | DDR/HBM | HBM/global memory | ~400-1000 cycles | 大容量、高頻寬、高 latency |
+
+<Callout variant="insight" title="SRAM vs DRAM">
+SRAM 用更多電晶體換低 latency, 適合 register/cache/shared memory; DRAM/HBM 用電容密集儲存換容量與 bandwidth, 但單次 access latency 高很多。 優化 memory hierarchy 的本質是少碰 DRAM, 多用 SRAM/register。
+</Callout>
+
+## Locality
+
+**Temporal locality**: 同一份資料很快會再用一次。 例: matrix tile 被多個 multiply-add 重複使用。
+
+**Spatial locality**: 旁邊的資料也會一起用。 例: thread 讀 `a[i]`, 下一個 thread 讀 `a[i+1]`; cache line 或 memory transaction 可以一次帶回連續 bytes。
+
+```cpp
+// Good spatial locality: contiguous loads.
+for (int i = 0; i < n; ++i) sum += x[i];
+
+// Poor spatial locality: stride skips most bytes in each cache line.
+for (int i = 0; i < n; i += stride) sum += x[i];
+```
+
+## CPU vs GPU Cache Behavior
+
+CPU latency-oriented: 大 cache、複雜 prefetch、branch prediction、少量 powerful cores。 最重要的是讓 hot working set 留在 cache, 避免 false sharing 與 cache miss。
+
+GPU throughput-oriented: HBM bandwidth 高, 但單 thread latency 很高。 最重要的是 coalescing、足夠 occupancy、shared memory tiling、避免 bank conflict 與 atomic hotspot。
+
+## Working Set
+
+**Working set** 是某段時間內會被反覆使用的資料量。 如果 working set 放得進 cache/shared memory, 程式可以重用 SRAM; 放不進就會反覆打 DRAM。
+
+```text
+Matrix tile: 128 x 128 floats = 64 KiB
+If shared memory per block = 64 KiB, one tile already fills the budget.
+If the kernel needs A tile + B tile, tile size must shrink or use staging.
+```
+
+## First Optimization Question
+
+每次看到慢 kernel, 先回答:
+
+1. 每個 output element 讀/寫幾個 bytes?
+2. 這些 bytes 是否 contiguous/coalesced?
+3. 每個 byte 被重用幾次?
+4. working set 放在哪一層: register, shared/LDS, L1/L2, 還是 DRAM?
+5. bottleneck 是 bandwidth、latency、cache miss、bank conflict、還是 synchronization?
+
+<LabBox path="kernels/02-memory">
+執行 `stride_bandwidth`, `bandwidth_probe`, `transpose`。 觀察 contiguous、stride、transpose 對 achieved bandwidth 的影響, 並把結果對回 locality 與 coalescing。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼 shared memory/LDS 通常比 global memory 快?',
+      options: ['它是較小、靠近 compute 的 SRAM', '它存在 host DRAM', '它只存 int', '它不需要 address'],
+      answer: 0,
+      explanation: 'Shared memory/LDS 是 on-chip SRAM, latency 遠低於 off-chip HBM/global memory, 但容量小且需要程式管理。',
+    },
+    {
+      question: 'Temporal locality 指的是什麼?',
+      options: ['同一份資料很快會再被使用', '連續 threads 讀連續地址', '資料型別是 temporal', 'kernel launch 很短'],
+      answer: 0,
+      explanation: 'Temporal locality 是時間上的重用; spatial locality 則是地址鄰近資料一起被使用。',
+    },
+  ]}
+/>

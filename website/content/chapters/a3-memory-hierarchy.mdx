@@ -83,16 +83,16 @@ Lab 的 `pinned_vs_pageable` 用 256 MiB 的 H2D copy 實測兩者。 Pinned 通
 
 ```cpp
 __global__ void boxFilterShared(const float* in, float* out, int n) {
-  __shared__ float tile[kBlockSize + 2 * kRadius];  // shared memory: block-reused tile
-  int i = blockIdx.x * blockDim.x + threadIdx.x;    // register: thread-local scalar
+    __shared__ float tile[kBlockSize + 2 * kRadius];  // shared memory: block-reused tile
+    int i = blockIdx.x * blockDim.x + threadIdx.x;    // register: thread-local scalar
 
-  tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;  // global -> shared, coalesced
-  __syncthreads();
+    tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;  // global -> shared, coalesced
+    __syncthreads();
 
-  float sum = 0.0f;                                 // register: accumulator
-  for (int r = -kRadius; r <= kRadius; ++r)
+    float sum = 0.0f;                                 // register: accumulator
+    for (int r = -kRadius; r <= kRadius; ++r)
     sum += tile[kRadius + threadIdx.x + r];         // 17 reads, all from shared memory
-  out[i] = sum / (2 * kRadius + 1);                 // one write back to global
+    out[i] = sum / (2 * kRadius + 1);                 // one write back to global
 }
 ```
 

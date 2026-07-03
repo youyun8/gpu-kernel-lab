@@ -33,11 +33,11 @@ for each block of Q (outer):
 ```cpp
 float m_old = m_shared;
 if (e == 0) {
-  float s = score_parts[0] * scale;      // this key's score
-  float m_new = fmaxf(m_old, s);
-  p_shared = expf(s - m_new);
-  d_shared = d_shared * expf(m_old - m_new) + p_shared;  // rescale old denom
-  m_shared = m_new;
+    float s = score_parts[0] * scale;      // this key's score
+    float m_new = fmaxf(m_old, s);
+    p_shared = expf(s - m_new);
+    d_shared = d_shared * expf(m_old - m_new) + p_shared;  // rescale old denom
+    m_shared = m_new;
 }
 __syncthreads();
 

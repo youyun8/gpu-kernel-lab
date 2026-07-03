@@ -1,7 +1,14 @@
 import type { ComponentType } from 'react';
 
 // Static import map so Next.js can statically export every chapter page.
-import A0 from './a0-parallelization-and-data-races.mdx';
+import P0 from './p0-parallelization-design.mdx';
+import P1 from './p1-cpu-threading-primitives.mdx';
+import P2 from './p2-data-races-locks-and-atomics.mdx';
+import P3 from './p3-gpu-synchronization-and-debugging.mdx';
+import M0 from './m0-memory-hierarchy-model.mdx';
+import M1 from './m1-cycle-and-bandwidth-calculus.mdx';
+import M2 from './m2-locality-tiling-coalescing.mdx';
+import M3 from './m3-memory-optimization-workflow.mdx';
 import A1 from './a1-what-is-a-gpu.mdx';
 import A2 from './a2-first-kernel.mdx';
 import A3 from './a3-memory-hierarchy.mdx';
@@ -37,7 +44,14 @@ import F32 from './f32-optimization-checklist.mdx';
 import G33 from './g33-nccl-rccl-collectives.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
-  'a0-parallelization-and-data-races': A0,
+  'p0-parallelization-design': P0,
+  'p1-cpu-threading-primitives': P1,
+  'p2-data-races-locks-and-atomics': P2,
+  'p3-gpu-synchronization-and-debugging': P3,
+  'm0-memory-hierarchy-model': M0,
+  'm1-cycle-and-bandwidth-calculus': M1,
+  'm2-locality-tiling-coalescing': M2,
+  'm3-memory-optimization-workflow': M3,
   'a1-what-is-a-gpu': A1,
   'a2-first-kernel': A2,
   'a3-memory-hierarchy': A3,

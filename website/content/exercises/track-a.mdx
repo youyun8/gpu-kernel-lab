@@ -78,8 +78,8 @@ SAXPY 每個 element 讀 `x`、讀 `y`、寫 `y`, 共 3 次存取, 所以 `bytes
 
 ```cpp
 __global__ void saxpy(const float* x, float* y, float a, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) y[i] = a * x[i] + y[i];  // one FMA per element
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = a * x[i] + y[i];  // one FMA per element
 }
 ```
 

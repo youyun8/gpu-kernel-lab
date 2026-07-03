@@ -1,0 +1,102 @@
+# Track 0 練習: Parallelization Foundations
+
+這組練習對應 Track 0。 Paper 題要求你畫出 interleaving、判斷同步 primitive、估算粒度; programming 題使用 `kernels/00-parallel-foundations`。
+
+<Exercise id="P1" title="Decomposition 與 granularity" kind="paper" level="入門">
+有 `n = 10,000,000` 個元素要做 `y[i] = a * x[i] + y[i]`。 比較兩種 CPU 切法: (a) 建立 10,000,000 個 threads, 每個處理 1 element; (b) 建立 8 個 threads, 每個處理一段 contiguous slice。 哪個合理? GPU 上又為什麼可以接近一個 thread 一個 element?
+
+<Solution>
+CPU 應選 (b)。 OS thread 建立、排程、stack 與 context switch 成本遠高於單一 FMA, 10,000,000 threads 會被 overhead 淹沒。 8 個 long-lived threads 對應 core 數量級, 每個處理大 slice 才合理。
+
+GPU thread 是 device-side lightweight execution context, 由硬體以 warp/wavefront 排程, 建立與切換成本不同於 OS thread。 GPU 需要 massive data parallelism 隱藏 memory latency, 所以一個 thread 處理少量元素是合理 mapping。
+</Solution>
+</Exercise>
+
+<Exercise id="P2" title="Lost update 時序圖" kind="paper" level="入門">
+兩個 threads 同時執行 `x = x + 1`, 初始 `x = 0`。 請寫出一個 interleaving 讓最後 `x = 1`, 並標出 read、modify、write。
+
+<Solution>
+一個會 lost update 的 interleaving:
+
+```text
+T0: read x -> r0 = 0
+T1: read x -> r1 = 0
+T0: r0 + 1 -> 1
+T1: r1 + 1 -> 1
+T0: write x = 1
+T1: write x = 1
+```
+
+兩次 increment 都發生了, 但兩個 writes 寫回同一個值 1, 所以遺失一次更新。
+</Solution>
+</Exercise>
+
+<Exercise id="P3" title="選擇 mutex、atomic、reduction、semaphore" kind="paper" level="進階">
+對下列情境選同步 primitive: (a) 純計數器加一; (b) 多 threads 累加一大陣列總和; (c) bounded producer/consumer queue; (d) 修改 `std::map`。 每題說明理由。
+
+<Solution>
+(a) `std::atomic::fetch_add` 或 device `atomicAdd`: 純 RMW, 不需要保護複雜 invariant。
+
+(b) Reduction: 每 thread/block 私有累加, 最後合併; 比每元素 atomic 到同一 address 快。
+
+(c) Semaphore + mutex: semaphore 管 empty/full slot 數量, mutex 保護 queue head/tail。
+
+(d) Mutex: `std::map` 更新是複合資料結構操作, atomic counter 不能保護 tree invariant。
+</Solution>
+</Exercise>
+
+<Exercise id="P4" title="Barrier 正確性" kind="paper" level="進階">
+判斷下面 GPU 程式是否正確, 並修正:
+
+```cpp
+if (threadIdx.x < 128) {
+    shared[threadIdx.x] = input[i];
+    __syncthreads();
+    output[i] = shared[threadIdx.x];
+}
+```
+
+<Solution>
+不正確。 `__syncthreads()` 必須被同一 block 所有 threads 抵達; 放在 `threadIdx.x < 128` 的 divergent branch 中, 其他 threads 不會到 barrier。
+
+修法是所有 threads 都到 barrier, branch 只包讀寫:
+
+```cpp
+if (threadIdx.x < 128) shared[threadIdx.x] = input[i];
+__syncthreads();
+if (threadIdx.x < 128) output[i] = shared[threadIdx.x];
+```
+</Solution>
+</Exercise>
+
+<Exercise id="P5" title="執行 race 對照" kind="code" level="入門">
+編譯並執行 `race_demo`, `race_fixed_mutex`, `race_fixed_atomic`。 記錄每個程式 5 次 trial 的結果。 為什麼 racy 版的數值不穩定, 而 fixed 版穩定?
+
+<Solution>
+`race_demo` 的 `++counter` 是 read-modify-write, 多 threads 可同時讀舊值並覆蓋彼此寫入, 因此 total 小於 expected 且每次 interleaving 不同。 Mutex 版讓 RMW critical section 互斥; atomic 版讓 RMW 指令不可分割, 所以每次都等於 expected。
+</Solution>
+</Exercise>
+
+<Exercise id="P6" title="OpenMP reduction vs critical" kind="code" level="進階">
+執行 `openmp_reduction`。 解釋 racy、critical、reduction 三版的 correctness 與時間差。 接著把 iteration 數改大或改小, 觀察 critical 與 reduction 的比例是否改變。
+
+<Solution>
+racy 版錯, 因為共享 counter 沒同步。 critical 版對, 但每次 increment 都進同一個 critical section, 幾乎完全序列化。 reduction 版對且快, 因為 OpenMP 建立 thread-private partial sum, 最後才合併。 Iteration 越多, critical 的 lock overhead 越明顯。
+</Solution>
+</Exercise>
+
+<Exercise id="P7" title="Semaphore pipeline" kind="code" level="進階">
+執行 `cpu_semaphore_pipeline`。 修改 queue capacity 為 1、8、1024, 觀察輸出 correctness 是否改變。 解釋 `empty_slots`, `full_slots`, mutex 各自保護什麼。
+
+<Solution>
+Correctness 不應改變, 因為 semaphore protocol 對任意 capacity 都維持 bounded queue invariant。 `empty_slots` 表示還能寫入幾格, 防止 producer 覆蓋未消費 slot; `full_slots` 表示可讀幾格, 防止 consumer 讀空; mutex 保護 `head`, `tail`, `buffer` 的複合更新。
+</Solution>
+</Exercise>
+
+<Exercise id="P8" title="GPU histogram race" kind="code" level="進階">
+有 GPU toolchain 時執行 `gpu_histogram_race`。 為什麼 racy histogram 比 CPU `race_demo` 更容易大幅錯誤? Atomic 版雖然正確, 為什麼仍可能慢?
+
+<Solution>
+GPU 同時有大量 threads 更新少數 bins, contention 遠高於 8 個 CPU threads 更新一個 counter, 所以 lost update 非常嚴重。 Atomic 版把每次 bin update 正確序列化, 但所有打同一 bin 的 updates 仍要排隊, hotspot 會限制 throughput。 更好的做法是 warp/block-private histogram, 最後 merge。
+</Solution>
+</Exercise>

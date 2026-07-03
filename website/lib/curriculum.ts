@@ -17,20 +17,96 @@ export interface TrackMeta {
 
 export const tracks: TrackMeta[] = [
   {
+    id: 'p-parallelization',
+    label: 'Track 0 — 平行化基礎',
+    level: 'Foundations',
+    color: '#d29922',
+    description:
+      '從工作切割開始, 用 C++ std::thread / OpenMP / Pthread 建立同步觀念, 再對照 CUDA/ROCm 的 blocks、warps、atomics、barriers 與 fences。',
+    chapters: [
+      {
+        slug: 'p0-parallelization-design',
+        num: 0,
+        title: '平行化設計: 從工作切割開始',
+        summary:
+          'Decomposition、data/task parallelism、granularity、load balancing、critical path, 以及 CPU thread/core vs GPU block/warp/thread 的硬體 mapping。',
+        lab: 'kernels/00-parallel-foundations',
+      },
+      {
+        slug: 'p1-cpu-threading-primitives',
+        num: 1,
+        title: 'CPU 平行化: C++ / OpenMP / Pthread Primitives',
+        summary:
+          'std::thread、pthread_create、OpenMP parallel for、mutex、semaphore、condition variable、barrier、atomic 與 memory_order。',
+        lab: 'kernels/00-parallel-foundations',
+      },
+      {
+        slug: 'p2-data-races-locks-and-atomics',
+        num: 2,
+        title: 'Data Race、Locks、Atomics 與 Reduction',
+        summary:
+          'Data race 與 lost update; mutex/critical、std::atomic/device atomic、OpenMP reduction、GPU block reduction、barrier/fence 的雙邊對照。',
+        lab: 'kernels/00-parallel-foundations',
+      },
+      {
+        slug: 'p3-gpu-synchronization-and-debugging',
+        num: 3,
+        title: 'GPU 平行化: CUDA / ROCm Synchronization',
+        summary:
+          'GPU 為何少用 lock/semaphore、device atomics、__syncthreads、cooperative groups、__threadfence、Compute Sanitizer 與 ROCm debug workflow。',
+        lab: 'kernels/00-parallel-foundations',
+      },
+    ],
+  },
+  {
+    id: 'm-memory-hierarchy',
+    label: 'Track M — Memory Hierarchy',
+    level: 'Foundations',
+    color: '#6e7681',
+    description:
+      '從 DRAM/SRAM/cache/register 的硬體模型出發, 學會 cycle、bandwidth、arithmetic intensity 的紙上估算, 再落到 coalescing、tiling、bank conflict 與 optimization workflow。',
+    chapters: [
+      {
+        slug: 'm0-memory-hierarchy-model',
+        num: 0,
+        title: 'Memory Hierarchy: DRAM、Cache、SRAM',
+        summary:
+          'Register、shared memory/LDS、L1/L2 cache、DRAM/HBM 的 latency/capacity trade-off, temporal/spatial locality 與 working set。',
+        lab: 'kernels/02-memory',
+      },
+      {
+        slug: 'm1-cycle-and-bandwidth-calculus',
+        num: 1,
+        title: 'Cycle 與 Bandwidth 的紙上計算',
+        summary:
+          'Latency cycles、bytes moved、achieved bandwidth、arithmetic intensity、roofline ridge point、transaction/cache-line counting 與 latency hiding 粗估。',
+        lab: 'kernels/02-memory',
+      },
+      {
+        slug: 'm2-locality-tiling-coalescing',
+        num: 2,
+        title: 'Locality、Tiling、Coalescing',
+        summary:
+          'Coalesced access、stride waste、shared memory/LDS tiling、bank conflict padding、AoS/SoA layout 與 CPU cache blocking。',
+        lab: 'kernels/02-memory',
+      },
+      {
+        slug: 'm3-memory-optimization-workflow',
+        num: 3,
+        title: 'Memory Optimization Workflow',
+        summary:
+          '用 bytes/FLOP/counters 分類 bottleneck, 選擇 layout、tiling、vectorization、privatization 等 transformation, 並驗證 side effects。',
+        lab: 'kernels/02-memory',
+      },
+    ],
+  },
+  {
     id: 'a-basics',
     label: 'Track A — 入門',
     level: 'Beginner',
     color: '#39d353',
     description: '建立 GPU 的心智模型: 從硬體設計哲學到第一個能跑的 kernel, 以及如何正確測量效能。',
     chapters: [
-      {
-        slug: 'a0-parallelization-and-data-races',
-        num: 0,
-        title: '平行化設計與 Data Race',
-        summary:
-          'decomposition、granularity、把工作 map 到硬體; data race 與 lost update; mutex/atomic/reduction/barrier 的 CPU↔GPU 對照, 以及 ThreadSanitizer 與 compute-sanitizer。',
-        lab: 'kernels/00-parallel-foundations',
-      },
       {
         slug: 'a1-what-is-a-gpu',
         num: 1,
@@ -382,6 +458,26 @@ export interface ExerciseSetMeta {
 
 // One exercise set per track. Slugs map to MDX files in content/exercises/.
 export const exerciseSets: ExerciseSetMeta[] = [
+  {
+    slug: 'track-p',
+    trackId: 'p-parallelization',
+    trackLabel: 'Track 0 — 平行化基礎',
+    trackColor: '#d29922',
+    title: 'Track 0 練習: Parallelization Foundations',
+    summary:
+      'Decomposition、lost update interleaving、mutex/atomic/reduction/semaphore 選型、barrier 正確性, 以及 CPU/GPU race demos。',
+    count: 8,
+  },
+  {
+    slug: 'track-m',
+    trackId: 'm-memory-hierarchy',
+    trackLabel: 'Track M — Memory Hierarchy',
+    trackColor: '#6e7681',
+    title: 'Track M 練習: Memory Hierarchy',
+    summary:
+      'Latency cycle 換算、bandwidth/roofline 計算、cache-line/transaction counting、tile 容量估算, 以及 stride/transpose/roofline programming labs。',
+    count: 10,
+  },
   {
     slug: 'track-a',
     trackId: 'a-basics',

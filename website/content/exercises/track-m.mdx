@@ -1,0 +1,99 @@
+# Track M 練習: Memory Hierarchy
+
+這組練習要求你先做 pencil-and-paper 計算, 再用 `kernels/02-memory` 和既有 benchmark 驗證。 除非題目另有指定, 假設 `float = 4 bytes`, CPU cache line = 64 bytes, GPU ideal warp transaction = 128 bytes。
+
+<Exercise id="M1" title="Latency cycle 換算" kind="paper" level="入門">
+GPU clock = 1.6 GHz。 Register access 約 1 cycle, shared memory 約 30 cycles, HBM 約 800 cycles。 請換算三者約多少 ns, 並說明為什麼 GPU 仍能忍受 800-cycle HBM latency。
+
+<Solution>
+1 cycle = `1 / 1.6e9 s = 0.625 ns`。 Register 約 0.625 ns; shared memory 約 18.75 ns; HBM 約 500 ns。
+
+GPU 忍受高 latency 的方式不是讓單一 thread 等得更短, 而是讓大量 warps/wavefronts resident。 一個 warp 等 HBM 時, scheduler 切到其他 ready warp 執行。
+</Solution>
+</Exercise>
+
+<Exercise id="M2" title="Vector add bandwidth" kind="paper" level="入門">
+`c = a + b`, `n = 2^26` floats, runtime = 1.2 ms。 (a) 計算 bytes moved; (b) achieved bandwidth; (c) 若 peak = 1555 GB/s, 是 peak 的幾 %?
+
+<Solution>
+(a) 每 element 讀 a、讀 b、寫 c = 12 bytes。 `12 * 2^26 = 805,306,368 bytes = 0.805 GB`。
+
+(b) `0.805 GB / 0.0012 s = 671 GB/s`。
+
+(c) `671 / 1555 = 43.2%`。 這是 memory-bound kernel, 主要看 GB/s 而非 GFLOP/s。
+</Solution>
+</Exercise>
+
+<Exercise id="M3" title="Roofline ridge point" kind="paper" level="進階">
+硬體 peak compute = 60 TFLOP/s, peak memory bandwidth = 3 TB/s。 (a) ridge point 是多少 FLOP/byte? (b) AI = 4 的 kernel 受什麼限制? 上限多少 TFLOP/s? (c) AI = 40 呢?
+
+<Solution>
+(a) Ridge point = `60e12 / 3e12 = 20 FLOP/byte`。
+
+(b) AI = 4 < 20, bandwidth-bound。 上限 = `3 TB/s * 4 FLOP/byte = 12 TFLOP/s`。
+
+(c) AI = 40 > 20, compute-bound。 上限約 peak compute = 60 TFLOP/s。
+</Solution>
+</Exercise>
+
+<Exercise id="M4" title="Cache line waste" kind="paper" level="進階">
+CPU loop 每次讀一個 `float`, stride = 16 floats。 Cache line = 64 bytes。 (a) 每次讀入 cache line 後實際使用幾 bytes? (b) 有效使用率是多少? (c) 這對 bandwidth 有什麼影響?
+
+<Solution>
+Stride = 16 floats = 64 bytes, 所以每次碰到新的 cache line。 讀入 64 bytes, 只使用 4 bytes。
+
+有效使用率 = `4 / 64 = 6.25%`。 即使 DRAM 實際搬了大量 cache lines, 程式只用其中很少 bytes, useful bandwidth 最多約為 raw bandwidth 的 1/16。
+</Solution>
+</Exercise>
+
+<Exercise id="M5" title="GPU transaction counting" kind="paper" level="進階">
+一個 warp 32 lanes, 每 lane 讀一個 float。 比較 (a) lane `t` 讀 `x[base + t]`; (b) lane `t` 讀 `x[base + 32*t]`。 假設 128-byte aligned transaction, 各需要多少 transactions?
+
+<Solution>
+(a) 32 lanes * 4 bytes = 128 bytes contiguous, 且 base aligned 時理想上 1 個 128-byte transaction。
+
+(b) 相鄰 lanes 間距 = 32 floats = 128 bytes, 每 lane 落在不同 128-byte segment, 最壞約 32 transactions。 Useful bytes 一樣是 128 bytes, 但實際 transaction bytes 可變成 4096 bytes。
+</Solution>
+</Exercise>
+
+<Exercise id="M6" title="Shared memory tile 容量" kind="paper" level="進階">
+一個 GEMM block 要同時放 A tile 與 B tile 到 shared memory。 Tile shape 都是 `T x T`, float。 Shared memory budget = 64 KiB。 不考慮 padding, 最大 T 約是多少?
+
+<Solution>
+兩個 tiles 共 `2 * T * T * 4 bytes <= 64 KiB = 65,536 bytes`。
+
+`T^2 <= 65,536 / 8 = 8192`, 所以 `T <= sqrt(8192) ≈ 90.5`。 常見會選 64 或 80/88 這類符合 block/thread mapping、alignment、bank behavior 的值, 而不是只選數學最大。
+</Solution>
+</Exercise>
+
+<Exercise id="M7" title="Stride bandwidth 實測" kind="code" level="入門">
+編譯並執行 `kernels/02-memory/stride_bandwidth`。 記錄 stride = 1, 2, 4, 8, 16, 32 的 bandwidth。 用 cache line 或 transaction waste 解釋趨勢。
+
+<Solution>
+預期 stride 越大, useful bandwidth 越低。 Stride = 1 最 coalesced/cache-friendly; stride 增加後每個 transaction/cache line 中被實際使用的 bytes 下降, hardware 搬了資料但程式丟掉大部分。
+</Solution>
+</Exercise>
+
+<Exercise id="M8" title="Transpose padding" kind="code" level="進階">
+執行 `kernels/02-memory/transpose`。 找出 naive transpose、shared-memory tiled transpose、padding 版本的 bandwidth 差異。 哪個 transformation 修 coalescing? 哪個修 bank conflict?
+
+<Solution>
+Naive transpose 通常有 uncoalesced writes 或 reads。 Shared-memory tiled transpose 讓 global load/store 都較接近 coalesced: 先 coalesced load 到 tile, 再從 tile 轉置後 coalesced store。 Padding 版本主要修 shared memory column access 的 bank conflict。
+</Solution>
+</Exercise>
+
+<Exercise id="M9" title="Roofline probe" kind="code" level="進階">
+執行 `kernels/02-memory/roofline_probe`。 對每個測試點寫下 AI、GB/s、GFLOP/s。 找出從 bandwidth-bound 轉向 compute-bound 的大概位置, 並和紙上 ridge point 比較。
+
+<Solution>
+低 AI 點應接近 bandwidth roof: GB/s 高, GFLOP/s 低。 AI 上升後, GFLOP/s 上升, GB/s 可能下降。 轉折點應接近 `peak FLOP/s / peak bandwidth` 的 ridge point, 但實際會受 instruction mix、occupancy、cache、compiler 影響。
+</Solution>
+</Exercise>
+
+<Exercise id="M10" title="Memory optimization mini-project" kind="code" level="挑戰">
+選 `vectorized_copy`, `aosoa_layout`, 或 `gather_scatter` 其中一個例子, 做一份短報告: (1) 初始 bytes/FLOP 或 transaction 估算; (2) 實測 bandwidth; (3) 一個你嘗試的 optimization; (4) 新實測; (5) correctness 檢查方法。
+
+<Solution>
+合格報告應包含紙上模型與實測對照。 重點不是一定要變快, 而是能說清楚 hypothesis: 例如 vectorized load 是否改善 instruction overhead/alignment, SoA 是否改善 coalescing, gather/scatter 是否被 index randomness 或 atomic contention 限制。 Correctness 至少要比較 CPU reference 或 checksum, 並測 tail/misaligned sizes。
+</Solution>
+</Exercise>

@@ -100,13 +100,13 @@ CCL_CHECK(ncclCommInitAll(comms.data(), num_gpus, nullptr));
 // Group the per-device calls so they launch as one collective.
 CCL_CHECK(ncclGroupStart());
 for (int g = 0; g < num_gpus; ++g) {
-  CCL_CHECK(ncclAllReduce(send_bufs[g], recv_bufs[g], count, ncclFloat, ncclSum,
+    CCL_CHECK(ncclAllReduce(send_bufs[g], recv_bufs[g], count, ncclFloat, ncclSum,
                           comms[g], streams[g]));
 }
 CCL_CHECK(ncclGroupEnd());
 for (int g = 0; g < num_gpus; ++g) {
-  GPU_CHECK(gpuSetDevice(g));
-  GPU_CHECK(gpuStreamSynchronize(streams[g]));
+    GPU_CHECK(gpuSetDevice(g));
+    GPU_CHECK(gpuStreamSynchronize(streams[g]));
 }
 ```
 

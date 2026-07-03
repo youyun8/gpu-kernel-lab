@@ -1,0 +1,103 @@
+# 平行化設計: 從工作切割開始
+
+平行化不是先選 API, 而是先把問題改寫成「很多 worker 可以同時做, 而且彼此少互相等待」。 本章建立一組 CPU 與 GPU 共用的 vocabulary: **decomposition**, **granularity**, **load balancing**, **mapping to hardware**, **critical path**, **throughput**。
+
+<Callout variant="insight" title="Track 0 的讀法">
+這個 track 先用 CPU threads 看清楚同步問題, 再把同一組概念搬到 CUDA/ROCm。 API 會變, 但問題本質不變: 切工作、分資料、控制共享狀態、驗證結果。
+</Callout>
+
+## Decomposition
+
+**Data parallelism** 是最容易放大的平行化: 每個 worker 對不同資料做同一件事。 SAXPY、image filter、embedding lookup、histogram、reduction 都屬於這類。
+
+```cpp
+// CPU: each std::thread owns a contiguous slice.
+void saxpyCpu(int num_threads, int n, float a, const float* x, float* y) {
+    std::vector<std::thread> pool;
+    for (int t = 0; t < num_threads; ++t) {
+    pool.emplace_back([=]() {
+      int begin = static_cast<long long>(n) * t / num_threads;
+      int end = static_cast<long long>(n) * (t + 1) / num_threads;
+      for (int i = begin; i < end; ++i) y[i] = a * x[i] + y[i];
+    });
+    }
+    for (auto& thread : pool) thread.join();
+}
+```
+
+```cpp
+// GPU: one device thread per element.
+__global__ void saxpyGpu(int n, float a, const float* x, float* y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = a * x[i] + y[i];
+}
+```
+
+**Task parallelism** 是把不同工作交給不同 worker: 一個 thread 讀 input, 一個 thread decode, 一個 thread 做 compute, 一個 thread 寫 output。 CPU 很常這樣設計; GPU 也能用 streams/pipelines 表達, 但單一 kernel 內通常更偏 data parallel。
+
+## Granularity
+
+**Granularity** 是每個 worker 拿到的工作量。 CPU thread 建立、OS scheduling、cache warmup 都不便宜, 所以 CPU 常用 coarse-grained chunks: 每個 thread 做數千到數百萬個元素。 GPU thread 很便宜, 但單一 thread 很弱, 所以 GPU 常用 fine-grained mapping: 一個 thread 做 1 到 8 個元素, 讓 blocks/warps 數量夠多。
+
+| 問題 | 粒度太粗 | 粒度太細 |
+| --- | --- | --- |
+| CPU | cores 沒吃滿、tail thread 拖住整體 | thread 管理與同步成本太高 |
+| GPU | blocks 太少, SM/CU 閒置 | index overhead 大、global atomic contention 高 |
+
+## Load Balancing
+
+**Load balancing** 問的是每個 worker 是否差不多忙。 Dense vector add 天然平衡; sparse rows、variable-length sequences、work queues 就不一定。
+
+```cpp
+// Static partitioning is simple but bad when row_cost[row] is skewed.
+#pragma omp parallel for schedule(static)
+for (int row = 0; row < num_rows; ++row) processRow(row);
+
+// Dynamic scheduling trades overhead for better balance.
+#pragma omp parallel for schedule(dynamic, 8)
+for (int row = 0; row < num_rows; ++row) processRow(row);
+```
+
+GPU 上的對應手段是 grid-stride loop、persistent kernels、work queues、split-K、以及把大 row 再切成多個 tiles。 這些都是同一件事: 把長尾工作拆開, 讓 idle worker 可以拿下一個 chunk。
+
+## Mapping To Hardware
+
+| 概念 | C++ / OpenMP / Pthread | CUDA / ROCm |
+| --- | --- | --- |
+| worker | OS thread | device thread |
+| group | thread pool / OpenMP team | block / CTA |
+| SIMD/SIMT | vector lane, compiler auto-vectorization | warp / wavefront |
+| private state | stack/local variable | register/local memory |
+| shared state | heap/global object guarded by lock/atomic | global memory, shared memory/LDS |
+| synchronization | mutex, semaphore, barrier, condition variable, atomic | `atomicAdd`, `__syncthreads()`, cooperative groups, fences |
+
+GPU 偏好 **massive data parallelism**: 它不是靠一條 thread 很快, 而是靠大量 resident warps/wavefronts 隱藏 memory latency。 當一個 warp 等 global memory, scheduler 切到另一個 ready warp; 要讓這招有效, kernel 必須提供足夠多獨立小工作。
+
+## 設計流程
+
+1. 找出獨立資料單位: element、row、tile、request、token。
+2. 決定 shared state: 是否有 global counter、histogram bin、queue、output accumulator。
+3. 先寫 serial reference, 再寫 CPU parallel version, 最後寫 GPU version。
+4. 對每個 shared state 問: 可以 privatize 嗎? 可以 reduction 嗎? 必須 atomic 嗎? 真的需要 lock 嗎?
+5. 用小資料驗 correctness, 再用大資料看 throughput 與 load balance。
+
+<LabBox path="kernels/00-parallel-foundations">
+先跑 `race_demo`, `race_fixed_atomic`, `openmp_reduction`, `gpu_histogram_race`。 注意同樣是「很多 worker 更新共享結果」, CPU 與 GPU 的正確性問題完全相同, 只是同步工具與粒度不同。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'GPU 為什麼特別偏好 massive data parallelism?',
+      options: ['因為 GPU thread 比 CPU thread 有更大的 stack', '因為大量 resident warps/wavefronts 可以隱藏 memory latency', '因為 GPU 不能做 task parallelism', '因為所有 GPU memory 都是 cache'],
+      answer: 1,
+      explanation: 'GPU 靠 hardware scheduler 在 warp 等 memory 時切到其他 ready warp; 要有效隱藏 latency, 必須有大量獨立工作。',
+    },
+    {
+      question: '看到 sparse rows 長短差很多時, 最需要先檢查哪個平行化問題?',
+      options: ['Load balancing', 'Endian', 'Linker order', 'Header guard'],
+      answer: 0,
+      explanation: '長 row 會拖住分到它的 worker; 需要 dynamic schedule、work queue 或把 row 再切小。',
+    },
+  ]}
+/>

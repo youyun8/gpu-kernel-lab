@@ -58,7 +58,7 @@ AITER 的定位是「生態加速器」: vLLM 與 SGLang 的 ROCm backend 大量
 // Wavefront-width portability: never hardcode 32.
 uint64_t voted = __ballot(pred);   // 64 meaningful bits on CDNA, 32 on NVIDIA
 for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-  v += __shfl_down(v, offset);     // 6 steps on a 64-lane wavefront, 5 on a warp
+    v += __shfl_down(v, offset);     // 6 steps on a 64-lane wavefront, 5 on a warp
 }
 ```
 

@@ -26,18 +26,18 @@ GPU 以 warp (NVIDIA, 32 threads) 或 wavefront (AMD, 64 threads, RDNA 可 32) �
 // Uniform: the condition depends only on the warp index, so all 32
 // lanes of a warp take the same path. No serialization.
 __global__ void branchUniform(const float* in, float* out, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
-  int warp = i / 32;
-  out[i] = (warp % 2 == 0) ? heavyPath(in[i]) : lightPath(in[i]);
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    int warp = i / 32;
+    out[i] = (warp % 2 == 0) ? heavyPath(in[i]) : lightPath(in[i]);
 }
 
 // DIVERGENT on purpose: even and odd lanes of the SAME warp branch
 // apart, so every warp executes heavyPath AND lightPath back to back.
 __global__ void branchDivergent(const float* in, float* out, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
-  out[i] = (i % 2 == 0) ? heavyPath(in[i]) : lightPath(in[i]);
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = (i % 2 == 0) ? heavyPath(in[i]) : lightPath(in[i]);
 }
 ```
 
@@ -65,10 +65,10 @@ A100 有 108 個 SM, 每個 SM 可駐留 64 個 warp = 2048 threads; MI300X 有 
 int device_count = 0;
 GPU_CHECK(gpuGetDeviceCount(&device_count));
 for (int dev = 0; dev < device_count; ++dev) {
-  GPU_CHECK(gpuSetDevice(dev));
-  int sm_count = 0;
-  GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));  // cudaDeviceGetAttribute / hipDeviceGetAttribute
-  std::printf("device %d: %d SM/CU, ~%d threads to fill at 2048 resident/SM\n",
+    GPU_CHECK(gpuSetDevice(dev));
+    int sm_count = 0;
+    GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));  // cudaDeviceGetAttribute / hipDeviceGetAttribute
+    std::printf("device %d: %d SM/CU, ~%d threads to fill at 2048 resident/SM\n",
               dev, sm_count, sm_count * 2048);
 }
 ```

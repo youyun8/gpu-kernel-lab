@@ -1,0 +1,171 @@
+# CPU 平行化: C++ / OpenMP / Pthread Primitives
+
+CPU 平行化先從三個層次學起: C++ standard library 給現代 C++ 的安全預設, OpenMP 用 directives 快速平行化 loop, Pthread 則讓你看見底層 POSIX primitives。 這三者都在解同一組問題: thread lifecycle、work sharing、mutual exclusion、signaling、barrier、atomic。
+
+## Thread Lifecycle
+
+`std::thread` 的基本生命週期是 create → run → join。 `join()` 是第一個同步點: main thread 等 worker 完成後才繼續。
+
+```cpp
+std::vector<std::thread> threads;
+for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&, t] {
+    int begin = n * t / num_threads;
+    int end = n * (t + 1) / num_threads;
+    for (int i = begin; i < end; ++i) out[i] = f(in[i]);
+    });
+}
+for (auto& thread : threads) thread.join();
+```
+
+Pthread 寫法更明確, 也更容易犯錯, 但很多 runtime/library 內部仍建立在這些 primitive 上:
+
+```cpp
+pthread_t thread;
+pthread_create(&thread, nullptr, workerFn, &args);
+pthread_join(thread, nullptr);
+```
+
+OpenMP 把 thread pool 與 work sharing 藏在 directive 後面:
+
+```cpp
+#pragma omp parallel for
+for (int i = 0; i < n; ++i) out[i] = f(in[i]);
+```
+
+## Mutual Exclusion: Mutex / Critical
+
+當多個 threads 必須更新同一個 shared object, 最直接的修法是 **mutual exclusion**: 同一時間只允許一個 thread 進入 critical section。
+
+```cpp
+std::mutex mu;
+long long counter = 0;
+
+void worker() {
+    for (int i = 0; i < iters; ++i) {
+    std::lock_guard<std::mutex> lock(mu);
+    ++counter;
+    }
+}
+```
+
+```cpp
+pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_lock(&mu);
+++counter;
+pthread_mutex_unlock(&mu);
+```
+
+```cpp
+#pragma omp critical
+++counter;
+```
+
+Mutex 正確但會序列化 critical section。 如果每次 loop 都搶同一把 lock, 程式雖然平行啟動, 熱點實際上仍是單執行緒。
+
+## Semaphore: Resource Counting
+
+**Semaphore** 是「有幾張通行證」的同步原語。 Mutex 是 binary ownership; semaphore 是 counted availability。 它常用在 bounded queue、producer/consumer pipeline、限制同時使用某資源的 worker 數量。
+
+```cpp
+sem_t empty_slots;
+sem_t full_slots;
+
+sem_init(&empty_slots, 0, capacity);
+sem_init(&full_slots, 0, 0);
+
+// producer
+sem_wait(&empty_slots);
+push(item);
+sem_post(&full_slots);
+
+// consumer
+sem_wait(&full_slots);
+item = pop();
+sem_post(&empty_slots);
+```
+
+`kernels/00-parallel-foundations/cpu_semaphore_pipeline.cpp` 實作一個 bounded producer/consumer queue: `empty_slots` 防止 producer 覆蓋尚未消費的 slot, `full_slots` 防止 consumer 讀空 slot。 同一段 shared queue index 仍然用 mutex 保護, 因為 semaphore 管數量, mutex 管資料結構一致性。
+
+## Condition Variable
+
+**Condition variable** 適合等待某個 predicate 變成 true, 例如 queue not empty 或 shutdown flag。 它必須搭配 mutex, 並用 `while` 或 predicate 版本處理 spurious wakeup。
+
+```cpp
+std::mutex mu;
+std::condition_variable cv;
+std::queue<int> q;
+
+void consumer() {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&] { return !q.empty(); });
+    int item = q.front();
+    q.pop();
+}
+```
+
+Semaphore 通常用於 counted resource; condition variable 用於 arbitrary condition。 兩者都不是保護 shared data 的替代品, shared data 仍需要 mutex 或 lock-free protocol。
+
+## Barrier
+
+**Barrier** 是 phase boundary: 所有 workers 都到達後, 下一階段才開始。 Pthread 有 `pthread_barrier_wait`; OpenMP 有 `#pragma omp barrier`。
+
+```cpp
+#pragma omp parallel
+{
+    initializeThreadLocalScratch();
+#pragma omp barrier
+    consumeAllScratch();
+}
+```
+
+GPU 的 `__syncthreads()` 是 block-local barrier; 第 3 章會把這個限制講清楚。
+
+## Atomics
+
+Atomic 把 read-modify-write 變成不可分割操作。 純 counter 可以用 relaxed memory order, 因為只要求 counter 本身正確:
+
+```cpp
+std::atomic<long long> counter{0};
+counter.fetch_add(1, std::memory_order_relaxed);
+```
+
+若 atomic 也承擔 publish/consume protocol, 就要 release/acquire:
+
+```cpp
+payload = value;
+ready.store(true, std::memory_order_release);
+
+while (!ready.load(std::memory_order_acquire)) {}
+use(payload);
+```
+
+## CPU Checklist
+
+- 共享資料可不可以變 thread-local, 最後再 merge?
+- critical section 是否小到值得用 mutex?
+- semaphore 是否只在管理資源數量, 沒有被誤用成資料保護?
+- barrier 是否所有 threads 都一定會抵達?
+- atomic 的 memory order 是否符合資料發布需求?
+- 有沒有 false sharing: 不同 threads 寫不同變數, 但落在同一條 cache line?
+
+<LabBox path="kernels/00-parallel-foundations">
+執行 `race_fixed_mutex`, `race_fixed_atomic`, `pthread_race`, `openmp_reduction`, `cpu_semaphore_pipeline`。 比較 mutex/atomic/reduction/semaphore 各自解的問題: mutual exclusion、indivisible RMW、privatize-then-combine、bounded resource signaling。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Semaphore 和 mutex 最大差異是什麼?',
+      options: ['Semaphore 管可用資源數量; mutex 管 critical section ownership', 'Semaphore 只能用在 GPU', 'Mutex 可以有 10 個 owner', 'Semaphore 會自動避免 false sharing'],
+      answer: 0,
+      explanation: 'Semaphore 的核心是 counted permits; mutex 的核心是 exclusive ownership。 Bounded queue 常同時需要兩者。',
+    },
+    {
+      question: '為什麼 condition_variable 的 wait 要檢查 predicate?',
+      options: ['避免 spurious wakeup 或醒來後條件已被其他 thread 消耗', '讓 compiler 更快', '因為 mutex 不支援 queue', '因為 OpenMP 要求'],
+      answer: 0,
+      explanation: '被喚醒不代表條件仍成立, 所以要在持有 lock 時重新檢查 predicate。',
+    },
+  ]}
+/>

@@ -1,0 +1,146 @@
+# GPU 平行化: CUDA / ROCm Synchronization
+
+GPU 平行化使用不同 API, 但概念仍接續 CPU: shared state 會 race, atomic 讓 read-modify-write 不可分割, barrier 建立 phase boundary, fence 建立 visibility order。 差別在於 GPU 的 worker 數量大很多, 所以「在 CPU 可接受的同步」常會在 GPU 上變成效能或 correctness 問題。
+
+## Hardware Mapping
+
+| CPU 概念 | CUDA / ROCm 對應 |
+| --- | --- |
+| thread pool | grid launch |
+| worker thread | device thread |
+| worker group | block / CTA |
+| SIMD lanes | warp (NVIDIA) / wavefront (AMD) |
+| shared scratch | shared memory / LDS |
+| global shared state | global memory |
+| barrier | `__syncthreads()` / cooperative groups |
+
+GPU kernel 通常用 grid-stride loop 讓同一份 code 支援任意 `n`:
+
+```cpp
+__global__ void scale(float* x, int n, float a) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+       i < n;
+       i += blockDim.x * gridDim.x) {
+    x[i] *= a;
+    }
+}
+```
+
+## Locks 與 Semaphores 為何少見
+
+CPU 上 mutex/semaphore 是日常工具; GPU kernel 內則通常避免 blocking lock 或 semaphore。 原因有三個:
+
+- GPU 有成千上萬 threads, 一把 global lock 會把吞吐量壓回 1。
+- SIMT execution 讓同一 warp/wavefront 裡的 lanes 可能一部分持鎖、一部分 spin wait, 很容易造成 forward progress 問題。
+- GPU scheduler 期待大量 independent warps, spin wait 會浪費 issue slots 與 memory bandwidth。
+
+GPU 的替代方案通常是:
+
+- 用 **atomic** 表達少量 coordination。
+- 用 **privatization + reduction** 消除 hot global update。
+- 用 **kernel boundary / streams / events** 表達 phase sequencing。
+- 用 cooperative groups 只在明確支援的 launch 模式下做 grid-level sync。
+
+## Device Atomics
+
+Histogram 是最直接的對照: racy 版 `bins[b] = bins[b] + 1` 會 lost update; atomic 版正確但可能有 contention。
+
+```cpp
+__global__ void histogramAtomic(const int* items, int* bins, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+    atomicAdd(&bins[items[i]], 1);
+    }
+}
+```
+
+CUDA/ROCm 都提供 device atomics。 新架構還要注意 **atomic scope**: block/device/system scope 越大, visibility 越廣, 成本通常也越高。 只需要 block 內同步時不要買 system scope。
+
+## Block Barrier: `__syncthreads()`
+
+`__syncthreads()` 等同一個 block 內所有 threads 抵達, 並讓前面的 shared memory 寫入對同 block 其他 threads 可見。 它不能同步不同 blocks。
+
+```cpp
+__shared__ float partials[256];
+partials[threadIdx.x] = input[i];
+__syncthreads();
+
+for (int stride = 128; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) partials[threadIdx.x] += partials[threadIdx.x + stride];
+    __syncthreads();
+}
+```
+
+最危險的錯誤是把 barrier 放進 divergent branch, 讓部分 threads 永遠不到達:
+
+```cpp
+if (threadIdx.x < 128) {
+    __syncthreads();  // BUG: only half the block reaches the barrier
+}
+```
+
+## Fence: Visibility Without Waiting
+
+Barrier 是「等人」; fence 是「保證我的寫入先被看見」。 跨 block single-pass reduction 會用 `__threadfence()` 加 atomic ticket:
+
+```cpp
+partials[blockIdx.x] = block_sum;
+__threadfence();                       // publish partial before ticket
+unsigned ticket = atomicAdd(done, 1);
+if (ticket == gridDim.x - 1) finalize(partials);
+```
+
+少了 fence, 最後一個 block 可能看到 ticket 已滿, 卻讀到其他 block 尚未對 device 可見的 partial。
+
+## Reduction Pattern
+
+Reduction 是 GPU 平行化必學模式: 每個 thread 算 private partial, warp/block 內合併, 最後每 block 寫出一個 partial 或 atomic 到 global result。 這比每個 element 都 atomic 到同一個 global address 快得多。
+
+`kernels/00-parallel-foundations/gpu_block_reduce.cpp` 是基礎版; `kernels/04-reductions-softmax` 則延伸到 warp shuffle、softmax 與更完整的 reduction optimization。
+
+## Debugging
+
+CPU race 用 ThreadSanitizer:
+
+```bash
+g++ -fsanitize=thread -O1 -g race_demo.cpp -o race_tsan
+./race_tsan
+```
+
+CUDA race/memory bug 用 Compute Sanitizer:
+
+```bash
+compute-sanitizer --tool memcheck ./gpu_histogram_race
+compute-sanitizer --tool racecheck ./gpu_block_reduce
+```
+
+ROCm/HIP 對應 workflow 是 `rocgdb`, `rocprofv3`, HIP runtime error checks, 以及能支援的 sanitizer build。 Host-side threading bug 仍可用 ThreadSanitizer。
+
+## Pitfalls
+
+- **Data race**: 未同步 shared address read/write 或 read-modify-write。
+- **Race condition**: 結果依賴時序, 即使每個 access 都 atomic 仍可能發生邏輯 race。
+- **Deadlock**: divergent barrier、錯誤 spin protocol、host/device 等待順序錯。
+- **False sharing**: CPU cache line 問題; GPU 類比是 atomic hotspot 與 memory segment contention。
+- **Nondeterminism**: atomic floating-point reduction 順序不固定, 低位可能 run-to-run 不同。
+
+<LabBox path="kernels/00-parallel-foundations">
+有 GPU toolchain 時執行 `gpu_histogram_race`, `gpu_block_reduce`, `gpu_threadfence`。 第一個展示 racy vs atomic histogram, 第二個展示 block barrier reduction, 第三個展示 cross-block fence + atomic ticket protocol。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '__syncthreads() 能同步什麼範圍?',
+      options: ['同一 block 內所有 threads', '整個 grid 所有 blocks', 'host 與 device', '所有 GPU'],
+      answer: 0,
+      explanation: '__syncthreads() 是 block-local barrier。 跨 block 需要 kernel boundary、cooperative groups grid sync, 或 fence + atomic protocol。',
+    },
+    {
+      question: 'GPU kernel 內為什麼通常避免 global lock/semaphore?',
+      options: ['因為 GPU 沒有 global memory', '因為大量 threads 排隊會序列化, spin wait 也可能破壞 forward progress', '因為 atomic 一定比較慢', '因為 lock 只能保護 host memory'],
+      answer: 1,
+      explanation: 'GPU 的效能來自大量 independent work。 Blocking synchronization 會製造 hotspot, 甚至讓 warp/wavefront 中的 lanes 互相等待。',
+    },
+  ]}
+/>

@@ -1,0 +1,110 @@
+# Locality、Tiling、Coalescing
+
+當紙上算出 kernel 受 memory 限制, 下一步不是盲目 unroll, 而是改善資料移動: coalescing 讓每次 transaction 裝滿有效資料; tiling 讓一份 DRAM 資料在 SRAM/register 內重用多次。
+
+## Coalescing
+
+GPU warp/wavefront 最喜歡連續 lanes 讀連續地址:
+
+```cpp
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+float v = x[i];  // contiguous across lanes
+```
+
+不良 stride 會把一個 warp 的 requests 分散到多個 memory segments:
+
+```cpp
+float v = x[threadIdx.x * stride + blockIdx.x];  // often uncoalesced
+```
+
+CPU 也有同樣問題, 只是表現為 cache line waste 與 prefetch 失效。
+
+## Tiling
+
+Tiling 把 global memory 的一小塊搬到 shared memory/LDS 或 cache-friendly working set, 然後重複使用。
+
+```cpp
+__shared__ float tile[256];
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+tile[threadIdx.x] = x[i];
+__syncthreads();
+
+// Reuse tile from low-latency SRAM.
+float local = tile[(threadIdx.x + 1) & 255] - tile[threadIdx.x];
+```
+
+GEMM 的 tiling 更典型: A tile 和 B tile 各從 DRAM 載入一次, 被 tile 內許多 multiply-add 重用, AI 因此大幅提高。
+
+## Bank Conflicts
+
+Shared memory/LDS 是多 bank SRAM。 如果一個 warp 的多個 lanes 同時打同一個 bank 的不同地址, access 會序列化。
+
+```cpp
+// Common transpose padding trick.
+__shared__ float tile[32][33];  // +1 avoids column-wise bank conflicts
+```
+
+Padding 的成本是多用一點 SRAM; 收益是避免 bank conflict 讓 shared memory 退化。
+
+## Data Layout
+
+Array of Structs (AoS) 對單一 object 好讀, 但對 GPU lanes 只讀某個 field 時不一定 coalesced:
+
+```cpp
+struct Particle { float x, y, z, mass; };
+Particle* p;
+float x = p[i].x;  // lanes read every 16 bytes
+```
+
+Struct of Arrays (SoA) 讓 lanes 讀連續 field:
+
+```cpp
+struct Particles { float* x; float* y; float* z; float* mass; };
+float x = particles.x[i];  // lanes read contiguous floats
+```
+
+## CPU Cache Blocking
+
+CPU matrix multiply 也靠 blocking:
+
+```cpp
+for (int ii = 0; ii < n; ii += B)
+    for (int jj = 0; jj < n; jj += B)
+    for (int kk = 0; kk < n; kk += B)
+      for (int i = ii; i < ii + B; ++i)
+        for (int j = jj; j < jj + B; ++j)
+          for (int k = kk; k < kk + B; ++k)
+            C[i][j] += A[i][k] * B[k][j];
+```
+
+目標是讓 A/B/C 的 active block 放進 cache, 減少 DRAM reload。
+
+## Optimization Order
+
+1. 先確認 correctness 與 boundary。
+2. 算 bytes/FLOP/AI, 判斷是否 memory-bound。
+3. 修 coalescing / stride / layout。
+4. 加 tiling, 把 reuse 放進 shared/LDS/register。
+5. 檢查 bank conflict、occupancy、register pressure。
+6. 再考慮 vectorized load、prefetch、async copy。
+
+<LabBox path="kernels/02-memory">
+跑 `stride_bandwidth`, `vectorized_copy`, `transpose`, `access-patterns/aosoa_layout`, `access-patterns/gather_scatter`。 每跑一個都寫下: transaction 是否 coalesced? working set 在哪層? 有沒有改變 AI?
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Shared memory tile padding `tile[32][33]` 常用來避免什麼?',
+      options: ['Bank conflict', 'Thread creation overhead', 'Pthread deadlock', 'Register spill 一定消失'],
+      answer: 0,
+      explanation: 'Transpose column access 可能讓多個 lanes 打同一 bank; 多一欄 padding 改變 bank mapping。',
+    },
+    {
+      question: 'SoA 相對 AoS 對 GPU coalescing 的常見好處是什麼?',
+      options: ['同一 field 在記憶體中連續, lanes 讀取更容易合併', '所有 fields 會自動進 register', '不需要 boundary check', '可以避免所有 branch'],
+      answer: 0,
+      explanation: '當 lanes 都讀 x field, SoA 的 x[i] 是連續 floats; AoS 則可能跨 struct stride。',
+    },
+  ]}
+/>

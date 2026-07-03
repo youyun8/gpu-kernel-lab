@@ -66,7 +66,7 @@ $$
 // so this warp can only issue one FMA every ~4 cycles.
 float sum = 0.0f;
 for (int k = 0; k < kK; ++k) {
-  sum += a[k] * b[k];  // sum depends on the previous sum
+    sum += a[k] * b[k];  // sum depends on the previous sum
 }
 ```
 
@@ -76,10 +76,10 @@ for (int k = 0; k < kK; ++k) {
 // keeping the math pipe busy with a single warp.
 float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
 for (int k = 0; k < kK; k += 4) {
-  sum0 += a[k + 0] * b[k + 0];  // four independent read-modify-writes:
-  sum1 += a[k + 1] * b[k + 1];  // none of these waits for the others
-  sum2 += a[k + 2] * b[k + 2];
-  sum3 += a[k + 3] * b[k + 3];
+    sum0 += a[k + 0] * b[k + 0];  // four independent read-modify-writes:
+    sum1 += a[k + 1] * b[k + 1];  // none of these waits for the others
+    sum2 += a[k + 2] * b[k + 2];
+    sum3 += a[k + 3] * b[k + 3];
 }
 float sum = (sum0 + sum1) + (sum2 + sum3);
 ```
@@ -123,7 +123,7 @@ cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks, myKernel, 256, 0);
 // Request: fit at least 2 blocks per SM.
 // The compiler then caps register usage at 65536/(256*2) = 128 per thread.
 __global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
-  // ...
+    // ...
 }
 ```
 
@@ -170,9 +170,9 @@ myKernel<<<(n + block - 1) / block, block>>>(/* ... */);
 // After: ask the runtime what occupancy each candidate actually reaches,
 // then keep the winner. (This is exactly what tuning_levers_demo prints.)
 for (int block : {128, 256, 512}) {
-  int blocks_per_sm = 0;
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, myKernel, block, 0);
-  // occupancy = blocks_per_sm * (block / warpSize) / maxWarpsPerSM
+    int blocks_per_sm = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, myKernel, block, 0);
+    // occupancy = blocks_per_sm * (block / warpSize) / maxWarpsPerSM
 }
 ```
 

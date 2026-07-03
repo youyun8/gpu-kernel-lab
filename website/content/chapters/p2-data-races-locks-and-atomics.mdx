@@ -1,12 +1,12 @@
-# 平行化設計與 Data Race
+# Data Race、Locks、Atomics 與 Reduction
 
-在寫第一個 GPU kernel 之前, 值得先回答兩個更根本的問題: **工作要怎麼切給幾千個 threads?** 以及 **切下去之後, 什麼東西會壞?** 這兩個問題在 CPU (C++ `std::thread` / OpenMP / Pthread) 和 GPU (CUDA / ROCm) 上的答案高度對稱 — 本章用同一組概念雙邊對照, 每個概念都給可以編譯執行的 code。
+前兩章已經建立了 parallelization design 與 CPU threading primitives。 本章專注在平行化後最容易壞掉的部分: 多個 workers 共享同一份 state 時, data race 如何發生, 以及 mutex、atomic、reduction、barrier、fence 如何在 CPU (C++ `std::thread` / OpenMP / Pthread) 與 GPU (CUDA / ROCm) 上對應。
 
 <Callout variant="insight" title="先給直覺">
 平行化的本質是「把一個大問題切成可以同時做的小塊」。 切法決定效能, 而「兩個 worker 同時碰同一塊資料」決定正確性。 前者叫 decomposition, 後者出錯就叫 data race。
 </Callout>
 
-## 如何設計平行化: Decomposition
+## 快速回顧: Decomposition
 
 平行化的第一步是選擇切割維度:
 
@@ -29,23 +29,23 @@ GPU 為什麼偏好 **massive data parallelism**? 因為它靠「同時存在大
 ```cpp
 // CPU: coarse-grained - each of ~8 threads owns a contiguous slice.
 void saxpyCpu(int num_threads, int n, float a, const float* x, float* y) {
-  std::vector<std::thread> pool;
-  for (int t = 0; t < num_threads; ++t) {
+    std::vector<std::thread> pool;
+    for (int t = 0; t < num_threads; ++t) {
     pool.emplace_back([=]() {
       int begin = static_cast<int>(static_cast<long long>(n) * t / num_threads);
       int end = static_cast<int>(static_cast<long long>(n) * (t + 1) / num_threads);
       for (int i = begin; i < end; ++i) y[i] = a * x[i] + y[i];
     });
-  }
-  for (auto& thread : pool) thread.join();
+    }
+    for (auto& thread : pool) thread.join();
 }
 ```
 
 ```cpp
 // GPU: fine-grained - one thread per element, hundreds of thousands of threads.
 __global__ void saxpyGpu(int n, float a, const float* x, float* y) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) y[i] = a * x[i] + y[i];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = a * x[i] + y[i];
 }
 ```
 
@@ -63,9 +63,9 @@ __global__ void saxpyGpu(int n, float a, const float* x, float* y) {
 
 ```text
 race_demo: 8 threads x 1000000 increments, expected total 8000000
-  trial 0: total =    1123093  (lost  86.0% of updates) WRONG
-  trial 1: total =    1144654  (lost  85.7% of updates) WRONG
-  trial 2: total =    1121852  (lost  86.0% of updates) WRONG
+    trial 0: total =    1123093  (lost  86.0% of updates) WRONG
+    trial 1: total =    1144654  (lost  85.7% of updates) WRONG
+    trial 2: total =    1121852  (lost  86.0% of updates) WRONG
 ```
 
 不但錯, 而且**每次執行結果都不同** — 這是 data race 的招牌特徵: 結果取決於 threads 恰好怎麼交錯, 換一台機器、換一次執行都可能不一樣。
@@ -80,10 +80,10 @@ CPU 的標準答案是 mutex — 讓 read-modify-write 整段互斥:
 // C++ std::mutex (race_fixed_mutex.cpp)
 std::mutex counter_mutex;
 auto worker = [&counter, &counter_mutex]() {
-  for (int i = 0; i < kIncrementsPerThread; ++i) {
+    for (int i = 0; i < kIncrementsPerThread; ++i) {
     std::lock_guard<std::mutex> guard(counter_mutex);
     ++counter;  // exclusive access: no interleaving, no lost updates
-  }
+    }
 };
 ```
 
@@ -134,15 +134,15 @@ for (int i = 0; i < kNumIterations; ++i) ++counter;
 ```cpp
 // GPU: each block reduces in shared memory, one atomicAdd per block.
 __global__ void blockReduceSum(const float* in, float* out, int n) {
-  __shared__ float partials[kBlockSize];
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  partials[threadIdx.x] = (i < n) ? in[i] : 0.0f;
-  __syncthreads();
-  for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+    __shared__ float partials[kBlockSize];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    partials[threadIdx.x] = (i < n) ? in[i] : 0.0f;
+    __syncthreads();
+    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride) partials[threadIdx.x] += partials[threadIdx.x + stride];
     __syncthreads();
-  }
-  if (threadIdx.x == 0) atomicAdd(out, partials[0]);
+    }
+    if (threadIdx.x == 0) atomicAdd(out, partials[0]);
 }
 ```
 

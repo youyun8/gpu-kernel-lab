@@ -122,7 +122,7 @@ Warp primitive 不只用來 sum:
 
 ```cpp
 for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-  v += __shfl_down(v, offset);  // 5 steps on 32 lanes, 6 on 64 — loop adapts
+    v += __shfl_down(v, offset);  // 5 steps on 32 lanes, 6 on 64 — loop adapts
 }
 ```
 

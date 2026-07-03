@@ -1,0 +1,121 @@
+# Cycle 與 Bandwidth 的紙上計算
+
+Memory optimization 要能先用紙算出上限, 才知道程式慢在哪。 本章用三個數字建立估算: **latency cycles**, **bandwidth**, **arithmetic intensity**。
+
+## Latency Cycles
+
+Cycle 換時間:
+
+```text
+time_seconds = cycles / clock_hz
+cycles = time_seconds * clock_hz
+```
+
+如果 GPU clock 是 1.5 GHz, 800 cycles 大約是:
+
+```text
+800 / 1.5e9 = 533 ns
+```
+
+單次 DRAM access latency 看起來很可怕, 但 GPU 不是靠降低單 thread latency 贏, 而是靠很多 warps/wavefronts overlap latency。
+
+## Bandwidth
+
+Bandwidth 是每秒搬多少 bytes:
+
+```text
+bandwidth = bytes_moved / time
+time_lower_bound = bytes_moved / peak_bandwidth
+```
+
+Vector add `c[i] = a[i] + b[i]` 每個元素讀 `a`, 讀 `b`, 寫 `c`:
+
+```text
+bytes_per_element = 3 * sizeof(float) = 12 bytes
+n = 2^24
+bytes_moved = 12 * 16,777,216 = 201,326,592 bytes
+peak BW = 1,555 GB/s
+best_possible_time = 201,326,592 / (1,555e9) = 0.129 ms
+```
+
+如果實測 0.75 ms, achieved bandwidth:
+
+```text
+201,326,592 / 0.00075 / 1e9 = 268 GB/s
+```
+
+## Arithmetic Intensity
+
+**Arithmetic intensity (AI)**:
+
+```text
+AI = FLOP / byte_moved
+```
+
+Roofline 判斷:
+
+```text
+ridge_point = peak_FLOP_per_s / peak_byte_per_s
+if AI < ridge_point: bandwidth-bound
+else: compute-bound
+```
+
+例: 1 FMA = 2 FLOP, 讀一個 float、寫一個 float:
+
+```text
+AI = 2 FLOP / 8 bytes = 0.25 FLOP/byte
+ridge = 19,500 GFLOP/s / 1,555 GB/s = 12.5 FLOP/byte
+```
+
+0.25 遠小於 12.5, 所以 bandwidth-bound。 可達上限約:
+
+```text
+1,555 GB/s * 0.25 FLOP/byte = 389 GFLOP/s
+```
+
+## Cache Line / Transaction Counting
+
+CPU cache line 常見 64 bytes。 如果每個 thread 讀 4-byte float, contiguous 16 floats 剛好一條 cache line。 Stride = 16 時, 每次只用一條 cache line 的 4 bytes, 有效 bandwidth 最多只剩 1/16。
+
+GPU memory transaction 常以 32/64/128 bytes 為單位。 一個 warp 32 lanes 讀 contiguous float:
+
+```text
+32 lanes * 4 bytes = 128 bytes -> 1 ideal transaction
+```
+
+若每 lane 讀 `x[lane * 32]`:
+
+```text
+每 lane 落在不同 128-byte segment -> 最多 32 transactions
+```
+
+## Occupancy Needed To Hide Latency
+
+粗估需要多少 independent work:
+
+```text
+warps_needed ~= memory_latency_cycles / issue_gap_cycles
+```
+
+若 DRAM latency 600 cycles, scheduler 每 cycle 可 issue 一個 ready warp, 那要數十個 ready warps 才能把 latency 蓋住。 這不是精確公式, 但能解釋為什麼 GPU kernel 太少 blocks 時 latency 會暴露出來。
+
+<LabBox path="kernels/02-memory">
+用 `bandwidth_probe` 和 `roofline_probe` 的輸出練習反推 `bytes_moved`, `GB/s`, `AI`, `roofline upper bound`。 不要只看 runtime; 要把 runtime 拆成 bytes 與 FLOP 的限制。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: 'Vector add 每個 float element 的 memory traffic 通常至少是多少?',
+      options: ['4 bytes', '8 bytes', '12 bytes', '64 bytes'],
+      answer: 2,
+      explanation: '讀 a、讀 b、寫 c, 共 3 個 float = 12 bytes。 若有 write allocate 或非理想 store, 實際可能更高。',
+    },
+    {
+      question: 'AI 低於 ridge point 代表什麼?',
+      options: ['Bandwidth-bound', 'Compute-bound', '沒有 memory access', '一定有 data race'],
+      answer: 0,
+      explanation: 'Roofline 中 ridge point 左邊由 bandwidth roof 限制; 提高 reuse/AI 才能突破。',
+    },
+  ]}
+/>

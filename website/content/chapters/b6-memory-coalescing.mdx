@@ -103,16 +103,16 @@ L1/L2 會緩解部分懲罰 — 第一個 warp 搬進來的 segment, 相鄰 warp
 ```cpp
 // AoSoA: each chunk stores 32 x's, then 32 y's, then 32 z's.
 struct ParticleChunk {
-  float x[32];
-  float y[32];
-  float z[32];
+    float x[32];
+    float y[32];
+    float z[32];
 };
 
 // Lane i of a warp reads x[i] within one chunk -> one contiguous
 // 128-byte segment, coalesced exactly like SoA.
 __global__ void scaleXAosoa(ParticleChunk* chunks, float k, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) chunks[i / 32].x[i % 32] *= k;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) chunks[i / 32].x[i % 32] *= k;
 }
 ```
 
@@ -125,19 +125,19 @@ __global__ void scaleXAosoa(ParticleChunk* chunks, float k, int n) {
 ```cpp
 // Main body: each thread handles one float4 (16 bytes).
 __global__ void saxpyVec4Body(const float4* x, float4* y, float a, int n4) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n4) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n4) {
     float4 xv = x[i], yv = y[i];
     yv.x = a * xv.x + yv.x;  yv.y = a * xv.y + yv.y;
     yv.z = a * xv.z + yv.z;  yv.w = a * xv.w + yv.w;
     y[i] = yv;
-  }
+    }
 }
 
 // Tail cleanup: the last n % 4 elements, one tiny scalar launch.
 __global__ void saxpyTail(const float* x, float* y, float a, int tail_start, int n) {
-  int i = tail_start + threadIdx.x;
-  if (i < n) y[i] = a * x[i] + y[i];
+    int i = tail_start + threadIdx.x;
+    if (i < n) y[i] = a * x[i] + y[i];
 }
 ```
 
@@ -149,20 +149,20 @@ __global__ void saxpyTail(const float* x, float* y, float a, int tail_start, int
 
 ```cpp
 __global__ void boxFilterShared(const float* in, float* out, int n) {
-  __shared__ float tile[kBlockSize + 2 * kRadius];
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float tile[kBlockSize + 2 * kRadius];
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-  // Phase 1: everyone loads its own element (coalesced).
-  tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;
-  // Phase 2: first kRadius threads fetch the left/right halos.
-  if (threadIdx.x < kRadius) { /* load halo elements */ }
+    // Phase 1: everyone loads its own element (coalesced).
+    tile[kRadius + threadIdx.x] = (i < n) ? in[i] : 0.0f;
+    // Phase 2: first kRadius threads fetch the left/right halos.
+    if (threadIdx.x < kRadius) { /* load halo elements */ }
 
-  __syncthreads();  // no one reads tile[] before everyone wrote it
+    __syncthreads();  // no one reads tile[] before everyone wrote it
 
-  float sum = 0.0f;
-  for (int r = -kRadius; r <= kRadius; ++r)
+    float sum = 0.0f;
+    for (int r = -kRadius; r <= kRadius; ++r)
     sum += tile[kRadius + threadIdx.x + r];
-  out[i] = sum / (2 * kRadius + 1);
+    out[i] = sum / (2 * kRadius + 1);
 }
 ```
 
@@ -181,15 +181,15 @@ Scatter + atomic 的標準解法是先在 block 內聚合, 再一次寫出:
 // collisions cheaply, then one flush issues kNumBins global
 // atomics per block instead of kBlockSize.
 __global__ void scatterAtomicAggregated(const int* idx, unsigned int* bins, int n) {
-  __shared__ unsigned int local_bins[kNumBins];
-  for (int b = threadIdx.x; b < kNumBins; b += blockDim.x) local_bins[b] = 0u;
-  __syncthreads();
+    __shared__ unsigned int local_bins[kNumBins];
+    for (int b = threadIdx.x; b < kNumBins; b += blockDim.x) local_bins[b] = 0u;
+    __syncthreads();
 
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) atomicAdd(&local_bins[idx[i]], 1u);
-  __syncthreads();
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) atomicAdd(&local_bins[idx[i]], 1u);
+    __syncthreads();
 
-  for (int b = threadIdx.x; b < kNumBins; b += blockDim.x)
+    for (int b = threadIdx.x; b < kNumBins; b += blockDim.x)
     if (local_bins[b] != 0u) atomicAdd(&bins[b], local_bins[b]);
 }
 ```
@@ -205,8 +205,8 @@ __global__ void scatterAtomicAggregated(const int* idx, unsigned int* bins, int 
 // ld = 1024: row r starts at byte 4096*r, always 128-byte aligned,
 //            at the cost of 2.4% wasted memory.
 __global__ void scaleRows(float* data, int ld, int rows, int cols, float k) {
-  float* row = data + static_cast<size_t>(blockIdx.x) * ld;
-  for (int c = threadIdx.x; c < cols; c += blockDim.x) row[c] *= k;
+    float* row = data + static_cast<size_t>(blockIdx.x) * ld;
+    for (int c = threadIdx.x; c < cols; c += blockDim.x) row[c] *= k;
 }
 ```
 
@@ -222,12 +222,12 @@ Embedding lookup 是典型的大規模 gather, index 通常不連續。 若同�
 // original batch order - the inverse permutation.
 __global__ void embeddingGather(const float* table, const int* idx,
                                 const int* out_pos, float* out, int batch) {
-  int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
-  int lane = threadIdx.x % 32;
-  if (warp >= batch) return;
-  const float* src = table + static_cast<size_t>(idx[warp]) * kDim;
-  float* dst = out + static_cast<size_t>(out_pos[warp]) * kDim;
-  for (int d = lane; d < kDim; d += 32) dst[d] = src[d];
+    int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x % 32;
+    if (warp >= batch) return;
+    const float* src = table + static_cast<size_t>(idx[warp]) * kDim;
+    float* dst = out + static_cast<size_t>(out_pos[warp]) * kDim;
+    for (int d = lane; d < kDim; d += 32) dst[d] = src[d];
 }
 ```
 

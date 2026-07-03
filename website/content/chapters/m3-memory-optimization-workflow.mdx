@@ -1,0 +1,112 @@
+# Memory Optimization Workflow
+
+Memory optimization should be a loop, not a bag of tricks. 每次改 kernel 前先建立 hypothesis, 用 counters 或 microbenchmarks 驗證, 再決定下一步。
+
+## Step 1: Classify
+
+先用 roofline 或簡化版 bytes/FLOP 判斷:
+
+```text
+if achieved_bandwidth is high and achieved_FLOP is low:
+    likely bandwidth-bound
+if achieved_bandwidth is low and latency stalls are high:
+    likely latency/coalescing/cache problem
+if shared-memory throughput is low and bank conflict high:
+    shared/LDS bank conflict
+if atomics dominate:
+    contention / serialization
+```
+
+## Step 2: Measure The Right Bytes
+
+不要只看 input size。 估算 traffic 要包含:
+
+- input reads
+- output writes
+- intermediate reads/writes
+- repeated loads caused by no reuse
+- padding/alignment overhead
+- write-allocate 或 read-for-ownership (CPU 上常見)
+
+```text
+stencil 3-point:
+out[i] = in[i-1] + in[i] + in[i+1]
+naive apparent traffic = 3 reads + 1 write = 16 bytes/output
+with cache/shared reuse, DRAM traffic can approach 1 read + 1 write = 8 bytes/output
+```
+
+## Step 3: Pick A Transformation
+
+| 症狀 | 優先嘗試 |
+| --- | --- |
+| contiguous bandwidth 低 | vectorized loads, alignment, larger problem size |
+| stride bandwidth 低 | data layout change, transpose, gather batching |
+| repeated global loads | tiling into shared/LDS, register blocking |
+| shared memory slow | padding, access remapping, bank conflict check |
+| atomic hotspot | privatized bins, warp/block aggregation, two-pass reduction |
+| latency stalls | more occupancy, prefetch/async copy, more independent work |
+
+## Step 4: Check Side Effects
+
+每個 memory optimization 都可能移動瓶頸:
+
+- Tiling 增加 shared memory usage, 可能降低 occupancy。
+- Register blocking 增加 registers/thread, 可能造成 spill。
+- Vectorized load 要求 alignment 與 tail handling。
+- Padding 增加 footprint, 可能降低 cache residency。
+- Privatization 增加 merge phase, 可能增加 total work。
+
+## Step 5: Validate Numerics
+
+Memory optimization 也可能改變運算順序。 Reduction、histogram、scatter、atomic add 都可能產生 nondeterminism 或 floating-point low-bit 差異。 Correctness tests 應包含:
+
+- small sizes: 0, 1, warpSize-1, warpSize, warpSize+1
+- misalignment
+- non-multiple tile sizes
+- random data
+- adversarial data: same histogram bin, skewed rows, NaN/Inf if relevant
+
+## Minimal Experiment Template
+
+```cpp
+auto launch = [&] {
+    kernel<<<grid, block>>>(args...);
+};
+
+launch();                 // warmup
+GPU_CHECK(gpuDeviceSynchronize());
+auto result = gklab::benchmarkKernel(launch, bytes_moved, flops);
+gklab::report("kernel_name", result, peak_gbps, peak_gflops);
+```
+
+Pair every benchmark with a CPU reference or known-good GPU reference. A fast wrong memory optimization is just data corruption.
+
+## Optimization Stop Rule
+
+Stop when one of these is true:
+
+- achieved bandwidth is close enough to hardware/transaction limit for this access pattern
+- roofline says compute is now the bottleneck
+- next transformation adds complexity without measurable movement
+- correctness or maintainability risk exceeds expected speedup
+
+<LabBox path="kernels/02-memory">
+選一個 memory example 做完整 workflow: 先算 bytes/FLOP, 再跑 benchmark, 記錄 achieved bandwidth, 改一個 transformation, 再重跑。 不要同時改兩件事。
+</LabBox>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼 tiling 可能讓 kernel 變慢?',
+      options: ['它可能增加 shared memory/register 使用量而降低 occupancy 或造成 spill', '它會讓 DRAM 消失', '它不能用在 GPU', '它會自動產生 deadlock'],
+      answer: 0,
+      explanation: 'Tiling 增加 reuse, 但也消耗 on-chip resources。 如果 occupancy 掉太多或產生 spill, 可能抵消收益。',
+    },
+    {
+      question: 'Memory optimization 後為什麼還要重跑 correctness tests?',
+      options: ['資料搬移順序、boundary、alignment、reduction order 都可能改變結果', 'Benchmark 工具要求', '因為 compiler 不支援 comments', '只為了讓 build 變慢'],
+      answer: 0,
+      explanation: '優化常改變 access pattern 與運算順序, tail/misalignment/race bug 很容易在此出現。',
+    },
+  ]}
+/>
