@@ -1,0 +1,91 @@
+# Track 11 練習: Software Pipelining
+
+對應第 1–6 章。 Pipeline 深度記為 `k` (或 stage 數 `p`)、工作項/micro-batch 記為 `N`/`m`。 Bubble 佔比通式: `(k−1)/(N+k−1)`。
+
+<Exercise id="SP1" title="Pipeline 步數與加速上限" kind="paper" level="入門">
+一個 5-stage pipeline, 每 stage 1 單位時間, 處理 N 項 (各 stage 用不同資源)。 (a) 序列與 pipeline 各要幾步? (b) N=20 的加速比? (c) 加速的理論上限與達到它的條件?
+
+<Solution>
+(a) 序列 `5N`; pipeline `N + 5 − 1 = N + 4`。 (b) N=20: `100 / 24 ≈ 4.17×`。 (c) 上限 = stage 數 `5×` (N→∞); 條件是各 stage 用不同硬體資源、無跨項依賴、且各 stage 等時 (平衡)。
+</Solution>
+</Exercise>
+
+<Exercise id="SP2" title="Bubble 與 micro-batch 數" kind="paper" level="進階">
+Pipeline parallelism, p=8 stage。 (a) 要把 bubble 壓到 20% 以下, micro-batch 數 m 至少多少? (b) 壓到 10% 呢? (c) 為什麼不能無限加大 m?
+
+<Solution>
+(a) `(8−1)/(m+8−1) = 7/(m+7) ≤ 0.2` → `m+7 ≥ 35` → `m ≥ 28`。 (b) `7/(m+7) ≤ 0.1` → `m ≥ 63`。 (c) m 越大每個 micro-batch 越小, GEMM 變瘦 (wave quantization、Tensor Core 吃不滿), per-micro-batch 通訊/啟動 overhead 佔比上升; 且 GPipe 下 activation memory ∝ m 會 OOM。 m 有實務上界。
+</Solution>
+</Exercise>
+
+<Exercise id="SP3" title="瓶頸 stage 決定吞吐" kind="paper" level="進階">
+Host–device pipeline 三 stage: H2D 4ms、compute 2ms、D2H 1ms, 處理 10 個 chunk。 (a) 序列總時間? (b) 完美重疊後的下限? (c) 瓶頸是誰? 要再加速該怎麼做?
+
+<Solution>
+(a) 序列: `(4+2+1)×10 = 70ms`。 (b) 瓶頸 = H2D (4ms), 下限 ≈ `4×10 + (2+1) = 43ms` (穩態每 4ms 出一個 + 最後一個的 compute/D2H 尾巴)。 (c) 瓶頸是 **H2D copy**。 對策: 用更大的 PCIe/NVLink 頻寬、壓縮傳輸、或減少 H2D 資料量 (把前處理移上 GPU); 加深 pipeline 沒用, 因為瓶頸在單一 stage 速率而非深度。
+</Solution>
+</Exercise>
+
+<Exercise id="SP4" title="要幾個 stage 才藏住 latency" kind="paper" level="挑戰">
+Kernel 內 pipeline: 每 tile compute 150 cycles, global memory latency 500 cycles。 (a) double buffering 夠嗎? (b) 至少幾 stage? (c) 若加到需要的 stage 數會壓低 occupancy, 有什麼替代思路?
+
+<Solution>
+(a) 不夠: double buffering 只讓 1 tile compute (150) 疊 1 tile load, `150 < 500`, 露出 350 cycles stall。 (b) `(s−1)×150 ≥ 500` → `s−1 ≥ 3.34` → `s ≥ 5` (4 個在途 compute = 600 ≥ 500)。 (c) 替代: 提高每 tile 的 compute (更大 register tile 讓 C 變大 → compute 變長, 更容易蓋過 latency); 或提高 occupancy 用更多 warp 互相 hide latency, 而非只靠單 block 的深 pipeline。 兩者都在「用 compute 覆蓋 memory latency」。
+</Solution>
+</Exercise>
+
+<Exercise id="SP5" title="GPipe vs 1F1B 的記憶體與 bubble" kind="paper" level="挑戰">
+p=4, 每 micro-batch 每 stage activation 3 GB。 (a) GPipe m=12 的第一 stage activation peak? (b) 1F1B m=12 呢? (c) 兩者 bubble 佔比? (d) 一句話總結 1F1B 的價值。
+
+<Solution>
+(a) GPipe: ~m 份 = `12×3 = 36 GB`。 (b) 1F1B: ~p 份 = `4×3 = 12 GB` (與 m 無關)。 (c) 兩者相同: `(4−1)/(12+4−1) = 3/15 = 20%`。 (d) 1F1B 的 bubble 與 GPipe 相同, 但 activation memory 從 ∝m 降到 ∝p — 讓你能用很大的 m 壓小 bubble 而不 OOM。
+</Solution>
+</Exercise>
+
+<Exercise id="SP6" title="Overlap scheduler 的收益" kind="paper" level="進階">
+LLM decode: GPU forward 6ms、CPU 排程 4ms。 (a) 不重疊每 step 多久、GPU 利用率? (b) 完美 overlap 後每 step 多久、加速比? (c) 大 batch 讓 forward=50ms 時, overlap 還重要嗎?
+
+<Solution>
+(a) `6+4=10ms`, 利用率 `6/10=60%`。 (b) `max(6,4)=6ms`, 加速 `10/6≈1.67×`。 (c) `max(50,4)=50` vs `54`, 只省 ~7% — 大 batch 下 CPU 佔比小, overlap 收益小。 overlap scheduler 對「小 batch、GPU 每 step 很快」的 decode 最關鍵。
+</Solution>
+</Exercise>
+
+<Exercise id="SP7" title="Chunked prefill 的 latency 取捨" kind="paper" level="挑戰">
+Batch 內 1 個長 prompt prefill 整包要 100ms, 同批 20 個 decode request 純 decode step 只要 4ms。 (a) 不切 prefill, decode 的 inter-token latency 這步變多少? (b) 切成 10 個 chunk (每 ~11ms) 混批後, decode latency 約多少? (c) 代價?
+
+<Solution>
+(a) decode 被整包 prefill 卡住 → 這步 ~100ms (head-of-line blocking), inter-token latency 從 4ms 暴增到 100ms。 (b) 每 forward 夾一小塊 prefill (~11ms) + decode, 單步 ~11–15ms, decode latency 穩定在十幾 ms。 (c) prefill 總完成時間略增 (切塊 overhead + 與 decode 搶資源)、排程更複雜; 由 `--chunked-prefill-size` 調 latency↔throughput。
+</Solution>
+</Exercise>
+
+<Exercise id="SP8" title="找出破壞重疊的 bug" kind="paper" level="進階">
+一段想重疊 H2D 與 compute 的程式幾乎沒加速。 逐一判斷下列各項是否會破壞重疊: (a) host buffer 用一般 `malloc`; (b) 中間插了一個同步版 `cudaMemcpy`; (c) 兩個 stream 但都用 default stream (stream 0); (d) 忘了對 side-stream 上的 tensor 呼叫 `record_stream`。
+
+<Solution>
+(a) **破壞**: pageable memory 的 async copy 退回同步 staging, 沒有真重疊 → 要 pinned。 (b) **破壞**: 同步 `cudaMemcpy` 造成隱性 device 同步, 把在途工作全等完。 (c) **破壞**: default stream 有隱性同步語義, 全跑在 stream 0 等於序列 → 要用非預設 stream。 (d) 不破壞「重疊」本身, 但造成**間歇性 race / 記憶體被提早重用** (正確性 bug), 仍必須修。
+</Solution>
+</Exercise>
+
+<Exercise id="SP9" title="實作: host–device 三 stage 重疊" kind="code" level="進階">
+用 pinned host buffer + 多條 CUDA/HIP stream, 實作 H2D→compute→D2H 的 chunk pipeline (參考 `kernels/05-advanced-scheduling`)。 用 events 量「重疊」與「單 stream 序列」兩版 wall time, 報告加速比並與 `瓶頸stage × chunks + 一輪其他 stage` 的模型對照。
+
+<Solution>
+重點: pinned buffer (否則 async 失效)、ping-pong device buffer + stream、用 event 計時而非同步 memcpy。 預期重疊版逼近「瓶頸 stage × chunks」下限。 若沒加速: 檢查 buffer 是否 pinned、有無同步 memcpy/`cudaDeviceSynchronize` 打斷 pipeline、以及 chunk 數是否夠多讓 fill/drain 佔比小。
+</Solution>
+</Exercise>
+
+<Exercise id="SP10" title="實作: PyTorch CUDA prefetcher" kind="code" level="挑戰">
+用一個 `__getitem__` 內 `time.sleep` 模擬前處理的合成 dataset, 量測 (a) `num_workers=0`、(b) `num_workers=N + pin_memory`、(c) 再加第 4 章的 `CudaPrefetcher` 三種設定的 samples/sec, 並用 `torch.profiler` 觀察 GPU 空檔。
+
+<Solution>
+預期: (a) 最慢, GPU 等 CPU; (b) 顯著改善 (worker 重疊前處理 + pinned/non_blocking 疊 H2D); (c) 在 H2D 佔比不小時再擠出幾 % (把下一 batch 的 copy 也藏進當前 compute)。 若 (c) 相對 (b) 幾乎無差, 表示 H2D 已很小或已被 non_blocking 藏住, 瓶頸在別處 — 用 profiler 佐證, 別盲套 prefetcher。
+</Solution>
+</Exercise>
+
+<Exercise id="SP11" title="實作: pipeline schedule 的 timeline" kind="code" level="挑戰">
+用 `torch.distributed.pipelining` 把小模型切成 2–4 個 `PipelineStage`, 分別用 `ScheduleGPipe` 與 `Schedule1F1B` 跑, 用 `torch.profiler` 匯出 timeline, 並記錄 `torch.cuda.max_memory_allocated`。 驗證: 總時間相近、1F1B 的 backward 提早、1F1B peak memory 較低。
+
+<Solution>
+GPipe timeline 的 forward 集中前段、backward 集中後段、中間大 bubble; 1F1B 在 steady state 交錯 F/B、backward 明顯提早。 `max_memory_allocated` 應顯示 1F1B < GPipe, 差距隨 m 拉大。 若總時間差很多, 檢查 micro-batch 是否太小或通訊成瓶頸。
+</Solution>
+</Exercise>

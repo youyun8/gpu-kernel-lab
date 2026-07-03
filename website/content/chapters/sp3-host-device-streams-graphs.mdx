@@ -1,0 +1,171 @@
+# Host–Device Pipeline: Streams、Events、Graphs
+
+上一章的 pipeline 活在一個 kernel 內。 這一章把 stage 換成更大的單位: **在 host 與 device 之間**搬資料 (H2D / D2H copy) 與**在 device 上算** (kernel)。 GPU 的 copy 引擎 (DMA) 與 compute 引擎 (SM) 是分開的硬體, 所以只要用對工具, 搬和算可以完全重疊。 工具就是 **stream、event、graph**。
+
+## Streams 與 Async Copy
+
+一個 **stream** 是一條有序的工作佇列; 不同 stream 之間可以並行。 把輸入切成 chunk, 用不同 stream 分別跑 copy 與 compute, 就得到一個 host–device pipeline:
+
+<StreamOverlapFigure />
+
+```cpp
+// Double-buffered H2D + compute overlap across two streams. Host memory MUST be
+// pinned (cudaHostAlloc) for the copy to be truly async; pageable memory falls
+// back to a synchronous staging copy and the overlap disappears.
+cudaStream_t s[2];
+cudaStreamCreate(&s[0]); cudaStreamCreate(&s[1]);
+for (int c = 0; c < numChunks; ++c) {
+    int b = c & 1;                                   // ping-pong buffer/stream
+    cudaMemcpyAsync(dIn[b], hIn + c * chunk, bytes, cudaMemcpyHostToDevice, s[b]);
+    processKernel<<<grid, block, 0, s[b]>>>(dIn[b], dOut[b]);
+    cudaMemcpyAsync(hOut + c * chunk, dOut[b], bytes, cudaMemcpyDeviceToHost, s[b]);
+}
+cudaStreamSynchronize(s[0]); cudaStreamSynchronize(s[1]);
+```
+
+同樣的 idea 在 PyTorch 裡用 `torch.cuda.Stream`:
+
+```python
+# Overlap an H2D copy on a side stream with compute on the default stream.
+copy_stream = torch.cuda.Stream()
+host = torch.empty(shape, pin_memory=True)          # pinned -> async copy works
+with torch.cuda.stream(copy_stream):
+    dev = host.to('cuda', non_blocking=True)         # async H2D on copy_stream
+# make the default stream wait for the copy before using `dev`
+torch.cuda.current_stream().wait_stream(copy_stream)
+out = model(dev)
+```
+
+<Exercise id="sp3-e1" title="重疊能省多少" kind="paper" level="入門">
+一個 workload 把資料切成 4 個 chunk, 每 chunk: H2D 2ms、compute 3ms、D2H 1ms。 (a) 完全序列 (單 stream, 不重疊) 總時間? (b) 理想 3-stage pipeline 的總時間 (瓶頸 stage = compute)? (c) 加速比?
+
+<Solution>
+(a) 序列: 每 chunk `2+3+1 = 6ms`, 4 chunk = `24ms`。
+
+(b) 瓶頸 stage 是 compute (3ms)。 pipeline 總時間 ≈ fill + 穩態 + drain = `(2) + 4×3 + (1)` ≈ `2 + 12 + 1 = 15ms` (前後各補一個 H2D/D2H 的暖機排空)。 概略也可用 `瓶頸×N + (其他 stage 一輪)` = `3×4 + 3 = 15ms`。
+
+(c) `24 / 15 ≈ 1.6×`。 加速受最慢 stage (compute) 限制, 不是理論的 3×; 若 compute 遠大於 copy, 重疊的收益會更小 (copy 本來就被藏住了) — 重疊對 copy 與 compute 量級相當時最有價值。
+</Solution>
+</Exercise>
+
+## Events 與依賴
+
+Stream 內部有序, 但跨 stream 要靠 **event** 建立依賴: 在 stream A record 一個 event, 讓 stream B `wait` 它。 這是所有 host–device pipeline 正確性的基礎 — 消費者 stream 必須等生產者 stream 的 copy 真的完成。
+
+```cpp
+// Cross-stream dependency: compute on sCompute must not start until the copy on
+// sCopy has finished writing dIn. Events express exactly that edge.
+cudaEvent_t copyDone;
+cudaEventCreateWithFlags(&copyDone, cudaEventDisableTiming);
+cudaMemcpyAsync(dIn, hIn, bytes, cudaMemcpyHostToDevice, sCopy);
+cudaEventRecord(copyDone, sCopy);
+cudaStreamWaitEvent(sCompute, copyDone, 0);          // sCompute waits for the copy
+processKernel<<<grid, block, 0, sCompute>>>(dIn, dOut);
+```
+
+Event 也用來**量測**時間 (`cudaEventElapsedTime`) — 這正是第 4 章 (效能測量) 用的計時法。 但注意: 忘記加 event、或誤用 default stream 造成隱性同步, 是 pipeline 失效最常見的 bug。
+
+<Exercise id="sp3-e2" title="找出隱性同步" kind="paper" level="進階">
+以下 pseudocode 想重疊 copy 與 compute, 卻幾乎沒有加速:
+```
+cudaMemcpyAsync(dIn, hInPageable, N, H2D, sCopy);   // hInPageable 是一般 malloc
+kernelA<<<..., sCompute>>>(dPrev);
+cudaMemcpy(dScratch, hOut, M, D2H);                  // 注意: 同步版本
+```
+指出兩個讓重疊失效的問題。
+
+<Solution>
+(1) `hInPageable` 不是 pinned memory。 `cudaMemcpyAsync` 對 pageable host memory 會退回**同步**的 staging copy — copy 根本沒有 async, 無法與 kernel 重疊。 要用 `cudaHostAlloc` / `cudaMallocHost` 配 pinned buffer。
+
+(2) 第三行用了**同步版** `cudaMemcpy` (沒有 Async、沒指定 stream)。 它會阻塞 host 並隱性同步整個 device, 把前面 async 發出去的工作全部強制等完 — pipeline 直接崩塌。 應改成 `cudaMemcpyAsync(..., stream)` 並用 event 表達依賴。
+</Solution>
+</Exercise>
+
+## CUDA / HIP Graphs
+
+當每個 iteration 都 launch 很多小 kernel (典型的 LLM decode、小 batch 推論), **launch overhead** 本身會變成瓶頸: CPU 來不及餵, GPU 一直等下一個 kernel。 **CUDA Graph** 把「一整個 iteration 的 kernel 序列」錄成一張圖, 之後用一次 `cudaGraphLaunch` 重播整張圖, 把 N 次 launch 攤成 1 次:
+
+```cpp
+// Capture one iteration's kernel sequence into a graph, then replay it cheaply.
+cudaGraph_t graph; cudaGraphExec_t exec;
+cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+runOneIteration(stream);                 // many small kernels, no host sync inside
+cudaStreamEndCapture(stream, &graph);
+cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+for (int i = 0; i < iters; ++i) cudaGraphLaunch(exec, stream);   // 1 launch replays all
+```
+
+PyTorch 把這個包成 `torch.cuda.CUDAGraph` (以及 `torch.compile(mode="reduce-overhead")` 底層用的 cudagraph trees):
+
+```python
+# Warm up on a side stream, capture, then replay with fresh data copied into the
+# same static input tensors. Shapes/pointers must stay fixed across replays.
+g = torch.cuda.CUDAGraph()
+static_in = torch.zeros(shape, device='cuda')
+for _ in range(3):                       # warmup (allocator, cuDNN autotune, ...)
+    _ = model(static_in)
+with torch.cuda.graph(g):
+    static_out = model(static_in)
+# per step:
+static_in.copy_(next_batch)              # write new data into the captured buffer
+g.replay()                               # replays the whole model with ~one launch
+```
+
+Graph 消的是 CPU-side 的 launch overhead — 它與 stream overlap 正交: stream 藏 memory latency, graph 藏 launch latency。 兩者都是把「CPU 忙 vs. GPU 忙」重疊的手段, 這正是第 6 章 SGLang overlap scheduler 的伏筆。
+
+<Exercise id="sp3-e3" title="Graph 何時值得" kind="paper" level="進階">
+某 decode step 依序 launch 60 個小 kernel, 每個 kernel GPU 上只跑 3µs, 但每次 launch 的 CPU overhead 約 5µs。 (a) 不用 graph, 一個 step 的時間下限受什麼決定? (b) 估算一個 step 的時間。 (c) 用 CUDA graph 後理論上限變多少? (d) 為什麼大 batch 的 prefill 用 graph 效益較小?
+
+<Solution>
+(a) 受 **launch overhead** 決定: CPU 每 5µs 才發得出一個 kernel, GPU 每個只算 3µs → GPU 會餓著等 CPU (launch-bound)。
+
+(b) 若 launch 不能重疊, step ≈ `60 × 5µs = 300µs` (CPU-bound), GPU 實際只忙 `60 × 3µs = 180µs`。
+
+(c) Graph 把 60 次 launch 攤成 ~1 次, step 逼近 GPU 實際工作 `180µs` (加一次 graph launch 的小 overhead) → 約 1.6× 以上。
+
+(d) 大 batch prefill 每個 kernel GPU 上就跑很久 (例如數百 µs), launch 的 5µs 相對可忽略 — 本來就 compute-bound, graph 省的那點 launch overhead 佔比極小。 Graph 對「很多小 kernel、GPU 很快跑完」的 decode 才關鍵。
+</Solution>
+</Exercise>
+
+<Exercise id="sp3-e4" title="實作: 多 stream 重疊" kind="code" level="進階">
+在 `kernels/05-advanced-scheduling` 的 stream pipeline 範例上, 用 pinned host buffer + 2 條 stream 實作 double-buffered H2D→compute→D2H, 並用 CUDA events 量測「有重疊」與「強制序列 (單 stream)」兩版的 wall time。 報告加速比並與第 1 章的 pipeline 模型 (`瓶頸×N + 一輪其他 stage`) 對照。
+
+<Solution>
+重點: (1) `cudaMallocHost` 配 pinned buffer, 否則 async copy 失效; (2) ping-pong 兩組 device buffer + 兩條 stream; (3) 用 event 量 wall time 而非 `cudaMemcpy` 同步。 預期重疊版接近「瓶頸 stage × chunk 數」的下限, 序列版接近「各 stage 相加 × chunk 數」。 若沒看到加速, 先確認 host buffer 真的是 pinned、且中間沒有同步版 `cudaMemcpy` / `cudaDeviceSynchronize` 打斷 pipeline (見 sp3-e2)。
+</Solution>
+</Exercise>
+
+<Quiz
+  questions={[
+    {
+      question: '為什麼 host memory 必須 pinned 才能真正 async copy?',
+      options: ['pinned memory 比較快', 'pageable memory 上的 cudaMemcpyAsync 會退回同步 staging copy, 無法與 compute 重疊', 'pinned memory 容量較大', 'pinned memory 不需要 stream'],
+      answer: 1,
+      explanation: 'DMA 引擎需要固定實體位址; pageable memory 得先同步 stage 到 pinned 區, async 就名存實亡。',
+    },
+    {
+      question: 'CUDA event 在 host–device pipeline 中的角色是?',
+      options: ['分配 memory', '表達跨 stream 的依賴 (讓消費 stream 等生產 stream 的 copy 完成), 並可計時', '啟動 kernel', '取代 shared memory'],
+      answer: 1,
+      explanation: 'Stream 內有序, 跨 stream 的正確性靠 event 建立 happens-before 邊, 也用於 elapsed-time 量測。',
+    },
+    {
+      question: 'CUDA Graph 主要消除的是哪一種 overhead?',
+      options: ['memory 搬運', 'CPU-side 的 kernel launch overhead (把多次 launch 攤成一次 replay)', 'shared memory bank conflict', '數值誤差'],
+      answer: 1,
+      explanation: 'Graph 錄下 kernel 序列一次性 replay, 對「很多小 kernel」的 decode 特別有效; 與 stream overlap 正交。',
+    },
+  ]}
+/>
+
+<LabBox path="kernels/05-advanced-scheduling">
+`kernels/05-advanced-scheduling` 有 stream / async / persistent pipeline 的可執行範例, 對應 Production Tactics track 的「Streams、Graphs 與 Host-Device Pipeline」一章。 兩章一起讀能把 stream/event/graph 的細節補齊。
+</LabBox>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "CUDA C++ Programming Guide: Streams and Concurrency," 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-concurrent-execution' },
+    { citation: 'NVIDIA Corporation, "Getting Started with CUDA Graphs," 2019.', href: 'https://developer.nvidia.com/blog/cuda-graphs/' },
+    { citation: 'PyTorch, "Accelerating PyTorch with CUDA Graphs," 2021.', href: 'https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/' },
+  ]}
+/>

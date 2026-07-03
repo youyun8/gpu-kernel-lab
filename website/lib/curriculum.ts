@@ -475,6 +475,64 @@ export const tracks: TrackMeta[] = [
       },
     ],
   },
+  {
+    id: 'sp-software-pipelining',
+    label: 'Track 11 — Software Pipelining',
+    level: 'Advanced',
+    color: '#e3b341',
+    description:
+      '同一個「重疊」idea 貫穿六個層級: kernel 內的 double buffering、host–device stream/graph、PyTorch data prefetch、跨 GPU 的 pipeline parallelism (GPipe/1F1B), 到 SGLang 推論服務的 overlap scheduler。 每章附視覺化 schedule 圖、可執行的 programming 範例與逐節 paper-and-pencil 練習。',
+    chapters: [
+      {
+        slug: 'sp1-what-is-software-pipelining',
+        num: 1,
+        title: 'Software Pipelining 是什麼',
+        summary:
+          '從序列到 pipeline、fill/steady-state/drain、bubble 佔比 (p−1)/(N+k−1)、stage 平衡與依賴 hazard, 以及 GPU 各層級的 pipeline 全景。',
+        lab: 'kernels/05-advanced-scheduling',
+      },
+      {
+        slug: 'sp2-kernel-level-pipelining',
+        num: 2,
+        title: 'Kernel 內的 Pipelining',
+        summary:
+          'Double buffering 回顧、多 stage cp.async pipeline、warp specialization (producer/consumer) 與 shared-memory ring buffer。',
+        lab: 'kernels/03-gemm',
+      },
+      {
+        slug: 'sp3-host-device-streams-graphs',
+        num: 3,
+        title: 'Host–Device Pipeline: Streams、Events、Graphs',
+        summary:
+          'CUDA/HIP stream 疊 copy 與 compute、pinned memory + non_blocking、event 建立跨 stream 依賴, 以及 CUDA Graph 消 launch overhead。',
+        lab: 'kernels/05-advanced-scheduling',
+      },
+      {
+        slug: 'sp4-pytorch-input-prefetch-pipeline',
+        num: 4,
+        title: 'PyTorch 的 Input & Prefetch Pipeline',
+        summary:
+          'DataLoader 的 workers/prefetch_factor/pin_memory、CUDA prefetcher 與 record_stream, 以及 torch.compile reduce-overhead 消 launch overhead。',
+        lab: 'kernels/06-pytorch-integration',
+      },
+      {
+        slug: 'sp5-pipeline-parallelism',
+        num: 5,
+        title: 'Pipeline Parallelism',
+        summary:
+          'DP/TP/PP 選型、GPipe 的 micro-batch 與 bubble、1F1B 省 activation memory (非 bubble)、interleaved 1F1B, 以及 torch.distributed.pipelining。',
+        lab: 'kernels/07-multi-gpu-collectives',
+      },
+      {
+        slug: 'sp6-serving-overlap-sglang',
+        num: 6,
+        title: '推論服務的 Pipelining: SGLang、vLLM',
+        summary:
+          'Continuous batching、SGLang overlap (zero-overhead) scheduler、chunked prefill 與 prefill/decode disaggregation。',
+        lab: 'kernels/06-pytorch-integration',
+      },
+    ],
+  },
 ];
 
 export interface FlatChapter extends ChapterMeta {
@@ -531,8 +589,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackColor: '#d29922',
     title: 'Track 1 練習: Parallelization Foundations',
     summary:
-      'Decomposition、lost update interleaving、mutex/atomic/reduction/semaphore 選型、barrier 正確性, 以及 CPU/GPU race demos。',
-    count: 8,
+      'Decomposition、lost update interleaving、mutex/atomic/reduction/semaphore 選型、barrier 正確性、Amdahl/granularity/privatization, 以及 CPU/GPU race demos。',
+    count: 11,
   },
   {
     slug: 'track-m',
@@ -541,8 +599,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackColor: '#6e7681',
     title: 'Track 2 練習: Memory Hierarchy',
     summary:
-      'Latency cycle 換算、bandwidth/roofline 計算、cache-line/transaction counting、tile 容量估算, 以及 stride/transpose/roofline programming labs。',
-    count: 10,
+      'Latency cycle 換算、bandwidth/roofline 計算、cache-line/transaction counting、tile 容量估算、latency hiding、stencil AI, 以及 stride/transpose/roofline programming labs。',
+    count: 13,
   },
   {
     slug: 'track-a',
@@ -550,8 +608,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackLabel: 'Track 3 — 入門',
     trackColor: '#39d353',
     title: 'Track 3 練習: GPU 基礎與效能測量',
-    summary: 'SIMT、thread indexing、memory hierarchy latency、bandwidth 計算、roofline 判讀。',
-    count: 8,
+    summary: 'SIMT、thread indexing、memory hierarchy latency、warp divergence、bandwidth 計算、roofline 判讀。',
+    count: 11,
   },
   {
     slug: 'track-b',
@@ -559,8 +617,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackLabel: 'Track 4 — 進階',
     trackColor: '#58a6ff',
     title: 'Track 4 練習: Coalescing、Bank Conflict、Occupancy、Reduction',
-    summary: 'transaction 計數、bank 對映、occupancy limiter、warp reduce、online softmax。',
-    count: 9,
+    summary: 'transaction 計數、bank conflict/padding、occupancy limiter、warp reduce、online softmax。',
+    count: 12,
   },
   {
     slug: 'track-c',
@@ -568,8 +626,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackLabel: 'Track 5 — 專家',
     trackColor: '#f778ba',
     title: 'Track 5 練習: GEMM、Tail Effect、Pipeline、Profiling',
-    summary: 'arithmetic intensity、tile reuse、wave quantization、Split-K、bottleneck 診斷。',
-    count: 8,
+    summary: 'arithmetic intensity、tile reuse、wave quantization、Split-K/Stream-K、epilogue fusion、bottleneck 診斷。',
+    count: 11,
   },
   {
     slug: 'track-d',
@@ -577,8 +635,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackLabel: 'Track 7 — PyTorch 實戰',
     trackColor: '#ffa657',
     title: 'Track 7 練習: Profiling、Custom Extension、Fusion、Triton',
-    summary: 'launch overhead 估算、tensor 檢查、fused speedup、autograd、custom op 註冊。',
-    count: 9,
+    summary: 'launch overhead 估算、tensor 檢查、fused speedup、autograd、custom op 註冊、torch.compile 診斷。',
+    count: 10,
   },
   {
     slug: 'track-e',
@@ -586,8 +644,18 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackLabel: 'Track 8 — 生產級 library',
     trackColor: '#a371f7',
     title: 'Track 8 練習: CUTLASS、AMD 生態、Attention、推論引擎',
-    summary: 'CUTLASS 分層與 CuTe layout、CK/hipBLASLt/AITER 對照、FlashAttention 推導、prefill/decode 判讀。',
-    count: 8,
+    summary: 'CUTLASS 分層與 CuTe layout、CK/hipBLASLt/AITER 對照、FlashAttention 推導、prefill/decode AI、continuous batching 判讀。',
+    count: 11,
+  },
+  {
+    slug: 'track-sp',
+    trackId: 'sp-software-pipelining',
+    trackLabel: 'Track 11 — Software Pipelining',
+    trackColor: '#e3b341',
+    title: 'Track 11 練習: Software Pipelining',
+    summary:
+      'Pipeline 步數/加速上限、bubble 佔比、瓶頸 stage、latency hiding stage 數、GPipe vs 1F1B 記憶體、overlap scheduler 與 chunked prefill, 以及 stream/prefetcher/pipeline programming labs。',
+    count: 11,
   },
 ];
 

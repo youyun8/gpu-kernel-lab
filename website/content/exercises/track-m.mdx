@@ -1,4 +1,4 @@
-# Track M 練習: Memory Hierarchy
+# Track 2 練習: Memory Hierarchy
 
 這組練習要求你先做 pencil-and-paper 計算, 再用 `kernels/02-memory` 和既有 benchmark 驗證。 除非題目另有指定, 假設 `float = 4 bytes`, CPU cache line = 64 bytes, GPU ideal warp transaction = 128 bytes。
 
@@ -95,5 +95,29 @@ Naive transpose 通常有 uncoalesced writes 或 reads。 Shared-memory tiled tr
 
 <Solution>
 合格報告應包含紙上模型與實測對照。 重點不是一定要變快, 而是能說清楚 hypothesis: 例如 vectorized load 是否改善 instruction overhead/alignment, SoA 是否改善 coalescing, gather/scatter 是否被 index randomness 或 atomic contention 限制。 Correctness 至少要比較 CPU reference 或 checksum, 並測 tail/misaligned sizes。
+</Solution>
+</Exercise>
+
+<Exercise id="M11" title="要幾個 warp 才藏住 latency" kind="paper" level="進階">
+某 GPU global memory latency ≈ 500 cycles, 每個 SM 每 cycle 可發射 1 條指令。 一個 memory-bound kernel 每 4 條算術指令就有 1 條 load 依賴前一個 load。 (a) 一個 warp 遇到 load 後大約 stall 多久? (b) 粗估要多少個常駐 warp 才能把這 500 cycle latency 完全藏住? (c) 若 register 壓力讓每 SM 只能放 8 個 warp, 會怎樣?
+
+<Solution>
+(a) 該 warp 發出 load 後要等 ~500 cycles 才能用結果 (若下一步依賴它)。 (b) 每個 warp 每 ~4 條指令 (≈4 cycles) 產生一次需要被藏的 stall; 要填滿 500 cycles, 大約需要 `500/4 ≈ 125` 個「指令發射機會」, 即需要約這麼多可切換的獨立 warp-cycles → 需要數十個 warp 輪替 (實際依 ILP 而定, 概念是「夠多 warp 讓 scheduler 每 cycle 都有 ready warp」)。 (c) 只有 8 個 warp 遠不足以藏住 500 cycle → SM 常常沒有 ready warp, 出現 stall (profiler 顯示 long-scoreboard), kernel latency-bound。 對策: 降 register/shared 用量提高 occupancy, 或提高 per-thread ILP。
+</Solution>
+</Exercise>
+
+<Exercise id="M12" title="Strided access 的 transaction 計數" kind="paper" level="進階">
+一個 warp (32 threads) 各讀一個 `float`, transaction 覆蓋 128 bytes。 (a) 連續存取 (stride 1) 需要幾個 transaction? 效率? (b) stride 2 (每隔一個讀) 呢? (c) stride 32 (每 thread 相距 128 bytes) 呢? (d) 從中歸納 coalescing 的通則。
+
+<Solution>
+(a) stride 1: 32×4 = 128 bytes 連續 → **1** transaction, 效率 128/128 = 100%。 (b) stride 2: 32 個 float 散在 256 bytes 範圍 → **2** transactions, 但只用到 128 有效 bytes → 效率 50%。 (c) stride 32: 每個 thread 落在不同的 128-byte 段 → **32** transactions, 每個只用 4/128 → 效率 ~3%。 (d) 通則: 一個 warp 的存取越集中在少數 cache line/transaction, 效率越高; 大 stride / AoS 讓每 thread 各拉一條 line, 頻寬幾乎全浪費。 用 SoA、coalesced index 讓相鄰 thread 讀相鄰位址。
+</Solution>
+</Exercise>
+
+<Exercise id="M13" title="Stencil 的 arithmetic intensity" kind="paper" level="挑戰">
+一個 5-point 2D stencil: 每個 output 讀 5 個鄰居 (`float`)、做 5 次乘加 (~9 FLOP), 寫 1 個 output。 (a) 不考慮 cache reuse, 每個 output 的 naive AI? (b) 相鄰 output 共用鄰居, 理想 cache/shared-memory reuse 下每個 output 實際只需要新讀約 1 個 `float`, AI 變多少? (c) 這說明什麼優化方向?
+
+<Solution>
+(a) naive: 讀 5 + 寫 1 = 6 次存取 × 4 bytes = 24 bytes, ~9 FLOP → AI ≈ `9/24 ≈ 0.375 FLOP/byte` — memory-bound。 (b) 理想 reuse: 每個 output 攤到約 1 個新 float in + 1 float out ≈ 8 bytes, ~9 FLOP → AI ≈ `9/8 ≈ 1.1` — 提升約 3 倍。 (c) Stencil 的鄰居在相鄰 output 間高度重複, 用 shared-memory tiling / cache blocking 把 halo 載一次多次用, 就能把 AI 從 memory-bound 往上推 (與 GEMM tiling 同理)。
 </Solution>
 </Exercise>

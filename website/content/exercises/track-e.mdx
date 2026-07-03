@@ -1,4 +1,4 @@
-# Track E 練習: CUTLASS、AMD 生態、Attention、推論引擎
+# Track 8 練習: CUTLASS、AMD 生態、Attention、推論引擎
 
 對應第 22–25 章。 這一組多為觀念題與推導題, 目的是把前面所有 kernel 技巧接到生產級 library 與推論引擎。 除非另外標明, 沿用 warp = 32、`float` = 4 bytes 的假設。
 
@@ -109,5 +109,29 @@ FlashAttention 的內迴圈維護 running max `m`、running denominator `l`、ru
 (b) prefill 通常是開頭一段密集的大 kernel (處理整個 prompt); decode 是之後一長串重複的短 kernel 序列 (每 token 一輪), 兩者形狀與時長明顯不同。
 
 (c) decode 階段單一 kernel 的 compute 使用率通常不高、memory/GEMV 主導, 且可能看到 launch 密集 — 符合 memory-bound + 潛在 launch overhead 的預期 (第 24、25 章)。 若開了 CUDA Graph, decode 的 launch 空檔會明顯減少。 實際數字依模型、batch、硬體而異。
+</Solution>
+</Exercise>
+
+<Exercise id="E9" title="FlashAttention 的記憶體" kind="paper" level="挑戰">
+標準 attention 對序列長度 `N` 顯式建立 `N×N` 的 attention 矩陣。 (a) `N=8192`、fp16 時這個矩陣多大? 為什麼長序列會 OOM? (b) FlashAttention 用 tiling + online softmax 避免落地整個矩陣, 它的額外記憶體與 `N` 的關係? (c) 這如何體現「memory movement 才是瓶頸」的思想?
+
+<Solution>
+(a) `8192² × 2 bytes = 128 MiB` **每個 head、每個 batch** — 多 head/大 batch 直接爆掉, 且要讀寫這塊到 HBM。 記憶體與計算都是 `O(N²)`。 (b) FlashAttention 只保留當前 tile 的 block 與 online softmax 的 running max/sum (`O(N)` 或每 block `O(1)`), 不落地整個 `N×N` → 額外記憶體 `O(N)`。 (c) 它的 FLOP 與標準 attention 相同, 加速全來自**不把 N×N 矩陣寫進 HBM 再讀回** — 把 attention 從 memory-bound 拉回 compute-bound。 這與 GEMM tiling、epilogue fusion 是同一個「減少 memory movement」母題。
+</Solution>
+</Exercise>
+
+<Exercise id="E10" title="Prefill vs decode 的 arithmetic intensity" kind="paper" level="挑戰">
+自回歸 LLM 推論。 (a) prefill (一次處理 `S` 個 prompt token) 的矩陣乘法為什麼 compute-bound? (b) decode (一次 1 個 token) 為什麼 memory-bound? 用 arithmetic intensity 說明。 (c) 這如何解釋「decode 靠大 batch 才有效率」?
+
+<Solution>
+(a) Prefill 對 `S` 個 token 同時做 `[S, d]×[d, d]` 的大 GEMM, 權重讀一次被 `S` 個 token 重複使用 → AI 高 (∝ S)、compute-bound。 (b) Decode 一次 1 個 token: 每一層都要把整個權重矩陣從 HBM 讀進來只算 1 個 token 的 GEMV → 權重 reuse ≈ 1, AI ≈ `O(1)`、memory-bound (瓶頸是搬權重 + KV cache)。 (c) 把 `B` 個 request 的 decode 併成一個 batch, 同一份權重被 `B` 個 token 共用 → AI ∝ B, 從 memory-bound 往 compute-bound 推。 所以 decode 的吞吐幾乎正比於能湊多大 batch — 這正是 continuous batching 的動機 (見 Track 11 第 6 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="E11" title="Continuous batching 的利用率" kind="paper" level="進階">
+一個推論伺服器 batch slot = 32。 平均而言任一時刻有 20 個 request 在生成、其餘 slot 空著。 (a) static batching (等湊滿才跑) 在低負載時的問題? (b) continuous batching 如何提高 slot 利用率? (c) 若把 max batch 從 32 加大到 128, 對 latency 與 throughput 各有什麼影響?
+
+<Solution>
+(a) Static batching 要湊滿或等 timeout 才發, 低負載時 request 得等很久 (latency 差), 或發半空的 batch (GPU 利用率差)。 (b) Continuous batching 每個 step 動態把等待中的 request 補進空 slot、完成的移出, 讓有效 batch 盡量貼近可用 request 數, slot 不空等。 (c) 加大 max batch: throughput 上限提高 (能容納更多並行 request, 攤銷權重讀取), 但單一 request 的 latency 可能上升 (每 step 要算更大的 batch、且可能與更多 prefill 混在一起)。 這是 serving 的 latency↔throughput 取捨, 常搭配 chunked prefill 調節。
 </Solution>
 </Exercise>

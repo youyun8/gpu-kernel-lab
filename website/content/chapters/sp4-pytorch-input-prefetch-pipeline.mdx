@@ -1,0 +1,161 @@
+# PyTorch 的 Input & Prefetch Pipeline
+
+訓練迴圈裡最容易被忽略的 pipeline, 是**資料進 GPU 之前**那一段: 從磁碟讀、decode、augment、collate、搬上 GPU。 如果 GPU 每個 step 都要停下來等 CPU 準備下一個 batch, 再快的 kernel 也白搭。 這一章看 PyTorch 怎麼用 worker + prefetch + stream 把這條輸入管線與 GPU compute 重疊。
+
+## DataLoader: Workers、prefetch_factor、Pinned Memory
+
+`DataLoader` 的 pipeline 有兩層: **多個 worker process** 平行做 CPU 端的讀取/前處理, 並**提前** (prefetch) 準備 batch, 讓 GPU 拿到當前 batch 時, 下幾個 batch 已經在排隊。
+
+```python
+from torch.utils.data import DataLoader
+loader = DataLoader(
+    dataset,
+    batch_size=256,
+    num_workers=8,           # 8 個 CPU process 平行做 __getitem__ + collate
+    pin_memory=True,         # collate 後放進 pinned buffer -> 之後可 async H2D
+    prefetch_factor=4,       # 每個 worker 預先備妥 4 個 batch
+    persistent_workers=True, # 不要每個 epoch 重啟 worker (省 fork 成本)
+    drop_last=True,
+)
+for x, y in loader:
+    x = x.to('cuda', non_blocking=True)   # pinned -> 這個 H2D 可與上一步 compute 重疊
+    y = y.to('cuda', non_blocking=True)
+    train_step(x, y)
+```
+
+三個旋鈕對應第 1 章的概念: `num_workers` 決定 CPU stage 的**吞吐** (平行度), `prefetch_factor` 決定 pipeline 的**緩衝深度** (能容忍多久的 GPU/CPU 速率抖動), `pin_memory` 讓最後的 H2D copy 能 **async 重疊**。
+
+<Exercise id="sp4-e1" title="要幾個 worker" kind="paper" level="進階">
+GPU 每個 training step 花 40ms。 CPU 端準備一個 batch (讀圖 + decode + augment) 單核花 200ms。 (a) 要幾個 worker 才能讓 CPU 不成為瓶頸? (b) 只用 4 個 worker 會怎樣? (c) 加到 32 個 worker 有什麼風險?
+
+<Solution>
+(a) CPU 要在 40ms 內產出一個 batch。 單核 200ms → 需要 `ceil(200 / 40) = 5` 個 worker 並行 (5 個各 200ms 交錯, 平均每 40ms 出一個)。
+
+(b) 4 個 worker: 平均每 `200/4 = 50ms` 出一個 batch > GPU 的 40ms → **input-bound**, GPU 每 step 要等 10ms, 利用率約 `40/50 = 80%`。
+
+(c) 32 個 worker: 遠超需求, 反而吃掉 CPU/RAM、增加 IPC 與 pinned buffer 記憶體壓力, 可能造成 page cache 抖動與 OOM。 Worker 數應對準「剛好餵飽 GPU」, 用 profiler (torch.profiler 的 data-loading 時間) 校準。
+</Solution>
+</Exercise>
+
+## non_blocking Copy 與 CUDA Prefetch
+
+`pin_memory=True` + `.to('cuda', non_blocking=True)` 讓 H2D copy 掛在 copy 引擎上, 與上一個 step 的 compute 重疊。 但預設它只重疊「H2D」與「compute」各一步。 想更徹底, 可以自己寫一個 **CUDA prefetcher**: 用一條 side stream 提前把**下一個** batch 搬上 GPU, 這是 apex / NVIDIA DALI 廣為人知的 pattern:
+
+```python
+class CudaPrefetcher:
+    """Prefetch the next batch onto the GPU on a side stream so the H2D copy
+    overlaps the current step's compute. Classic training-loop pipeline."""
+    def __init__(self, loader, device='cuda'):
+        self.loader = iter(loader)
+        self.device = device
+        self.stream = torch.cuda.Stream()
+        self._preload()
+
+    def _preload(self):
+        try:
+            self.nx, self.ny = next(self.loader)
+        except StopIteration:
+            self.nx = self.ny = None
+            return
+        with torch.cuda.stream(self.stream):
+            self.nx = self.nx.to(self.device, non_blocking=True)
+            self.ny = self.ny.to(self.device, non_blocking=True)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.nx is None:
+            raise StopIteration
+        # ensure the prefetch copy finished before the default stream uses it
+        torch.cuda.current_stream().wait_stream(self.stream)
+        x, y = self.nx, self.ny
+        # tell the allocator these tensors are in use on the compute stream, so
+        # their memory isn't reused while the copy/compute is still in flight
+        x.record_stream(torch.cuda.current_stream())
+        y.record_stream(torch.cuda.current_stream())
+        self._preload()          # kick off the NEXT batch's copy now
+        return x, y
+```
+
+關鍵是 `_preload()` 在回傳當前 batch **之前**就發出下一個 batch 的 copy — 於是 copy(n+1) 疊在 compute(n) 上。 `record_stream` 是正確性的細節: 防止 caching allocator 在 copy 還在途時就把 buffer 回收。
+
+<Exercise id="sp4-e2" title="為什麼需要 record_stream" kind="paper" level="挑戰">
+在上面的 prefetcher 裡, 若拿掉兩行 `record_stream`, 偶爾會出現數值錯誤或 race。 (a) 問題出在哪? (b) 為什麼「偶爾」而不是「每次」? (c) `wait_stream` 為什麼不足以解決?
+
+<Solution>
+(a) PyTorch 的 caching allocator 以 **stream** 為單位判斷 tensor 何時可安全釋放/重用。 prefetch 的 copy 發生在 `self.stream`, 但 tensor 之後被 default (compute) stream 使用。 若不 `record_stream(compute_stream)`, allocator 只知道它在 `self.stream` 上「用完了」, 可能在 compute 還在讀它時就把那塊記憶體分配給別的 tensor → race。
+
+(b) 只有當 allocator 剛好把那塊記憶體回收並重新分配、且時序上與 compute 重疊時才出錯 — 取決於配置/釋放的節奏, 所以是**間歇性**的, 很難 debug。
+
+(c) `wait_stream` 只保證 compute stream **開始前**等 copy 完成 (讀取順序正確); 它不告訴 allocator「這塊記憶體還會被 compute stream 用」。 釋放/重用的安全是另一回事, 必須 `record_stream`。
+</Solution>
+</Exercise>
+
+## 用 CUDA Graph / torch.compile 消 Launch Overhead
+
+輸入管線餵飽了, 下一個瓶頸常是 **CPU launch overhead** (第 3 章): 小模型或小 batch 時, Python + kernel launch 跟不上 GPU。 `torch.compile(mode="reduce-overhead")` 底層用 CUDA graph 把整個 step 錄下重播:
+
+```python
+# reduce-overhead uses CUDA graphs under the hood to cut per-step launch cost.
+model = torch.compile(model, mode="reduce-overhead")
+for x, y in prefetcher:          # input pipeline (above) feeds the graphed step
+    train_step(model, x, y)      # first few steps warm up / capture, then replay
+```
+
+於是三層 pipeline 疊在一起: **worker 準備資料** ‖ **stream 搬資料上 GPU** ‖ **graph 化的 compute step** — 各用不同資源 (CPU core、DMA、SM), 理想情況 GPU 從頭到尾不空等。
+
+<Exercise id="sp4-e3" title="診斷: GPU 使用率只有 60%" kind="paper" level="挑戰">
+`nvidia-smi` 顯示訓練時 GPU 使用率在 60% 上下抖動。 你懷疑是輸入管線。 (a) 用 `torch.profiler` 該看哪些訊號來確認? (b) 若確認是 data loading bound, 依序有哪三個對策? (c) 若 profiler 顯示 GPU 忙但每個 kernel 之間有固定空隙, 又該怎麼辦?
+
+<Solution>
+(a) 看 timeline 上 GPU stream 是否有週期性空檔、且空檔對齊 `enumerate(loader)` 的 `next`; 看 `DataLoader` 相關的 CPU 時間佔比、以及 `aten::to` / memcpy 是否落在 compute 之外。
+
+(b) 依序: (1) 提高 `num_workers` 到剛好餵飽 GPU (sp4-e1); (2) 開 `pin_memory=True` + `non_blocking=True`, 必要時上 CUDA prefetcher 讓 H2D 疊 compute; (3) 把前處理往 GPU 移 (如 DALI / GPU-side augment) 或快取 decode 結果。
+
+(c) 那不是 data loading 而是 **launch overhead**: kernel 間的固定空隙 = CPU 來不及發下一個 kernel。 對策是 CUDA graph / `torch.compile(mode="reduce-overhead")` 把 step 錄起來重播 (第 3 章)。 兩種 bound 的 timeline 特徵不同, 別把 launch-bound 誤診成 input-bound。
+</Solution>
+</Exercise>
+
+<Exercise id="sp4-e4" title="實作: 量化 prefetcher 的收益" kind="code" level="進階">
+用一個合成 dataset (每個 `__getitem__` 故意 `time.sleep` 模擬前處理) 與一個中等大小的模型, 量測三種設定的 samples/sec: (a) `num_workers=0`; (b) `num_workers=N` + `pin_memory`; (c) 再套上本章的 `CudaPrefetcher`。 用 `torch.profiler` 佐證 GPU 空檔的變化。
+
+<Solution>
+預期: (a) 最慢, GPU 大量等待 CPU; (b) 顯著改善, worker 把前處理與 compute 重疊、pinned + non_blocking 讓 H2D 也疊; (c) 在 H2D 佔比不小的情況下再擠出幾 %, 把「下一個 batch 的 copy」也藏進當前 compute。 若 (c) 相對 (b) 幾乎沒差, 代表 H2D 本來就很小 (資料量小) 或已被預設的 non_blocking 藏住 — 這時瓶頸在別處, 回去看 profiler。 重點是用數據說話, 而非盲目套 prefetcher。
+</Solution>
+</Exercise>
+
+<Quiz
+  questions={[
+    {
+      question: 'DataLoader 的 num_workers、prefetch_factor、pin_memory 分別對應 pipeline 的哪個面向?',
+      options: ['都控制 batch size', 'CPU stage 的吞吐 (平行度)、緩衝深度、以及讓 H2D 可 async 重疊', '分別控制學習率', '都只影響記憶體用量'],
+      answer: 1,
+      explanation: 'num_workers=CPU 平行度, prefetch_factor=緩衝深度, pin_memory 讓最後的 H2D copy 能與 compute 重疊。',
+    },
+    {
+      question: 'CUDA prefetcher 的核心做法是?',
+      options: ['把模型變小', '在回傳當前 batch 前, 就用 side stream 發出下一個 batch 的 H2D copy, 讓 copy(n+1) 疊 compute(n)', '關閉 pin_memory', '每步呼叫 cudaDeviceSynchronize'],
+      answer: 1,
+      explanation: '提前一個 batch 發 copy 到 side stream, 就把 H2D 藏進當前 step 的 compute。',
+    },
+    {
+      question: 'torch.compile(mode="reduce-overhead") 主要解決什麼?',
+      options: ['data loading 太慢', 'CPU-side 的 per-step launch overhead (底層用 CUDA graph 重播)', 'GPU 記憶體不足', '數值不穩定'],
+      answer: 1,
+      explanation: '它用 CUDA graph 把 step 錄起來重播, 消除小模型/小 batch 的 launch-bound; 與輸入管線正交、可疊加。',
+    },
+  ]}
+/>
+
+<LabBox path="kernels/06-pytorch-integration">
+本章概念可搭配 PyTorch 實戰 track 的 profiler 與 custom extension 章節。 用 `torch.profiler` 對你的訓練迴圈做一次 trace, 先確認瓶頸是 input-bound、launch-bound 還是 compute-bound, 再對症下藥。
+</LabBox>
+
+<FurtherReading
+  links={[
+    { citation: 'PyTorch, "torch.utils.data.DataLoader," Documentation, 2024.', href: 'https://pytorch.org/docs/stable/data.html' },
+    { citation: 'NVIDIA Corporation, "NVIDIA DALI: Data Loading Library," 2024.', href: 'https://github.com/NVIDIA/DALI' },
+    { citation: 'PyTorch, "torch.compile and CUDA Graph Trees," 2023.', href: 'https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/' },
+  ]}
+/>

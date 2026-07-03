@@ -11,8 +11,8 @@ gpu-kernel-lab/
 ├── website/                 # Next.js 14 + TypeScript + Tailwind + MDX 學習網站
 │   ├── app/                 # App Router 頁面 (首頁、roadmap、chapters/[slug])
 │   ├── components/          # 互動元件 (7 個 widgets) 與版面
-│   ├── content/chapters/    # 48 章 MDX 內容 (Track 1–10, 含 GEMM 優化深入)
-│   ├── content/exercises/   # 7 組練習與完整解答 (Track 1–8)
+│   ├── content/chapters/    # 54 章 MDX 內容 (Track 1–11, 含 GEMM 優化深入與 Software Pipelining)
+│   ├── content/exercises/   # 8 組練習與完整解答 (Track 1–8, 11)
 │   └── content/data/        # benchmark 示意數據 JSON
 ├── kernels/                 # 可執行 kernel, 對應網站章節
 │   ├── common/              # portability header + benchmark harness
@@ -107,7 +107,7 @@ GitHub Pages project site 的網址格式為 `https://<user>.github.io/<repo>`�
 
 ## 練習與解答
 
-Track 1–8 各有一組練習 (共 7 組), 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 附完整解答:
+Track 1–8 與 Track 11 各有一組練習 (共 8 組), 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 附完整解答:
 
 - 網站: `/exercises` (每題可展開「顯示解答」), 內容在 `website/content/exercises/`。
 - programming 參考解: `kernels/exercises/` (可用 CMake 直接編譯執行), 其餘題目複用既有 kernel 目錄。

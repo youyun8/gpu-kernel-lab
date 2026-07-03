@@ -1,4 +1,4 @@
-# Track C 練習: GEMM、Tail Effect、Pipeline、Profiling
+# Track 5 練習: GEMM、Tail Effect、Pipeline、Profiling
 
 對應第 12–16 章。 GEMM 尺寸以 row-major、`C = A(M×K) · B(K×N)` 為準。
 
@@ -85,5 +85,29 @@ Profiler 顯示某 kernel: Memory throughput 92%、Compute (SM) 28%、主要 sta
 
 <Solution>
 K 大時, plain GEMM 只有極少 output-tile CTA, GPU 嚴重 under-fill, Split-K 用 K 維平行度補足 CTA 數 → 明顯加速 (即使多付一次 reduction)。 K 變小後, 一來 plain 版本身工作量小、二來 Split-K 能切的段數變少、reduction overhead 佔比升高, 優勢縮小甚至反轉。 這印證 Split-K 的適用時機是「M、N 小且 K 夠大」 (見 C4 與第 13 章)。 修改 K 後記得同步調整 correctness 容忍度不需要變 (邏輯不變)。
+</Solution>
+</Exercise>
+
+<Exercise id="C9" title="Register tile 的 shared-memory intensity" kind="paper" level="挑戰">
+GEMM 主迴圈每個 thread 算 `TM×TN` 的 micro-tile。 每前進一個 k, 從 shared memory 讀 `TM` 個 A 值、`TN` 個 B 值, 做 `TM×TN` 次 FMA。 (a) `TM=TN=1`、`4`、`8` 時, 每次 k-step 的「shared-memory 讀取數 : FLOP」比各是多少? (b) 為什麼加大 register tile 能攤薄 shared-memory 頻寬? (c) 什麼資源限制 `TM×TN` 不能無限大?
+
+<Solution>
+(a) 讀取 = `TM+TN`, FLOP = `2·TM·TN`。 `1×1`: 讀 2 : FLOP 2 = 1:1; `4×4`: 讀 8 : FLOP 32 = 1:4; `8×8`: 讀 16 : FLOP 128 = 1:8。 每個 shared 讀被攤到越多 FLOP。 (b) outer-product 結構讓讀取隨 `TM+TN` (線性) 成長、FLOP 隨 `TM·TN` (平方) 成長, 比值 ∝ `1/(調和平均)`, tile 越大 shared 讀取相對 FLOP 越少。 (c) `acc[TM][TN]` 與 a/b 片段都住 register → register 檔案大小限制; 太大會 register spill 或壓低 occupancy。 這是 register tiling 的核心取捨。
+</Solution>
+</Exercise>
+
+<Exercise id="C10" title="Split-K vs Stream-K 選型" kind="paper" level="挑戰">
+GPU 有 108 個 SM。 (a) 某 GEMM 產生 130 個 output-tile, 每 tile 工作量相同, 用普通排程的 wave 利用率? (b) Split-K=2 會怎樣改變 tile/CTA 數與 wave 行為? (c) Stream-K 如何用不同的切法幾乎消除這個尾巴? (d) 一句話總結兩者的差異。
+
+<Solution>
+(a) 130 tiles / 108 = 2 waves; 第二 wave 只有 22 個 → 利用率 `130/(2×108) ≈ 60%`。 (b) Split-K=2 把每 tile 的 K 切兩段 → `260` 個 partial-CTA, 分 3 waves (`260/108`), 但最後一 wave 仍可能半滿; 且多一次 reduction。 未必更好, 要看能不能讓最後一 wave 更滿。 (c) Stream-K 把所有 tile 的 K-iterations 接成一條 stream, 平均分給固定 108 個 CTA, 每個 CTA 工作量幾乎相等, 尾巴被攤平 (跨界 tile 做 partial fix-up)。 (d) Split-K = 沿 K 切「整齊的段」再 reduce (簡單); Stream-K = 按總工作量「均分」(負載平衡最徹底、排程最複雜)。
+</Solution>
+</Exercise>
+
+<Exercise id="C11" title="Epilogue fusion 省的 traffic" kind="paper" level="進階">
+一個 `M=N=4096` fp16 GEMM 之後接 bias + GELU。 (a) 若 bias+GELU 是獨立 kernel, 要對 C 額外做幾次 global 讀寫? 多少 bytes? (b) fuse 進 epilogue 後省下多少? (c) 對一個 compute-bound 的大 GEMM, 這個節省佔比大嗎? 什麼情況下 epilogue fusion 最有感?
+
+<Solution>
+(a) 獨立 kernel 要把 C (4096×4096 fp16 = `2^24×2 = 32 MB`) **讀回一次、寫出一次** = `64 MB` 額外 traffic。 (b) fuse 後 elementwise 在 register 上就地做, C 只在 GEMM 尾端寫一次 → 省掉那 `64 MB` 的讀+寫。 (c) 對很大的 compute-bound GEMM, 主 kernel 的時間遠大於這 64 MB 的搬運, 節省佔比小但仍為正; **對 memory-bound 的情境 (小/瘦 GEMM、或 elementwise 很多層串接) 最有感** — 省下的多次 C 讀寫可能就是主要成本。
 </Solution>
 </Exercise>

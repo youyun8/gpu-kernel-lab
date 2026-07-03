@@ -7,6 +7,7 @@ import TrackB from './track-b.mdx';
 import TrackC from './track-c.mdx';
 import TrackD from './track-d.mdx';
 import TrackE from './track-e.mdx';
+import TrackSp from './track-sp.mdx';
 
 export const exerciseComponents: Record<string, ComponentType> = {
   'track-p': TrackP,
@@ -16,4 +17,5 @@ export const exerciseComponents: Record<string, ComponentType> = {
   'track-c': TrackC,
   'track-d': TrackD,
   'track-e': TrackE,
+  'track-sp': TrackSp,
 };

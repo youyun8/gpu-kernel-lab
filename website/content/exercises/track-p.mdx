@@ -1,6 +1,6 @@
-# Track 0 練習: Parallelization Foundations
+# Track 1 練習: Parallelization Foundations
 
-這組練習對應 Track 0。 Paper 題要求你畫出 interleaving、判斷同步 primitive、估算粒度; programming 題使用 `kernels/00-parallel-foundations`。
+這組練習對應 Track 1。 Paper 題要求你畫出 interleaving、判斷同步 primitive、估算粒度; programming 題使用 `kernels/00-parallel-foundations`。
 
 <Exercise id="P1" title="Decomposition 與 granularity" kind="paper" level="入門">
 有 `n = 10,000,000` 個元素要做 `y[i] = a * x[i] + y[i]`。 比較兩種 CPU 切法: (a) 建立 10,000,000 個 threads, 每個處理 1 element; (b) 建立 8 個 threads, 每個處理一段 contiguous slice。 哪個合理? GPU 上又為什麼可以接近一個 thread 一個 element?
@@ -98,5 +98,29 @@ Correctness 不應改變, 因為 semaphore protocol 對任意 capacity 都維持
 
 <Solution>
 GPU 同時有大量 threads 更新少數 bins, contention 遠高於 8 個 CPU threads 更新一個 counter, 所以 lost update 非常嚴重。 Atomic 版把每次 bin update 正確序列化, 但所有打同一 bin 的 updates 仍要排隊, hotspot 會限制 throughput。 更好的做法是 warp/block-private histogram, 最後 merge。
+</Solution>
+</Exercise>
+
+<Exercise id="P9" title="Amdahl's law 與 critical path" kind="paper" level="進階">
+一個工作 95% 可完美平行、5% 必須序列。 (a) 用無限多核心, 加速上限多少? (b) 用 32 核心的實際加速? (c) 這對「該花力氣平行化哪一段」有什麼啟示?
+
+<Solution>
+(a) Amdahl: `1 / (0.05 + 0.95/∞) = 1/0.05 = 20×` 上限 — 序列段是硬天花板。 (b) `1 / (0.05 + 0.95/32) = 1 / (0.05 + 0.0297) ≈ 12.5×`。 (c) 序列部分 (critical path) 決定天花板; 與其把已平行的部分再擠一點, 不如想辦法縮短或消除序列段 (例如把 reduction 改成平行 tree、把相依鏈打斷)。
+</Solution>
+</Exercise>
+
+<Exercise id="P10" title="Load balancing 與 granularity" kind="paper" level="進階">
+把 1000 個獨立任務靜態均分給 4 個 worker, 但任務耗時不均: 其中一個 worker 剛好分到所有長任務, 佔總工作量 40%。 (a) 靜態均分下總時間受誰決定? 相對理想的效率? (b) 換成動態 work queue 為什麼較好? (c) 任務切太細 (granularity 太小) 有什麼反效果?
+
+<Solution>
+(a) 受最忙的 worker 決定 (40% 工作量)。 理想每 worker 25%, 效率約 `25%/40% ≈ 62.5%`, 其他 worker 尾端空轉。 (b) 動態 queue 讓空下來的 worker 立刻領新任務, 長任務不會全壓在一個 worker, 自動趨近負載平衡 (與 GPU persistent kernel、Stream-K 同精神)。 (c) 太細會讓每個任務的排程/同步 overhead 佔比升高, 反而變慢; granularity 要大到攤銷 overhead、小到能均衡負載。
+</Solution>
+</Exercise>
+
+<Exercise id="P11" title="Atomic 直加 vs privatized reduction" kind="paper" level="挑戰">
+1M 個元素要加總。 方案 A: 每個 thread 對單一 global counter `atomicAdd`。 方案 B: 每個 block 先在 shared memory 內 reduce, 每 block 只對 global 做一次 atomicAdd (block = 256 threads)。 (a) 兩者對同一 global 位址的 atomic 次數各約多少? (b) 為什麼 A 幾乎必然慢? (c) B 把 contention 降了幾倍?
+
+<Solution>
+(a) A: 每元素一次 → ~`1,000,000` 次 atomicAdd 打同一位址。 B: block 數 = `1e6/256 ≈ 3906`, 每 block 一次 → ~`3906` 次。 (b) A 讓所有 thread 序列化在單一 global 位址上, 是極端 hotspot, throughput 由 atomic 排隊決定, 與平行度無關。 (c) 從 ~1e6 降到 ~3.9e3, 約 **256 倍** (= block size) 更少的 global atomic; 其餘加總在 shared memory 內平行 tree reduce。 這是 privatization 通則: 先在便宜的私有儲存聚合, 再對昂貴的共享資源做一次。
 </Solution>
 </Exercise>

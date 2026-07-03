@@ -1,4 +1,4 @@
-# Track A 練習: GPU 基礎與效能測量
+# Track 3 練習: GPU 基礎與效能測量
 
 這組練習對應第 1–5 章。 Paper-and-pencil 題請先自己算, 再展開解答對照; programming 題的參考解在 <code>kernels/exercises/</code>, 可直接編譯執行。 除非題目另外標明, 假設 warp = 32、一個 memory transaction 覆蓋 128 bytes、`float` 為 4 bytes。
 
@@ -96,5 +96,29 @@ __global__ void saxpy(const float* x, float* y, float a, int n) {
 高 AI: 每筆資料被重複計算很多次, memory 系統閒置 → GB/s 下降, 但算術單元被餵飽 → GFLOP/s 上升 (逼近 compute roof)。
 
 這正是 roofline 的兩段屋頂: 同一份 code, 改變 AI 就在圖上左右移動。 實測數字依硬體而異, 但趨勢一致。
+</Solution>
+</Exercise>
+
+<Exercise id="A9" title="2D grid 的 thread index" kind="paper" level="入門">
+一個 `1024×768` 的影像, 用 `blockDim = (16, 16)` 的 2D block。 (a) grid 該開多大 (每維幾個 block)? (b) 寫出某 thread 對應的全域 `(x, y)` 座標與線性 index (row-major)。 (c) 為什麼 kernel 裡一定要做邊界檢查 `if (x < W && y < H)`?
+
+<Solution>
+(a) `gridDim.x = ceil(1024/16) = 64`, `gridDim.y = ceil(768/16) = 48`。 (b) `x = blockIdx.x*16 + threadIdx.x`, `y = blockIdx.y*16 + threadIdx.y`, 線性 `idx = y * 1024 + x`。 (c) 當寬/高不是 blockDim 的整數倍時, 最後一排 block 會有 thread 落在影像外 (這裡剛好整除, 但通則要防護); 沒有邊界檢查會越界讀寫 → 錯誤結果或 crash。 這也是 tail effect 的來源之一。
+</Solution>
+</Exercise>
+
+<Exercise id="A10" title="Warp divergence 的代價" kind="paper" level="進階">
+一個 warp (32 threads) 執行 `if (tid % 2 == 0) foo(); else bar();`, `foo` 與 `bar` 各 100 條指令且無重疊。 (a) 這個 warp 大約要執行多少條指令週期? (b) 若改成 `if (tid < 16) foo(); else bar();` 代價一樣嗎? (c) 兩者對「執行時間」的影響差在哪? 給一個減少 divergence 的思路。
+
+<Solution>
+(a) SIMT 下同一 warp 的兩條分支會**序列化執行**: 先跑 foo (偶數 lane 作用、奇數關閉), 再跑 bar → 約 `100 + 100 = 200` 指令週期 (而非理想的 100)。 (b) 指令週期一樣是 200 (只要一個 warp 內同時走兩條路, 就都得跑)。 (c) 差別在**哪些 warp 受影響**: `tid<16` 讓 divergence 集中在每個 warp 內 (仍 divergent); 但若改成讓**整個 warp 走同一條路** (例如用 `tid/32` 或 block 級分工), 就沒有 warp 內分歧, 各 warp 只跑自己那條 → 無 divergence penalty。 思路: 讓分支邊界對齊 warp。
+</Solution>
+</Exercise>
+
+<Exercise id="A11" title="從 copy kernel 反推 bandwidth" kind="paper" level="進階">
+一個 `c[i] = a[i]` 的 copy kernel 處理 `N = 2^28` 個 `float`, 量到 kernel 時間 2.4 ms (用 `GB = 10^9 bytes`)。 (a) 這個 kernel 搬了多少 bytes (讀+寫)? (b) achieved bandwidth (GB/s)? (c) 若 GPU 理論頻寬 900 GB/s, 效率多少? 這種 kernel 適合當什麼基準?
+
+<Solution>
+(a) 讀 N + 寫 N = `2 × 2^28 × 4 bytes = 2^31 bytes ≈ 2.147e9 bytes ≈ 2.15 GB`。 (b) `2.147e9 / 2.4e-3 s ≈ 8.95e11 B/s ≈ 895 GB/s`。 (c) 效率 = `895 / 900 ≈ 99%` — 幾乎打滿。 純 copy (STREAM-like) 是量測**可達記憶體頻寬**的標準 microbenchmark, 也是所有 memory-bound kernel 的 speed-of-light 上限參考: 任何 memory-bound kernel 都不可能超過這個實測頻寬。
 </Solution>
 </Exercise>

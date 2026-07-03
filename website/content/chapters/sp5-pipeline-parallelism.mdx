@@ -1,0 +1,165 @@
+# Pipeline Parallelism
+
+當模型大到單一 GPU 塞不下, 一種切法是把**模型的層**切成幾段, 每段放一顆 GPU, 讓資料像走裝配線一樣依序流過。 這就是 **pipeline parallelism** — 把第 1 章的 pipeline 概念放大到跨 GPU 的訓練。 這一章看它的兩個核心 schedule (GPipe、1F1B) 與 PyTorch 的 `torch.distributed.pipelining`。
+
+## 為什麼要 Pipeline Parallelism
+
+三種平行化各解不同的問題:
+
+- **Data parallel**: 每顆 GPU 一份完整模型、算不同資料 — 模型放得下才行。
+- **Tensor parallel**: 把單層 (如 GEMM) 切開跨 GPU — 通訊頻繁, 適合 NVLink 內。
+- **Pipeline parallel**: 把不同層放不同 GPU — 通訊少 (只在 stage 邊界傳 activation), 適合跨節點, 但有 bubble。
+
+Pipeline parallel 的通訊量最小 (只傳 stage 邊界的 activation, 不像 tensor parallel 每層都 all-reduce), 代價是 pipeline bubble 與需要切 micro-batch。
+
+<Exercise id="sp5-e1" title="三種平行化選型" kind="paper" level="進階">
+一個 70B 模型, fp16 權重約 140 GB, 要放到每顆 80 GB 的 GPU 上訓練。 (a) 純 data parallel 可行嗎? (b) 若只有節點內 8 顆 GPU 走 NVLink, 節點間走較慢的網路, tensor parallel 與 pipeline parallel 各適合放在哪個維度? (c) 為什麼 pipeline parallel 特別適合跨節點?
+
+<Solution>
+(a) 不行: data parallel 要求每顆 GPU 各存一份完整模型 (140 GB > 80 GB), 塞不下。 必須切模型。
+
+(b) Tensor parallel 通訊密集 (每層 all-reduce), 應放在**節點內** NVLink (高頻寬低延遲); pipeline parallel 通訊稀疏 (只在 stage 邊界傳 activation), 適合放在**節點間**較慢的網路。 實務常是 TP×PP×DP 三維並用 (3D parallelism)。
+
+(c) Pipeline 只在相鄰 stage 之間點對點傳一次 activation, 通訊量與頻率都遠低於 tensor parallel 的逐層 all-reduce, 所以能容忍節點間較高的網路延遲。
+</Solution>
+</Exercise>
+
+## GPipe: Micro-batch 與 Bubble
+
+若整個 mini-batch 一次灌進去, 同一時間只有一顆 GPU 在忙 (其他在等它) — 完全沒有 pipeline。 **GPipe** 的關鍵是把 mini-batch 再切成 `m` 個 **micro-batch**, 一個接一個灌入, 讓不同 stage 同時處理不同 micro-batch。 所有 forward 跑完再一次跑所有 backward:
+
+<PipelineParallelFigure />
+
+上圖上排是 GPipe: forward 形成一道往右下的樓梯 (fill), 中間一大塊 **bubble**, 然後 backward 樓梯 (drain)。 Bubble 佔比 = `(p − 1)/(m + p − 1)` (p = stage 數, m = micro-batch 數) — 正是第 1 章的公式。 micro-batch 切越多, bubble 越小。
+
+```python
+# torch.distributed.pipelining: wrap this rank's layers in a PipelineStage,
+# then drive it with a schedule. ScheduleGPipe runs all forwards, then all
+# backwards (fill-drain).
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+
+stage = PipelineStage(stage_module, stage_index=rank, num_stages=world_size, device=dev)
+schedule = ScheduleGPipe(stage, n_microbatches=8, loss_fn=loss_fn)
+
+# The runtime splits the batch into micro-batches and handles send/recv between
+# stages. Only the first stage feeds inputs; only the last returns the loss.
+if rank == 0:
+    schedule.step(x)                       # feed inputs
+elif rank == world_size - 1:
+    losses = []
+    schedule.step(target=y, losses=losses) # get loss on the last stage
+else:
+    schedule.step()                        # middle stages just relay
+```
+
+<Exercise id="sp5-e2" title="GPipe bubble 計算" kind="paper" level="進階">
+p = 4 個 stage。 (a) m = 4 micro-batch 時 bubble 佔比? (b) m = 16 時? (c) 若把 micro-batch 從 4 加到 16, 每個 micro-batch 變小, 可能帶來什麼負面效果? (d) 給一個實務上挑 m 的準則。
+
+<Solution>
+(a) `(4−1)/(4+4−1) = 3/7 ≈ 42.9%` — 近半時間在 bubble。
+
+(b) `3/(16+3) = 3/19 ≈ 15.8%`。
+
+(c) micro-batch 越小, 每個 GEMM 越瘦, kernel 效率下降 (wave quantization、Tensor Core 吃不滿), 且 per-micro-batch 的通訊/啟動 overhead 佔比上升。 bubble 省下的可能被 kernel 變慢吃掉。
+
+(d) 常見準則: `m` 取 stage 數的數倍 (例如 `m ≥ 4p`) 讓 bubble < ~20%, 同時保證每個 micro-batch 仍大到能讓 kernel 高效。 實際值要 benchmark。
+</Solution>
+</Exercise>
+
+## 1F1B: 省的是 Activation Memory, 不是 Bubble
+
+上圖下排是 **1F1B (one-forward-one-backward)**。 直覺上會以為它 bubble 更小 — **這是常見的誤解**。 1F1B 的總步數 (18) 與 GPipe 一樣, bubble 比例**相同**都是 `(p−1)/(m+p−1)`。 它真正省的是 **activation memory**。
+
+看下排: 最後一個 stage (GPU3) 一做完 forward 就立刻做對應的 backward (`F0 B0 F1 B1 …`), backward 在 step 4 就開始, 而 GPipe 要等到 step 9。 backward 一做完, 那個 micro-batch 的 activation 就能釋放。 於是:
+
+- **GPipe**: 所有 forward 先跑完, 要同時存住 **m 份** micro-batch 的 activation → peak memory ∝ m。
+- **1F1B**: forward 與 backward 交錯, 任一時刻在途的 activation ≈ **p 份** (pipeline 深度) → peak memory ∝ p, 與 m 無關。
+
+這讓 1F1B 能用**很大的 m** (壓小 bubble) 而不爆記憶體 — 這才是它的價值。
+
+```python
+# Same stage, different schedule. Schedule1F1B interleaves one forward and one
+# backward in steady state to cap activation memory at ~p micro-batches.
+from torch.distributed.pipelining import Schedule1F1B
+
+schedule = Schedule1F1B(stage, n_microbatches=32, loss_fn=loss_fn)
+# driving code (schedule.step(...)) is identical to ScheduleGPipe above.
+```
+
+<Exercise id="sp5-e3" title="GPipe vs 1F1B 的記憶體" kind="paper" level="挑戰">
+p = 4 stage, 每個 micro-batch 在一個 stage 的 activation 約 2 GB。 (a) GPipe 用 m = 16 時, 第一個 stage 的 activation peak 約多少? (b) 1F1B 用同樣 m = 16 呢? (c) 若 GPU 只有 40 GB 而權重/optimizer 已用掉 20 GB, 哪個 schedule 能用 m = 16? (d) 這如何反過來影響能達到的 bubble?
+
+<Solution>
+(a) GPipe 要存住所有已 forward、尚未 backward 的 micro-batch。 第一個 stage 最早 forward、最晚 backward, 需存 ~m 份 → `16 × 2 = 32 GB`。
+
+(b) 1F1B 任一時刻在途 activation ≈ p 份 → `~4 × 2 = 8 GB` (與 m 無關)。
+
+(c) 可用預算 `40 − 20 = 20 GB`。 GPipe 需 32 GB → **OOM**; 1F1B 需 8 GB → **可行**。
+
+(d) 因為 1F1B 記憶體不隨 m 漲, 可以放心把 m 開大 (例如 32、64) 把 bubble 壓到很小; GPipe 想壓 bubble 就得加 m, 但 m 一大就 OOM。 所以「1F1B 省記憶體」間接讓它能達到「更小的 bubble」。
+</Solution>
+</Exercise>
+
+## Interleaved 1F1B 與其他 Schedule
+
+想直接縮小 bubble (而非靠加 m), 要用 **interleaved 1F1B (virtual pipeline)**: 每顆 GPU 不只放連續的一段, 而是放**多個不連續的 virtual stage** (例如 GPU0 放第 1、5 段, GPU1 放第 2、6 段…)。 這讓 pipeline「更深」但 stage 更碎, bubble 縮到 `(p − 1)/(v·m + p − 1)`, v = 每 GPU 的 virtual stage 數。 代價是**通訊次數變 v 倍** (每個 micro-batch 要在 GPU 間多跑幾趟)。
+
+PyTorch 提供 `ScheduleInterleaved1F1B`、`ScheduleLoopedBFS` 等; TorchTitan、Megatron-LM 也各有 zero-bubble / PipeDream 變體。 選型是「bubble ↔ 通訊 ↔ 記憶體 ↔ 實作複雜度」的多維取捨。
+
+<Exercise id="sp5-e4" title="Interleaved 的取捨" kind="paper" level="挑戰">
+p = 4, m = 8。 (a) 普通 1F1B 的 bubble 佔比? (b) 用 v = 2 的 interleaved 1F1B 呢? (c) interleaved 讓通訊量如何變化? (d) 什麼情況下 interleaved 不划算?
+
+<Solution>
+(a) `(4−1)/(8+4−1) = 3/11 ≈ 27.3%`。
+
+(b) `(4−1)/(2·8+4−1) = 3/19 ≈ 15.8%` — bubble 幾乎砍半。
+
+(c) 每個 micro-batch 要經過 `v` 倍的 stage 邊界 → stage 間 send/recv 通訊次數約變 **v 倍** (2×)。
+
+(d) 當 stage 邊界的 activation 很大、或 GPU 間頻寬有限 (例如跨節點慢網路) 時, 多出來的通訊可能比省下的 bubble 還貴; 這時 interleaved 不划算, 用普通 1F1B 或增加 m 更好。
+</Solution>
+</Exercise>
+
+<Exercise id="sp5-e5" title="實作: 兩個 schedule 的 timeline" kind="code" level="挑戰">
+用 `torch.distributed.pipelining` 把一個小 MLP/Transformer 切成 2–4 個 `PipelineStage`, 分別用 `ScheduleGPipe` 與 `Schedule1F1B` 跑, 用 `torch.profiler` 匯出 timeline。 觀察 backward 開始的時間點, 並記錄兩者的 peak memory (`torch.cuda.max_memory_allocated`)。 驗證本章結論: 兩者總時間相近、但 1F1B 的 backward 提早且 peak memory 較低。
+
+<Solution>
+預期 timeline: GPipe 的所有 forward 集中在前段、backward 集中在後段, 中間一段各 rank 交錯的 bubble; 1F1B 的 forward/backward 在 steady state 交錯, backward 明顯提早出現。 `max_memory_allocated` 應顯示 1F1B 低於 GPipe, 差距隨 m 增大而拉開。 若兩者總時間差很多, 檢查 micro-batch 是否太小 (kernel 效率崩) 或通訊成為瓶頸。 本練習的目的是把圖上的抽象 schedule 對到真實的 profiler timeline。
+</Solution>
+</Exercise>
+
+<Quiz
+  questions={[
+    {
+      question: 'GPipe 把 mini-batch 切成 micro-batch 的目的是?',
+      options: ['減少通訊', '讓不同 pipeline stage 能同時處理不同 micro-batch, 填滿 pipeline 以縮小 bubble', '降低精度', '增加 batch size'],
+      answer: 1,
+      explanation: '不切 micro-batch 就同時只有一顆 GPU 在忙; 切了才有 pipeline 重疊, bubble=(p−1)/(m+p−1) 隨 m 下降。',
+    },
+    {
+      question: '關於 1F1B 相對 GPipe, 下列何者正確?',
+      options: ['1F1B 的 bubble 比例更小', '1F1B 與 GPipe 的 bubble 比例相同, 但 1F1B 的 activation peak memory 大幅降低 (∝ p 而非 m)', '1F1B 不需要切 micro-batch', '1F1B 只支援推論'],
+      answer: 1,
+      explanation: '常見誤解澄清: 1F1B 省的是 activation memory (backward 提早釋放), bubble 比例與 GPipe 相同。',
+    },
+    {
+      question: 'Interleaved 1F1B (virtual pipeline) 用什麼換取更小的 bubble?',
+      options: ['更低精度', '每顆 GPU 放多個不連續 virtual stage, 以更多 stage 間通訊 (約 v 倍) 換取 bubble 縮小', '更大的 batch', '關閉 backward'],
+      answer: 1,
+      explanation: 'bubble 降到 (p−1)/(v·m+p−1), 代價是通訊次數約變 v 倍; 跨節點慢網路時可能不划算。',
+    },
+  ]}
+/>
+
+<Callout variant="info" title="與 Multi-GPU track 的關係">
+Pipeline parallelism 的 stage 間傳 activation 用的是點對點 send/recv, 而 data-parallel 的梯度同步用 all-reduce (第 10 章 NCCL/RCCL)。 真實的大模型訓練通常把 pipeline、tensor、data 三種平行化疊起來 (3D parallelism), 各自對應不同的通訊模式與硬體拓撲。
+</Callout>
+
+<FurtherReading
+  links={[
+    { citation: 'Y. Huang et al., "GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism," NeurIPS 2019.', href: 'https://arxiv.org/abs/1811.06965' },
+    { citation: 'D. Narayanan et al., "PipeDream: Generalized Pipeline Parallelism for DNN Training," SOSP 2019.', href: 'https://arxiv.org/abs/1806.03377' },
+    { citation: 'D. Narayanan et al., "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM (interleaved 1F1B)," SC 2021.', href: 'https://arxiv.org/abs/2104.04473' },
+    { citation: 'PyTorch, "Pipeline Parallelism (torch.distributed.pipelining)," Documentation, 2024.', href: 'https://docs.pytorch.org/docs/stable/distributed.pipelining.html' },
+  ]}
+/>

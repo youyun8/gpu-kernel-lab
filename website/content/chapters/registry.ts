@@ -49,6 +49,12 @@ import F30 from './f30-autotuning-specialization-codegen.mdx';
 import F31 from './f31-correctness-determinism-debugging.mdx';
 import F32 from './f32-optimization-checklist.mdx';
 import G33 from './g33-nccl-rccl-collectives.mdx';
+import SP1 from './sp1-what-is-software-pipelining.mdx';
+import SP2 from './sp2-kernel-level-pipelining.mdx';
+import SP3 from './sp3-host-device-streams-graphs.mdx';
+import SP4 from './sp4-pytorch-input-prefetch-pipeline.mdx';
+import SP5 from './sp5-pipeline-parallelism.mdx';
+import SP6 from './sp6-serving-overlap-sglang.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
   'p0-parallelization-design': P0,
@@ -99,4 +105,10 @@ export const chapterComponents: Record<string, ComponentType> = {
   'f31-correctness-determinism-debugging': F31,
   'f32-optimization-checklist': F32,
   'g33-nccl-rccl-collectives': G33,
+  'sp1-what-is-software-pipelining': SP1,
+  'sp2-kernel-level-pipelining': SP2,
+  'sp3-host-device-streams-graphs': SP3,
+  'sp4-pytorch-input-prefetch-pipeline': SP4,
+  'sp5-pipeline-parallelism': SP5,
+  'sp6-serving-overlap-sglang': SP6,
 };

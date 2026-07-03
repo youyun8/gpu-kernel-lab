@@ -30,6 +30,13 @@ import {
   CtaSwizzleFigure,
   EpilogueFigure,
 } from '@/components/widgets/GemmFigures';
+import {
+  PipelineConceptFigure,
+  StreamOverlapFigure,
+  PipelineParallelFigure,
+  OverlapSchedulerFigure,
+  WarpSpecializationFigure,
+} from '@/components/widgets/PipelineFigures';
 
 // Route internal markdown links through next/link so the static-export
 // basePath is applied; external links open in a new tab.
@@ -82,6 +89,11 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     WaveQuantizationFigure,
     CtaSwizzleFigure,
     EpilogueFigure,
+    PipelineConceptFigure,
+    StreamOverlapFigure,
+    PipelineParallelFigure,
+    OverlapSchedulerFigure,
+    WarpSpecializationFigure,
     ...components,
   };
 }

@@ -1,4 +1,4 @@
-# Track B 練習: Coalescing、Bank Conflict、Occupancy、Reduction
+# Track 4 練習: Coalescing、Bank Conflict、Occupancy、Reduction
 
 對應第 6–11 章。 假設 warp = 32、transaction = 128 bytes、`float` = 4 bytes、shared memory 為 32 banks (每 bank 每 4 bytes 交錯)。
 
@@ -125,5 +125,29 @@ if (tid < warpSize) {
 ```
 
 編譯執行: `./build/exercises/ex_b_block_reduce`, 兩版都應通過 correctness check。
+</Solution>
+</Exercise>
+
+<Exercise id="B10" title="Shared memory bank conflict" kind="paper" level="進階">
+NVIDIA shared memory 有 32 banks, 每 4 bytes 交錯 (bank = `(addr/4) % 32`)。 一個 warp 存取 `float` 陣列 `s`。 (a) `s[threadIdx.x]` 有 bank conflict 嗎? (b) `s[threadIdx.x * 2]` 呢? 幾路衝突? (c) 一個 `[32][32]` 的 `float` tile 做 `s[threadIdx.x][k]` (整個 warp 同一 column) 是幾路衝突? (d) 加一欄 padding 變 `[32][33]` 後為什麼就解了?
+
+<Solution>
+(a) `s[tid]`: 32 個 thread 對映 bank 0..31, 各不同 → **無** conflict。 (b) `s[tid*2]`: bank = `(tid*2) % 32`, tid 與 tid+16 都落在同 bank → **2-way** conflict (存取序列化成 2 批)。 (c) `s[tid][k]` = 位址 `tid*32 + k`, bank = `(tid*32+k)%32 = k` → 全 warp 打**同一個 bank k** → **32-way** conflict (最糟)。 (d) 改 `[32][33]`: 位址 `tid*33 + k`, bank = `(tid*33+k)%32 = (tid + k)%32` → 32 個 thread 落在 32 個不同 bank → 無 conflict。 padding 讓 column stride 與 bank 數互質, 打散 bank 對映。
+</Solution>
+</Exercise>
+
+<Exercise id="B11" title="Occupancy limiter" kind="paper" level="進階">
+某 SM 上限: 2048 threads、65536 registers、96 KB shared memory, 每 SM 最多 32 blocks。 一個 kernel 用 `block = 256 threads`、每 thread 64 registers、每 block 8 KB shared memory。 (a) 各資源分別容許幾個 block? (b) 實際能常駐幾個 block、幾個 warp? (c) occupancy 是多少? 限制它的是哪個資源? (d) 若把 register 降到 32, occupancy 如何變?
+
+<Solution>
+(a) threads: `2048/256 = 8`; registers: `65536/(256×64) = 4`; shared: `96/8 = 12`; block 上限 32。 (b) 取最小 = **4 blocks** → `4×256 = 1024 threads = 32 warps`。 (c) occupancy = `1024/2048 = 50%`, 由 **register** 限制。 (d) register 降到 32: `65536/(256×32) = 8` blocks, 此時 threads 上限 (8) 也是 8 → 取 8 blocks = 2048 threads = **100%** occupancy。 說明 register 常是 occupancy 的主要 limiter, `__launch_bounds__` / 降 register 可提升 occupancy (但可能犧牲 ILP)。
+</Solution>
+</Exercise>
+
+<Exercise id="B12" title="Warp reduce 的步數" kind="paper" level="進階">
+用 `__shfl_down_sync` 對一個 warp (32 lanes) 的值做加總。 (a) 需要幾個 shuffle 步驟? 寫出 offset 序列。 (b) 為什麼不需要 `__syncthreads`? (c) 對 1024 個元素的 block reduce, 用「warp reduce + shared memory + 再一次 warp reduce」相對「純 shared memory tree」少了什麼?
+
+<Solution>
+(a) `log2(32) = 5` 步, offset = `16, 8, 4, 2, 1` (每步 `v += shfl_down(v, offset)`)。 (b) shuffle 在**同一 warp 內**交換 register, warp 內 lane 天生 lock-step (SIMT), 不需要 barrier; `__syncthreads` 是跨 warp 才需要。 (c) 少了大量 shared memory 讀寫與 `__syncthreads`: warp 內用 register shuffle (更快、無 bank conflict), 只在「32 個 warp 的部分和」這一層才用一次 shared memory 交換, 最後一個 warp 再 shuffle 收尾。 比純 shared-memory tree 少了 log(32) 層的 shared 存取與同步。
 </Solution>
 </Exercise>

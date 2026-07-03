@@ -1,0 +1,134 @@
+# 推論服務的 Pipelining: SGLang、vLLM
+
+前五章的 pipeline 都在「訓練 / 單次計算」的世界。 最後一章走到 **LLM 推論服務**: 這裡的 stage 是「CPU 排程」與「GPU forward」、是「prefill」與「decode」。 SGLang、vLLM 這些引擎的高吞吐, 很大一部分就是把這些 stage 重疊起來 — 本 track 的所有 idea 在這裡收束。
+
+## Continuous Batching
+
+傳統 static batching 要湊滿一個 batch、等它整批跑完才收下一批 — 但 LLM 每個 request 的輸出長度差異極大, 短的早就結束卻得等最長的那個, GPU 大量空轉。 **Continuous batching (in-flight batching)** 改成 **以 token step 為單位**動態調整 batch: 每個 decode step 結束後, 已完成的 request 立刻離開、等待中的 request 立刻補進來。
+
+這本身就是一種 pipeline 思維: 把「request 生命週期」解耦成一個個 step, 讓 batch 這個「工作站」永遠保持滿載, 而不是被最慢的 request 卡住 (回想第 1 章的 stage 平衡與木桶效應)。
+
+<Exercise id="sp6-e1" title="Continuous vs static batching" kind="paper" level="進階">
+一個 batch 有 8 個 request, 輸出長度分別是 10, 10, 10, 10, 500, 500, 500, 500 個 token。 假設每個 decode step 對整個 batch 花固定時間。 (a) static batching 下, 前 4 個短 request 完成後到整批結束, 有多少 step 它們的 slot 是浪費的? (b) continuous batching 如何回收這些 slot? (c) 這對整體 throughput (tokens/sec) 的影響?
+
+<Solution>
+(a) 短 request 在 step 10 就完成, 但 batch 要跑到 step 500。 之後的 `500 − 10 = 490` 個 step, 這 4 個 slot 都在算已結束的 request (padding / 空轉) — 浪費約 `490 × 4` 個 slot-step。
+
+(b) Continuous batching 在短 request 於 step 10 完成後, 立刻把它們的 slot 讓給佇列中等待的新 request, batch 維持滿載。
+
+(c) 有效 batch size 維持高檔, GPU 的每個 forward 都在算「真的有用的」token, throughput (tokens/sec) 大幅提升 — 這是現代 LLM serving 的基礎優化, vLLM、SGLang、TensorRT-LLM 皆內建。
+</Solution>
+</Exercise>
+
+## Overlap Scheduler: CPU 排程疊 GPU Forward
+
+每個 decode step 之間, CPU 要做不少事: 決定下一個 batch 有哪些 request、查 radix cache (prefix 共用)、準備 attention 的 metadata、處理上一步的 output token、sampling。 樸素做法讓 GPU 等 CPU 做完這些才跑下一步 — GPU 在 CPU 忙的時候空轉。
+
+SGLang 的 **zero-overhead / overlap scheduler** 把這變成一個 2-stage pipeline: 讓 scheduler **領先一個 batch**, 在 GPU 正在跑 batch `n` 時, CPU 已經在準備 batch `n+1` 的所有 metadata。
+
+<OverlapSchedulerFigure />
+
+這跟第 3 章的 host–device stream overlap 是**同一個 idea**, 只是 stage 從「H2D copy vs. kernel」換成「CPU 排程 vs. GPU forward」。 stage 用不同資源 (CPU core vs. SM), 重疊就等於把 CPU 開銷藏進 GPU 的 forward 時間。
+
+```python
+# Conceptual overlap-scheduler loop (SGLang-style). The scheduler prepares batch
+# n+1 on the CPU while the GPU still runs batch n; results are resolved one step
+# later. Real implementations run the scheduler in a dedicated process and use a
+# future/result queue instead of a blocking get.
+next_batch = scheduler.prepare(get_requests())      # metadata for batch 0
+result = None
+while running:
+    cur = next_batch
+    gpu_future = model.forward_async(cur)           # launch GPU work, don't block
+    next_batch = scheduler.prepare(get_requests())  # CPU builds batch n+1 meanwhile
+    tokens = gpu_future.result()                    # now collect batch n's output
+    scheduler.process_output(cur, tokens)           # detokenize / update cache
+```
+
+實務上 SGLang 用 `--enable-overlap-schedule` (新版預設開啟) 把 scheduler 放在獨立 process, 用 result queue 把 GPU 結果延後一個 step 取回。 這樣做的前提是排程與 forward 之間沒有硬依賴需要立刻解決 — 大多數 decode step 成立。
+
+<Exercise id="sp6-e2" title="overlap scheduler 的收益上限" kind="paper" level="挑戰">
+某 decode step: GPU forward 8ms, CPU 排程 3ms。 (a) 不重疊時每 step 多久? GPU 利用率? (b) 完美重疊後每 step 多久? (c) 若換成很大的 batch 讓 GPU forward 變 40ms, 而 CPU 仍 3ms, overlap scheduler 還重要嗎? (d) 反過來, 什麼情境 overlap scheduler 最關鍵?
+
+<Solution>
+(a) 不重疊: `8 + 3 = 11ms`/step, GPU 利用率 `8/11 ≈ 73%` (CPU 忙的 3ms GPU 空轉)。
+
+(b) 完美重疊: CPU 的 3ms 藏進 GPU 的 8ms, 每 step ≈ `max(8, 3) = 8ms` → 利用率逼近 100%, throughput 提升約 `11/8 ≈ 1.375×`。
+
+(c) 大 batch 時 `max(40, 3) = 40` vs `43` — 只省 ~7%, 相對不重要 (GPU 本來就忙, CPU 佔比小)。
+
+(d) **小 batch / 短 sequence / 高 QPS 的 decode**: GPU 每 step 很快跑完, CPU 排程開銷佔比大, 這時把 CPU 藏進 GPU 收益最大。 這也解釋為何 decode-heavy 的 serving 特別在意 CPU overhead。
+</Solution>
+</Exercise>
+
+## Chunked Prefill 與 Prefill/Decode 的 Pipeline
+
+LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt, compute-bound、算很久) 與 **decode** (一次一個 token, memory-bound、很快但很多步)。 把一個長 prompt 的 prefill 整包塞進一個 forward, 會**卡住**同 batch 裡其他 request 的 decode (延遲飆高)。
+
+**Chunked prefill** 把長 prompt 的 prefill 切成小 chunk, 讓每個 forward 只做一塊 prefill, 並可與其他 request 的 decode **混在同一個 batch** (SGLang 的 `--enable-mixed-chunk`)。 於是 prefill 與 decode 這兩個 stage 在時間上被打散、交錯, 避免長 prefill 造成的 decode 卡頓 (head-of-line blocking)。
+
+<Exercise id="sp6-e3" title="為什麼要切 prefill" kind="paper" level="挑戰">
+一個 batch 裡有 1 個 4096-token 的 prompt 要 prefill, 還有 30 個 request 正在 decode。 假設整包 prefill 一個 forward 要 80ms, 而純 decode step 只要 5ms。 (a) 不切 prefill, 那 30 個 decode request 這一步要等多久? (b) 把 prefill 切成 8 個 chunk (每 chunk ~10ms) 並與 decode 混合, 對 decode 的延遲有何改善? (c) 代價是什麼?
+
+<Solution>
+(a) 不切: 這一步要跑完 80ms 的 prefill, 30 個 decode request 全部被卡 80ms — inter-token latency 從 5ms 暴增到 80ms (head-of-line blocking)。
+
+(b) 切成 8 個 ~10ms 的 chunk 並與 decode 混批: 每個 forward 只夾一小塊 prefill + decode, 單步約 10–15ms, decode 的 inter-token latency 從 80ms 降到十幾 ms 且平穩。 prefill 用多步逐塊完成。
+
+(c) 代價: prefill 的**總完成時間**略增 (被切開、每塊有固定 overhead, 且與 decode 搶資源), 且排程更複雜。 這是典型的 latency (decode 平順) vs. throughput (prefill 盡快完成) 取捨, 由 `--chunked-prefill-size` 調。
+</Solution>
+</Exercise>
+
+## Prefill/Decode Disaggregation (延伸)
+
+再往前一步, 有些系統 (SGLang PD disaggregation、vLLM 的相關功能) 把 prefill 與 decode **拆到不同 GPU/節點**: prefill GPU 專做 compute-bound 的 prompt 處理, 算完把 KV cache 傳給 decode GPU 專做 memory-bound 的逐 token 生成。 這是把「prefill vs decode」這兩個 stage 從時間上的重疊, 升級成空間上的**專用化 pipeline**, 各自用最適合的 batch 策略與硬體, 代價是要在兩者間搬 KV cache。
+
+<Exercise id="sp6-e4" title="PD 分離的動機" kind="paper" level="挑戰">
+(a) prefill 與 decode 各是 compute-bound 還是 memory-bound? (b) 兩者混在同一 GPU 上為什麼難同時最佳化? (c) 分離後各自能怎麼調 batch? (d) 分離的主要成本是什麼?
+
+<Solution>
+(a) Prefill: 一次處理整個 prompt 的所有 token, 算術密度高 → **compute-bound**。 Decode: 一次一個 token, 主要成本是讀整個 KV cache 與權重 → **memory-bound**。
+
+(b) 兩者最佳的 batch 組成與 kernel 配置不同 (prefill 要大 GEMM、decode 要高 batch 攤 KV 讀取); 混在一起互相干擾, 長 prefill 卡 decode (見 sp6-e3), 難同時把兩種 workload 都推到最佳。
+
+(c) 分離後: prefill GPU 用適合 compute-bound 的配置追求 prompt 吞吐; decode GPU 用大 batch continuous batching 攤銷 memory 讀取、追求 tokens/sec。
+
+(d) 成本: 要把 prefill 產生的 **KV cache 從 prefill GPU 搬到 decode GPU** (跨 GPU/節點傳輸), 以及更複雜的排程與路由。 當 prefill 與 decode 的資源需求差異夠大、規模夠大時才划算。
+</Solution>
+</Exercise>
+
+<Quiz
+  questions={[
+    {
+      question: 'Continuous batching 相對 static batching 的核心改進是?',
+      options: ['提高數值精度', '以 token step 為單位動態進出 request, 讓 batch 保持滿載而不被最長的 request 卡住', '減少模型大小', '關閉 KV cache'],
+      answer: 1,
+      explanation: '已完成的 request 立即離開、等待的立即補進, GPU 每個 forward 都算有效 token, throughput 大增。',
+    },
+    {
+      question: 'SGLang overlap (zero-overhead) scheduler 的做法是?',
+      options: ['把模型量化', '讓 scheduler 領先一個 batch, GPU 跑 batch n 時 CPU 已在準備 batch n+1 的 metadata', '用更多 GPU', '停用 continuous batching'],
+      answer: 1,
+      explanation: '把「CPU 排程」與「GPU forward」重疊成 2-stage pipeline, 藏住 CPU 開銷; 與 host–device stream overlap 同構。',
+    },
+    {
+      question: 'Chunked prefill 解決的主要問題是?',
+      options: ['權重太大', '長 prompt 的整包 prefill 卡住同 batch 其他 request 的 decode (head-of-line blocking)', 'GPU 數量不足', '精度不足'],
+      answer: 1,
+      explanation: '把長 prefill 切成小塊並與 decode 混批, 避免 decode inter-token latency 被長 prefill 拖垮。',
+    },
+  ]}
+/>
+
+<Callout variant="insight" title="整個 Track 的收束">
+從 kernel 內的 double buffering、host–device 的 stream、PyTorch 的 data prefetch、跨 GPU 的 1F1B, 到 SGLang 的 overlap scheduler — 全部是同一句話: 找出兩個用不同資源的 stage, 讓它們同時忙。 換了層級、換了 stage 的身分, 但 fill/steady/drain、bubble、stage 平衡、producer–consumer 這套語言一路通用。
+</Callout>
+
+<FurtherReading
+  links={[
+    { citation: 'L. Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs," NeurIPS 2024.', href: 'https://arxiv.org/abs/2312.07104' },
+    { citation: 'LMSYS Org, "SGLang v0.4: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer," 2024.', href: 'https://lmsys.org/blog/2024-12-04-sglang-v0-4/' },
+    { citation: 'W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention (vLLM)," SOSP 2023.', href: 'https://arxiv.org/abs/2309.06180' },
+    { citation: 'A. Agrawal et al., "Sarathi-Serve: Taming Throughput-Latency Tradeoff in LLM Inference with Chunked Prefills," OSDI 2024.', href: 'https://arxiv.org/abs/2403.02310' },
+  ]}
+/>

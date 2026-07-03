@@ -1,0 +1,113 @@
+# Software Pipelining 是什麼
+
+一條裝配線不會等第一台車完全組好才開始第二台: 車身、引擎、噴漆三個工站同時各忙一台不同的車。 **Software pipelining** 就是把這個想法搬到程式裡 — 把一段有多個 stage 的工作切開, 讓不同 stage 同時處理不同的資料, 用**重疊 (overlap)** 把各 stage 的 latency 藏在彼此後面。
+
+這一章建立整個 track 的共同語言。 之後我們會看到同一個 idea 在六個不同的層級反覆出現: kernel 內的 double buffering、host–device 的 CUDA stream、PyTorch 的 data prefetch、跨 GPU 的 pipeline parallelism, 一直到 SGLang 推論服務的 overlap scheduler。
+
+<Callout variant="insight" title="貫穿整個 Track 的一句話">
+Pipelining 不會讓任何單一 stage 變快, 它讓多個 stage 同時忙。 只要相鄰 stage 用不同的硬體資源 (DMA 引擎 vs. SM、CPU vs. GPU、compute vs. network), 把它們重疊就等於免費拿到吞吐。
+</Callout>
+
+## 從序列到 pipeline
+
+假設每個工作項要依序經過 3 個 stage (A→B→C), 每個 stage 花 1 個時間單位。 序列做法處理 N 項要 `3N` 步。 Pipeline 做法讓 stage A 一做完第 0 項就馬上開始第 1 項, 同時 stage B 處理第 0 項:
+
+<PipelineConceptFigure />
+
+處理 N 項、深度 k 的 pipeline 只需要 `N + k − 1` 步 (而非 `N · k`)。 當 N ≫ k, 平均每步就完成一項, 吞吐趨近**單一 stage 的速率**, 加速比趨近 k。
+
+<Exercise id="sp1-e1" title="Pipeline 加速比" kind="paper" level="入門">
+一個 4-stage pipeline, 每 stage 1 單位時間, 要處理 N 項。 (a) 序列版要幾步? (b) pipeline 版要幾步? (c) N=100 時 pipeline 相對序列的加速比? (d) N→∞ 時加速比趨近多少?
+
+<Solution>
+(a) 序列: `4N` 步。 (b) pipeline: `N + 4 − 1 = N + 3` 步。 (c) N=100: `400 / 103 ≈ 3.88×`。 (d) N→∞: `4N/(N+3) → 4×` (= stage 數 k)。 加速上限就是 pipeline 深度, 前提是各 stage 用不同資源、可真正並行。
+</Solution>
+</Exercise>
+
+## Pipeline 的三個區間: fill、steady、drain
+
+上圖左上角與右下角的斜三角就是 pipeline 沒滿載的地方:
+
+- **Fill (暖機)**: 最前面 `k − 1` 步, 後段 stage 還沒拿到資料, 只有部分 stage 在忙。
+- **Steady state (穩態)**: 中間, 所有 stage 同時滿載 — 加速全來自這裡。
+- **Drain (排空)**: 最後 `k − 1` 步, 前段 stage 已經沒有新資料, 逐一收工。
+
+Fill + drain 合稱 **bubble** (氣泡)、**pipeline overhead** 或 **ramp**。 Bubble 佔比 = `(k − 1) / (N + k − 1)`。 N 越大、k 越小, bubble 越可忽略。 這條式子會在第 5 章 pipeline parallelism 以 `(p − 1)/(m + p − 1)` 的形式再次出現 (p = stage 數, m = micro-batch 數)。
+
+<Exercise id="sp1-e2" title="Bubble 佔比" kind="paper" level="進階">
+某 pipeline 深度 k=8。 (a) N=8 時 bubble 佔總時間多少比例? (b) 要把 bubble 壓到 10% 以下, N 至少要多大? (c) 這對「該切多少個 micro-batch」有什麼啟示?
+
+<Solution>
+(a) bubble = `(k−1)/(N+k−1) = 7/15 ≈ 46.7%` — N 跟 k 一樣大時幾乎一半時間在暖機/排空。
+
+(b) 要 `7/(N+7) ≤ 0.1` → `N + 7 ≥ 70` → `N ≥ 63`。
+
+(c) 工作項 (micro-batch) 要遠多於 pipeline 深度, bubble 才划算。 但切太多 micro-batch 又會讓每項太小、per-item overhead 上升 — 這是 pipeline parallelism 調 micro-batch 數的核心 trade-off (第 5 章)。
+</Solution>
+</Exercise>
+
+## 依賴與 hazard: 為什麼不能無限加深
+
+Pipeline 的加速上限是深度 k, 但實務上有三個限制:
+
+1. **Stage 不平衡**: 吞吐由**最慢的 stage** 決定 (木桶效應)。 若 stage B 花 2 單位、其他花 1, 穩態每 2 步才出一項, 加速被 B 卡住。
+2. **依賴 (data hazard)**: 若第 j+1 項需要第 j 項的輸出, 就不能真的重疊 — 這是 GEMM double buffering 要小心的地方 (下一個 tile 的 load 不依賴當前 compute, 才能疊)。
+3. **資源競爭**: 若兩個 stage 其實搶同一個硬體 (例如都用 SM), 重疊只是假象。 Pipeline 要有效, 相鄰 stage 必須用**不同**引擎。
+
+<Exercise id="sp1-e3" title="瓶頸 stage" kind="paper" level="進階">
+一個 3-stage pipeline: load 3 單位、compute 1 單位、store 1 單位。 (a) 穩態下每幾步完成一項? (b) 吞吐由誰決定? (c) 若把 load 拆成 3 個各 1 單位的子 stage (變成 5-stage), 穩態吞吐如何改變? 有什麼代價?
+
+<Solution>
+(a) 穩態受最慢 stage (load=3) 限制, 每 **3 步**完成一項。
+
+(b) 由 load 決定 — 加深 pipeline 也沒用, 因為瓶頸不在深度而在單一 stage 的速率。
+
+(c) 拆成 3 個 1 單位子 stage 後, 最慢 stage 變 1 單位, 穩態變每 **1 步**一項 (3× 吞吐)。 代價: pipeline 更深 (k=5), fill/drain 更長, 且需要更多 buffer 存 in-flight 資料。 「拆瓶頸 stage 讓各 stage 平衡」是 pipeline 設計的通則。
+</Solution>
+</Exercise>
+
+## GPU 世界的 pipeline 全景
+
+同一個重疊 idea 在 GPU 軟體堆疊的每一層都出現, 只是 stage 的身分不同。 這張表也是本 track 的地圖:
+
+| 層級 | 兩個重疊的 stage | 同步機制 | 章節 |
+| --- | --- | --- | --- |
+| Kernel 內 (instruction) | global→shared load ↔ MMA compute | `__syncthreads` / mbarrier | 第 2 章 |
+| Host–device | H2D/D2H copy ↔ kernel compute | CUDA stream / event | 第 3 章 |
+| Data input | CPU 資料載入/前處理 ↔ GPU training step | prefetch stream / worker | 第 4 章 |
+| Model (多 GPU) | stage i forward ↔ stage i+1 forward | send/recv (P2P) | 第 5 章 |
+| Serving | CPU 排程 ↔ GPU forward | overlap scheduler | 第 6 章 |
+
+<Callout variant="info" title="與 GEMM track 的關係">
+第 6 章 (GEMM 優化深入) 的 double buffering / cp.async 已經是 instruction-level 的 software pipelining。 這個 track 把視角拉高, 從那個 kernel 內的 producer–consumer 一路延伸到整個推論服務。 如果你還沒讀過 GEMM track 的 double buffering, 建議先看那一節再回來。
+</Callout>
+
+<Quiz
+  questions={[
+    {
+      question: 'Software pipelining 的加速從何而來?',
+      options: ['讓每個 stage 本身變快', '讓多個 stage 同時處理不同資料, 重疊各自的 latency', '減少工作項數量', '提高時脈'],
+      answer: 1,
+      explanation: 'Pipelining 不加速單一 stage, 而是靠 steady state 讓所有 stage 同時滿載來提升吞吐。',
+    },
+    {
+      question: '處理 N 項、深度 k 的 pipeline 需要幾步 (每 stage 1 單位)?',
+      options: ['N · k', 'N + k − 1', 'N − k', 'k / N'],
+      answer: 1,
+      explanation: 'fill (k−1) + 每步一項 (N) − 重疊, 總共 N + k − 1 步; N≫k 時趨近每步一項。',
+    },
+    {
+      question: '以下哪個會讓 pipeline 拿不到理論加速?',
+      options: ['所有 stage 用不同硬體引擎', '工作項遠多於 stage 數', '相鄰 stage 之間有資料依賴, 無法重疊', 'steady state 很長'],
+      answer: 2,
+      explanation: '若下一項需要上一項的輸出 (data hazard), 就無法真正重疊; 資源競爭與 stage 不平衡同樣會削弱加速。',
+    },
+  ]}
+/>
+
+<FurtherReading
+  links={[
+    { citation: 'J. L. Hennessy, D. A. Patterson, "Computer Architecture: A Quantitative Approach" (Appendix C: Pipelining), 6th ed., 2019.', href: 'https://dl.acm.org/doi/book/10.5555/3207796' },
+    { citation: 'NVIDIA Corporation, "CUDA C++ Best Practices Guide: Asynchronous and Overlapping Transfers with Computation," 2024.', href: 'https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#asynchronous-and-overlapping-transfers-with-computation' },
+  ]}
+/>

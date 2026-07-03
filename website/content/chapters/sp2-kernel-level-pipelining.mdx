@@ -1,0 +1,162 @@
+# Kernel 內的 Pipelining
+
+最細粒度的 software pipeline 活在**單一 kernel 內部**: 一個 thread block 一邊從 global memory 搬下一塊資料, 一邊用當前這塊資料算。 這一章把 GEMM track 的 double buffering 重新放到「pipeline」的框架下, 再往上疊到多 stage 與 warp specialization — 這些正是現代 Tensor Core kernel 的骨架。
+
+## Double Buffering 回顧
+
+單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著 — 這就是一個**沒有重疊**的 2-stage pipeline。 Double buffering 配兩組 shared memory buffer: 算 buffer 0 的同時, 把下一個 k-tile 預取進 buffer 1。
+
+```cpp
+// Two shared-memory stages: compute on `cur` while prefetching into `nxt`.
+// This is a depth-2 software pipeline; load(k+1) overlaps compute(k).
+__shared__ float sA[2][kTile][kTile];
+__shared__ float sB[2][kTile][kTile];
+int cur = 0;
+loadTile(sA[cur], sB[cur], /*t=*/0);
+__syncthreads();
+for (int t = kTile; t < k; t += kTile) {
+    int nxt = cur ^ 1;
+    loadTile(sA[nxt], sB[nxt], t);   // producer: fetch next tile
+    computeTile(sA[cur], sB[cur]);   // consumer: FMAs overlap the loads
+    __syncthreads();
+    cur = nxt;
+}
+computeTile(sA[cur], sB[cur]);       // drain: last tile
+```
+
+用第 1 章的語言: 這是深度 2 的 pipeline, stage 是「load」與「compute」。 關鍵前提是 **load(k+1) 不依賴 compute(k)** — 下一塊 tile 的位址早就知道, 所以能提前發。 理想情況每個 k-tile 從 `L + C` 攤成 `max(L, C)`。
+
+<Exercise id="sp2-e1" title="Double buffering 的 shared memory 代價" kind="paper" level="進階">
+一個 GEMM kernel 用 `128×8` 的 A tile 與 `8×128` 的 B tile, fp32。 (a) 單 buffer 需要多少 shared memory? (b) double buffering 呢? (c) 若某 GPU 每個 SM 有 100 KB shared memory 且想要 2 個 block 同時常駐, double buffering 還放得下嗎?
+
+<Solution>
+(a) 單 buffer: `(128·8 + 8·128)·4 B = 2048·4 = 8 KB`。
+
+(b) double buffer: 兩份 = `16 KB`。
+
+(c) 2 個 block 常駐需要 `2 × 16 = 32 KB` shared memory, 遠小於 100 KB — 放得下。 但若再加深到 4 stage (`4 × 8 KB = 32 KB`/block → 64 KB for 2 blocks) 就開始逼近上限, 這時 stage 數會直接壓低 occupancy。 這就是「pipeline 深度 vs. occupancy」的取捨。
+</Solution>
+</Exercise>
+
+## 多 Stage Async Copy (cp.async)
+
+傳統 global→shared 搬運會先把資料經 register 中轉, 佔 register 又阻塞 warp。 Ampere 的 `cp.async` 讓資料**直接 DRAM→shared、非同步**, 於是 prefetch 不佔 register, pipeline 能疊到 3–5 個 stage (不只 double):
+
+```cpp
+// Multi-stage pipeline with cp.async: keep `kStages` tiles in flight. Issue the
+// copy for stage s, and only wait when its data is actually needed kStages later.
+#include <cuda_pipeline.h>
+constexpr int kStages = 3;
+__shared__ float sA[kStages][kTile][kTile];
+// Prologue: kick off the first kStages-1 loads.
+for (int s = 0; s < kStages - 1; ++s) {
+    __pipeline_memcpy_async(&sA[s][ty][tx], &A[/*tile s*/], sizeof(float4));
+    __pipeline_commit();
+}
+for (int t = 0, s = 0; t < numTiles; ++t, s = (s + 1) % kStages) {
+    __pipeline_wait_prior(kStages - 2);   // wait until this stage's data landed
+    __syncthreads();
+    computeTile(sA[s]);                    // consume stage s
+    if (t + kStages - 1 < numTiles) {      // produce a future stage
+        __pipeline_memcpy_async(&sA[(s + kStages - 1) % kStages][ty][tx], &A[/*tile*/], sizeof(float4));
+        __pipeline_commit();
+    }
+}
+```
+
+更深的 pipeline 能容忍更長的 memory latency: 只要 `stages × compute_per_tile ≥ memory_latency`, load 就被完全藏住。 Hopper 的 **TMA** 更進一步, 用一個 descriptor 描述整塊 tile 的 copy。 AMD 對應的是 LDS 的 direct-load 路徑。
+
+<Exercise id="sp2-e2" title="要幾個 stage 才藏得住 latency" kind="paper" level="挑戰">
+某 kernel 每個 k-tile 的 compute 花 200 cycles, 而 global memory latency 是 550 cycles。 (a) depth-2 (double buffering) 能完全藏住 load 嗎? (b) 至少要幾個 stage? (c) 每多一個 stage 的代價是什麼?
+
+<Solution>
+(a) 不行: double buffering 只讓 1 個 tile 的 load (550 cycles) 疊在 1 個 tile 的 compute (200 cycles) 後面, `200 < 550`, 仍露出 `550 − 200 = 350` cycles 的 stall。
+
+(b) 需要讓 in-flight 的 compute 總量蓋過 latency: `(stages − 1) × 200 ≥ 550` → `stages − 1 ≥ 2.75` → `stages ≥ 4` (3 個在途 compute = 600 ≥ 550)。
+
+(c) 每多一個 stage 就多一份 shared memory buffer, 直接吃 occupancy; 也多用 register 追蹤 pipeline 狀態。 太深會讓能同時常駐的 block 數下降, 反而降低整體 latency hiding。 甜蜜點通常是 3–4。
+</Solution>
+</Exercise>
+
+## Warp Specialization (Producer / Consumer)
+
+再往上一層, 現代 kernel (CUTLASS、FlashAttention-3) 把 block 內的 **warp 直接分工**: 一組 warp 專門當 producer (用 cp.async/TMA 搬資料), 另一組當 consumer (用 Tensor Core 算)。 兩組靠 shared memory 的環狀 buffer 與 barrier 同步 — 這是把第 1 章的 producer–consumer 模型直接寫進一個 kernel。
+
+<WarpSpecializationFigure />
+
+```cpp
+// Warp-specialized mainloop (Hopper-style, sketch). Producer warps fill a ring
+// buffer; consumer warps drain it. mbarrier arrive/wait carries the handshake.
+if (warpRole == kProducer) {
+    for (int t = 0; t < numTiles; ++t) {
+        int slot = t % kStages;
+        wait_empty(slot);                 // wait until consumers freed this slot
+        tma_load(smem[slot], gmem_tile(t));
+        arrive_full(slot);                // signal data is ready
+    }
+} else { // consumer
+    for (int t = 0; t < numTiles; ++t) {
+        int slot = t % kStages;
+        wait_full(slot);                  // wait for producers
+        mma(acc, smem[slot]);             // Tensor Core consumes the tile
+        arrive_empty(slot);              // free the slot for producers
+    }
+}
+```
+
+好處: producer 與 consumer 用**不同的硬體引擎** (TMA/LSU vs. Tensor Core), 分開後兩者能真正同時滿載; 而且各自的指令排程更單純, 更容易讓 compiler 產生緊湊的 schedule。 這正是 Hopper WGMMA + TMA kernel 高效的關鍵之一。
+
+<Exercise id="sp2-e3" title="Warp specialization vs. 對稱 warp" kind="paper" level="挑戰">
+一個 block 有 8 個 warp。 方案 A: 8 個 warp 都做「load 一點、算一點」。 方案 B: 2 個 producer warp 專搬資料、6 個 consumer warp 專算。 (a) 方案 B 為什麼可能讓 Tensor Core 使用率更高? (b) 什麼情況下方案 B 反而更差? (c) producer 太少會發生什麼?
+
+<Solution>
+(a) 方案 B 把 memory 指令集中到 2 個 warp, consumer warp 的指令流幾乎全是 MMA, warp scheduler 更容易連續發 Tensor Core 指令, pipe 更飽和; 且 producer 用 TMA/async copy 不佔 consumer 的 register。
+
+(b) 若 kernel 其實 memory-bound (資料量大、compute 少), 把大多數 warp 分去 compute 沒意義, 瓶頸在搬運 — 對稱方案或更多 producer 更好。
+
+(c) producer 太少 → ring buffer 常常 empty, consumer 得 `wait_full` 空等, pipeline 露出 bubble。 producer/consumer 的比例要讓兩邊吞吐相當 (回到第 1 章的 stage 平衡)。
+</Solution>
+</Exercise>
+
+<Exercise id="sp2-e4" title="實作: 把 double buffering 疊成 3-stage" kind="code" level="挑戰">
+以 `kernels/03-gemm/sgemm_step4_double_buffer` 為起點, 改寫成 3-stage 的 cp.async pipeline (Ampere+; 無 cp.async 的平台可用手動 prefetch 兩個 tile 模擬)。 對 CPU reference 做 correctness check, 並用 `scripts/profile_ncu.sh` 比較 double buffering 與 3-stage 的 `Long Scoreboard` stall。
+
+<Solution>
+重點: (1) 開 `kStages` 份 shared buffer; (2) prologue 先發 `kStages−1` 個 async copy; (3) 主迴圈 `wait_prior` → compute → 發下一個 copy; (4) epilogue 排空剩下的 stage。 預期 profiler 顯示 3-stage 的 long-scoreboard stall 比 double buffering 更低 (因為更多 load 在途), 直到 shared memory / occupancy 成為新瓶頸。 若 stall 沒降, 多半是 compute 已能覆蓋 latency (double buffering 就夠), 或 occupancy 已被 buffer 壓垮 — 兩者都用 profiler 佐證。
+</Solution>
+</Exercise>
+
+<Quiz
+  questions={[
+    {
+      question: 'GEMM 的 double buffering 能重疊 load 與 compute 的前提是?',
+      options: ['load 與 compute 用同一組 buffer', '下一個 tile 的 load 不依賴當前 tile 的 compute 結果', 'compute 比 load 慢', '關閉 __syncthreads'],
+      answer: 1,
+      explanation: '只有當 load(k+1) 與 compute(k) 沒有資料依賴時才能重疊; GEMM 的 tile 位址預先已知, 滿足此條件。',
+    },
+    {
+      question: 'cp.async 相對傳統 global→shared 搬運, 為什麼能讓 pipeline 疊更多 stage?',
+      options: ['它更快', '資料直接 DRAM→shared 不經 register 且非同步, prefetch 不佔 register', '它自動做 fp16 轉換', '它不需要 shared memory'],
+      answer: 1,
+      explanation: '不經 register 中轉、非同步發射, 所以能同時有多個 stage 在途而不爆 register。',
+    },
+    {
+      question: 'Warp specialization 的核心好處是?',
+      options: ['減少 shared memory', 'producer 與 consumer warp 各用不同硬體引擎 (copy vs. Tensor Core), 能同時飽和', '不需要 barrier', '讓 kernel 變成單 warp'],
+      answer: 1,
+      explanation: '分工後 memory 引擎與 compute 引擎真正並行, consumer 指令流更純, Tensor Core 使用率更高。',
+    },
+  ]}
+/>
+
+<LabBox path="kernels/03-gemm">
+`kernels/03-gemm/sgemm_step4_double_buffer` 是本章 double buffering 的可執行版本; `kernels/05-advanced-scheduling` 有更進階的 async/persistent pipeline 範例。 對照 GEMM track 第 3 章 (Memory Pipeline) 一起讀效果最好。
+</LabBox>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Controlling Data Movement to Boost Performance on the NVIDIA Ampere Architecture," 2020.', href: 'https://developer.nvidia.com/blog/controlling-data-movement-to-boost-performance-on-ampere-architecture/' },
+    { citation: 'T. Dao et al., "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision," 2024.', href: 'https://arxiv.org/abs/2407.08608' },
+    { citation: 'NVIDIA Corporation, "CUTLASS: Efficient GEMM (pipelining, warp specialization)," 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+  ]}
+/>

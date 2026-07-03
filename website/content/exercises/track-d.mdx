@@ -1,4 +1,4 @@
-# Track D 練習: Profiling、Custom Extension、Fusion、Triton
+# Track 7 練習: Profiling、Custom Extension、Fusion、Triton
 
 對應第 17–21 章。 Programming 題需要 GPU 版 PyTorch (第 4 題需 Triton)。
 
@@ -70,5 +70,29 @@ SiLU 導數: `d/dx [x·σ(x)] = σ(x) + x·σ(x)·(1−σ(x))`。 Forward 寫 `y
 Numerical stability: kernel 內 `x = x - tl.max(x, axis=0)` 先減 row max, 再 `exp`, 與手寫版一致 (避免 overflow)。
 
 Triton 幫你處理掉的底層細節: shared memory 配置、`__syncthreads()`、warp shuffle reduction、coalescing 與 index 計算——你只寫 block-level 的 `tl.load / tl.max / tl.sum / tl.store`。 代價是可能少了最後幾 % 的 peak, 但開發速度與可攜性 (同一份 `.py` 跑 NVIDIA 與 AMD) 大幅提升 (見第 20 章)。 此題需安裝 Triton。
+</Solution>
+</Exercise>
+
+<Exercise id="D8" title="Launch overhead 估算" kind="paper" level="進階">
+一個 model 每次 forward launch 200 個小 kernel, 每個 kernel GPU 上跑 4µs, 每次 launch 的 CPU overhead 約 6µs (不重疊)。 (a) GPU 的實際工作時間? (b) 若 launch 跟不上, 一次 forward 的 wall time 下限? 是 launch-bound 還是 compute-bound? (c) CUDA Graph 能把 wall time 降到多少附近? (d) 換成 batch 很大、每 kernel 跑 500µs 時, graph 還值得嗎?
+
+<Solution>
+(a) GPU 工作 = `200 × 4µs = 800µs`。 (b) 若 launch 不重疊, `200 × 6µs = 1200µs` > 800µs → **launch-bound**, GPU 餓著等 CPU。 (c) CUDA Graph 把 200 次 launch 攤成 ~1 次, wall time 逼近 GPU 工作 `800µs` (+一次 graph launch), 約 1.5× 加速。 (d) 每 kernel 500µs 時 GPU 工作 = `100ms`, launch 的 1.2ms 佔比 ~1% — 本來就 compute-bound, graph 幾乎沒差。 Graph 對「很多小 kernel、decode-like」才關鍵 (見 Track 11 第 3 章)。
+</Solution>
+</Exercise>
+
+<Exercise id="D9" title="Fusion 的記憶體節省" kind="paper" level="進階">
+一連串 elementwise: `y = gelu(x * a + b)`, 全部 fp16, `x` 有 `N = 2^26` 個元素。 (a) 若每個 op (乘、加、gelu) 各是獨立 kernel, 總共約做多少次 global 讀寫 (以 element 計)? (b) fuse 成一個 kernel 後呢? (c) 假設 memory-bound, 估算 fuse 的加速比。
+
+<Solution>
+(a) 三個獨立 kernel, 每個讀一次寫一次中間結果: 乘 (讀 x,a 寫 t1)、加 (讀 t1,b 寫 t2)、gelu (讀 t2 寫 y)。 光是中間 tensor 的讀寫: 約 `讀+寫 ≈ 6N` 次 element 級 global 存取 (粗估, 含中間 t1/t2 各一讀一寫)。 (b) fuse 成一個 kernel: 讀 x (+ 廣播的 a,b) 一次、寫 y 一次 ≈ `2N`。 中間結果留在 register, 不落地。 (c) memory-bound 下時間 ∝ traffic, 加速 ≈ `6N / 2N = 3×`。 這就是 fused elementwise kernel 的價值 (見第 19 章), 與 GEMM epilogue fusion 同理。
+</Solution>
+</Exercise>
+
+<Exercise id="D10" title="診斷: torch.compile 沒變快" kind="paper" level="挑戰">
+你對一個訓練 step 套了 `torch.compile(mode="reduce-overhead")`, 但幾乎沒加速。 (a) 這個 mode 主要優化什麼、適合什麼情境? (b) 若 profiler 顯示 GPU 已經 95% 忙、每個 kernel 都跑很久, 為什麼 compile 幫不上? (c) 若瓶頸其實是 data loading, 該往哪個方向? (d) 列出一個「先量再改」的判斷流程。
+
+<Solution>
+(a) `reduce-overhead` 底層用 CUDA graph 消 **per-step launch overhead**, 適合小模型/小 batch、launch-bound 的情境。 (b) GPU 已 95% 忙且 kernel 都很長 → **compute-bound**, launch overhead 佔比極小, 消掉它沒意義; 要加速得靠 kernel 本身 (fusion、Tensor Core、更好演算法)。 (c) data loading bound → 提高 `num_workers`、`pin_memory` + `non_blocking`、CUDA prefetcher (見 Track 11 第 4 章), 而非 compile。 (d) 流程: 先用 `torch.profiler` 分類 bound (input / launch / compute), 再對症: input→dataloader, launch→graph/compile, compute→kernel 優化。 不要盲套 compile。
 </Solution>
 </Exercise>
