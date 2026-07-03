@@ -84,6 +84,12 @@ hipcc -O3 --save-temps kernel.cpp   # inspect the .s file
 `vectorized_copy` 比較 scalar 與 float4 版本的 achieved bandwidth;`saxpy_unroll` 展示不同 unroll factor 對 SAXPY 的影響 (含 register 使用與 occupancy 變化)。 跑跑看, 找出你的硬體上 unroll 的甜蜜點 — 你會發現不是越多越好。
 </LabBox>
 
+<Solution>
+預期結果與判讀: `vectorized_copy` 中 float4 版的頻寬相當或略優於 scalar (copy 是純 memory-bound, 收益主要在指令數 ÷4); `saxpy_unroll` 的曲線是先升後平 (甚至下降) — unroll 2/4 提供足夠的獨立記憶體操作把 latency 藏滿, 再往上 register 用量增加、occupancy 下降, 而 memory-bound kernel 並不缺算術吞吐。 判斷甜蜜點的方法: 對每個 unroll factor 記 (時間, register 數), 拿 `-Xptxas=-v` 對照 — 時間持平但 register 開始暴漲的那一格就該停。 這是第 8 章「ILP 與 occupancy 互相替代」的指令層面版本。
+
+完整程式: [vectorized_copy.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/vectorized_copy.cpp)、[saxpy_unroll.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/saxpy_unroll.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

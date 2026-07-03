@@ -117,6 +117,18 @@ Warp primitive 不只用來 sum:
 `warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總, 並和 shared-memory 版本比較速度與正確性。 它用 `warpSize` 而非寫死常數, 因此在 CUDA (32) 與 HIP (64) 都正確。 跑跑看, 確認兩平台結果都通過 correctness check。
 </LabBox>
 
+<Solution>
+預期結果與判讀: shuffle 版與 shared memory 版都 `correctness OK`, shuffle 版更快 — 它把「最後 warpSize 個值的合併」從 shared memory 往返 (寫 + barrier + 讀) 換成 register 之間直接交換, 少了同步也少了 LDS 流量。 可攜性核心:
+
+```cpp
+for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+  v += __shfl_down(v, offset);  // 5 steps on 32 lanes, 6 on 64 — loop adapts
+}
+```
+
+若把 `warpSize` 寫死成 32, CUDA 上正確、CDNA 上會漏掉一半 lane 的貢獻 — 這是第 1 章預告的可攜性地雷的實例。 完整程式: [warp_reduce.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/04-reductions-softmax/warp_reduce.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

@@ -198,6 +198,12 @@ Achieved occupancy 低於 theoretical 時, 先數你的 blocks: blocks 數 < 2~3
 `occupancy_experiment` 用同一個 compute-heavy kernel, 透過不同的 `__launch_bounds__` 與 tile size 產生高/低 occupancy 兩種配置, 各自量測執行時間。 你會看到低 occupancy + 大 tile 的版本反而更快 — 親手驗證本章的反直覺結論。 用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` / HIP 對應 API 印出理論 occupancy 對照, 並用 `-Xptxas=-v` 檢查兩種配置的 register 用量與 spill。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 低 occupancy 配置 (大 tile、多 register) 反而更快 — 因為每個 thread 的 ILP (多個獨立 accumulator) 已經把 pipeline 餵飽, in-flight 工作量 = warps × 每 warp 的獨立操作, 用第二項補了第一項。 檢查點: (1) `-Xptxas=-v` 輸出裡兩種配置的 `registers` 差異, 且都沒有 `spill stores/loads` (一旦 spill, 結論反轉); (2) occupancy API 印出的理論值和 profiler 的 achieved 接近, 表示不是 tail effect 在干擾; (3) profiler 的 stall 原因 — 高 occupancy 版若卡在 `not selected`, 正是「warp 太多沒得排」的訊號, 印證本章的「occupancy 是手段不是目的」。
+
+完整程式: [occupancy_experiment.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/occupancy_experiment.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

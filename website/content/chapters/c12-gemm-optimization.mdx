@@ -206,8 +206,19 @@ GEMM 沒有單一最佳 kernel, 常見變體包括:
 到這裡, 單一大矩陣的優化路線走完了。 但真實世界的 GEMM 常是「小而怪的形狀」— 那是另一組問題 (wave quantization、Split-K、Stream-K), 留給第 13 章; 而 cuBLAS/hipBLASLt 如何從上千個 kernel 變體中挑出最快的那個, 也在第 13 章一併揭曉。
 
 <LabBox path="kernels/03-gemm">
-`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step5_wmma` (HIP 版對應 MFMA) 以及 `sgemm_cublas`/`sgemm_hipblaslt` 參考。 每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。 依序編譯執行, 把你機器的數字餵給 `bench_all.py`, 再回來看上面的圖表變成你自己的資料。
+`kernels/03-gemm` 下有 `sgemm_step0_naive` 到 `sgemm_step4_double_buffer` 的完整優化階梯, 以及 `blas_baseline` (cuBLAS/hipBLAS 參考, 找不到 library 時自動略過)。 每個 target 都會對 CPU reference 做 correctness check, 並印出 GFLOP/s 與 % of peak。 依序編譯執行, 把你機器的數字餵給 `scripts/bench_all.py`, 再回來看上面的圖表變成你自己的資料。
 </LabBox>
+
+<Solution>
+預期結果與判讀 (以 2048³ fp32 為例, 相對值比絕對值重要):
+
+- `step0_naive`: 個位數 % of peak — 每個輸出都從 global memory 重讀整條 row/column, AI 卡在 0.25。
+- `step1_shared`: 3–5 倍提升 — tile 進 shared memory, reuse 次數 = tile 寬。
+- `step2_register_tiling`: 再 2–3 倍 — 每 thread 算 4×4/8×8 micro-tile, reuse 拉進 register, 這通常是最大的單步跳躍。
+- `step3_vectorized` / `step4_double_buffer`: 各再擠 10–30% — float4 載入減指令數, double buffering 讓 load 與 MMA 重疊。
+
+每一步 profiler 的 bound 分類會遷移: step0 是 memory-bound, step2 之後往 compute/latency-bound 走 (第 16 章拿這條階梯當 profiling 練習)。 完整程式在 [03-gemm/](https://github.com/youyun8/gpu-kernel-lab/tree/main/kernels/03-gemm), 逐步對照 [README](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/03-gemm/README.md)。
+</Solution>
 
 <Quiz
   questions={[

@@ -157,6 +157,17 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 編譯並執行 `vector_add`。 它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。 Vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 輸出先印 `correctness OK`, 然後是 achieved bandwidth。 判讀重點是那個「低得嚇人」的 GFLOP/s: vector add 每個元素搬 12 bytes 只做 1 FLOP (AI ≈ 0.08), 所以 GFLOP/s ≈ bandwidth × 0.08 — 在 1.5 TB/s 的卡上頂多約 125 GFLOP/s, 距離兩位數 TFLOP/s 的 compute peak 極遠, 但這已經是這個演算法的物理上限。 若 % of peak bandwidth 低於七八成, 先檢查 buffer 是否夠大 (要超過 L2)。 核心 kernel 就兩行:
+
+```cpp
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+if (i < n) c[i] = a[i] + b[i];  // boundary check: grid is ceil-div oversized
+```
+
+完整程式: [vector_add.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/vector_add.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

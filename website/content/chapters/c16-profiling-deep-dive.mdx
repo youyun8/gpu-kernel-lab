@@ -105,6 +105,17 @@ ncu --import baseline.ncu-rep --import after_fix.ncu-rep
 用 `scripts/profile_ncu.sh` 與 `scripts/profile_rocprof.sh` 對第 12 章的各個 GEMM step kernel 依序 profiling, 把每一步的 speed-of-light 與主要 stall 記下來。 你會看到 bound 類型隨優化階段遷移: naive 是 memory-bound, tiling 後轉向 latency/compute-bound, 最終 MMA 版逼近 compute roof。 這就是本章 workflow 的實戰演練。
 </LabBox>
 
+<Solution>
+預期的診斷紀錄 (每一步的 speed-of-light 特徵):
+
+- `step0_naive`: Memory % 高、Compute % 低, stall 集中在 `Long Scoreboard` — 教科書級 memory-bound。
+- `step1_shared`: DRAM bytes 大降, 但 `Barrier` stall 上升 (tile 邊界的 `__syncthreads()`), bound 轉向 latency。
+- `step2_register_tiling`: Compute % 開始領先, sectors/request 接近理想 — 每個 thread 更多獨立 FMA, ILP 把 pipeline 餵起來了。
+- `step3`/`step4`: `Selected`/issue 使用率上升, 殘餘 stall 若在 `Not Selected`, 代表已近飽和, 繼續調 occupancy 無益。
+
+這份「metric 遷移史」比任何單點數字都有價值 — 它告訴你每個優化各自搬走了哪類瓶頸。 Script: [profile_ncu.sh](https://github.com/youyun8/gpu-kernel-lab/blob/main/scripts/profile_ncu.sh)、[profile_rocprof.sh](https://github.com/youyun8/gpu-kernel-lab/blob/main/scripts/profile_rocprof.sh)。
+</Solution>
+
 <Quiz
   questions={[
     {

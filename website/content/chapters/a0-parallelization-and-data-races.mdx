@@ -184,6 +184,17 @@ GPU 端用 **compute-sanitizer** (CUDA): `compute-sanitizer --tool racecheck ./m
 編譯這個目錄 (無 GPU toolchain 也能編 CPU 部分): 先跑 `race_demo`, 觀察 5 次 trial 的 total 不但少於 8,000,000 而且每次不同; 再跑 `race_fixed_mutex` 與 `race_fixed_atomic`, 確認每次都正確。 接著跑 `openmp_reduction`, 比較 racy / critical / reduction 三版的正確性與時間差 (你應該會看到 reduction 比 critical 快兩個數量級)。 有 GPU 的話再跑 `gpu_histogram_race` (racy vs atomic histogram)、`gpu_block_reduce` 與 `gpu_threadfence`。 最後用 `-fsanitize=thread` 重新編譯 `race_demo.cpp`, 看 ThreadSanitizer 怎麼指出 race 的位置。
 </LabBox>
 
+<Solution>
+預期結果與判讀:
+
+- `race_demo`: 每次 trial 的 total 都不同且遠小於 8,000,000 (本 repo 實測掉了 84–86% 的更新) — 8 條 threads 的 `++counter` 互相覆蓋。
+- `race_fixed_mutex` / `race_fixed_atomic`: 每次都是 8,000,000。 Mutex 版靠 `std::lock_guard` 序列化整個 RMW; atomic 版用 `fetch_add` 讓 RMW 不可分割。
+- `openmp_reduction`: racy 版錯 (且快, 因為它根本沒同步), critical 版對但極慢 (每次加法都搶鎖), `reduction(+:sum)` 又對又快 — 它讓每條 thread 累加私有副本、最後合併一次, 本 repo 實測比 critical 快約 300 倍。
+- ThreadSanitizer 會印出 `WARNING: ThreadSanitizer: data race`, 並指向 `race_demo.cpp` 中 `++counter` 那一行的 read/write 對。
+
+完整程式: [race_demo.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/00-parallel-foundations/race_demo.cpp)、[race_fixed_atomic.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/00-parallel-foundations/race_fixed_atomic.cpp)、[openmp_reduction.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/00-parallel-foundations/openmp_reduction.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

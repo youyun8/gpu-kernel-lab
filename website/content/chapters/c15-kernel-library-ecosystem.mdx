@@ -72,6 +72,12 @@ Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次
 `blas_baseline` 用 cuBLAS (CUDA) 或 hipBLAS (HIP) 跑同一個 2048³ SGEMM (CMake 找不到 BLAS library 時會自動略過這個 target)。 把它的 GFLOP/s 和你手寫的 `sgemm_step4_double_buffer` 並排比較, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?
 </LabBox>
 
+<Solution>
+預期結果與判讀: fp32 SGEMM 上, 手寫 step4 通常能到 cuBLAS 的 60–85% — 剩下的差距主要來自: (1) library 對這個形狀挑了更優的 tile/stage 組合 (autotune); (2) 更深的 software pipeline 與更精細的指令排程; (3) 部分版本走 tf32 Tensor Core 路徑 (若你沒關 math mode, 這不是同一場比賽 — 用 `CUBLAS_PEDANTIC_MATH` 對齊)。 行動建議: 若差距 < 20%, 對大多數用途手寫版已「夠好」; 若你需要那 20%,第 22 章的 CUTLASS 是比繼續手調更經濟的路。
+
+完整程式: [blas_baseline.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/03-gemm/blas_baseline.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

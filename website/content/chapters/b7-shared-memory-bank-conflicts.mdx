@@ -110,6 +110,16 @@ Stencil 是另一個好例子: block 載入 central tile 加 halo 到 shared mem
 `transpose` 這個 target 內含三個版本 (naive / shared / padded), 各自對 CPU reference 做 correctness check 並報告 effective bandwidth。 你應該看到 shared 版比 naive 快、padded 版又再快一截。 用 profiler 對照 shared memory 的 bank conflict counter, 驗證 padding 真的把 conflict 歸零。
 </LabBox>
 
+<Solution>
+預期結果與判讀: naive 版的瓶頸是 column-major 寫入完全 uncoalesced; shared 版把「不連續」搬進 shared memory 內部, 讀寫 global 都 coalesced, 但 `tile[32][32]` 讓同一 column 的 32 個元素全落在同一個 bank → 32-way conflict; padded 版只改一個字 — `tile[32][33]` — 讓 column 存取的 bank index 每 row 錯開 1, conflict 歸零。 Profiler 上看 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared` (或 omniperf 的 LDS conflict 欄): shared 版非零, padded 版應為 0。 關鍵一行:
+
+```cpp
+__shared__ float tile[kTile][kTile + 1];  // +1 breaks the 32-way column conflict
+```
+
+完整程式: [transpose.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/transpose.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

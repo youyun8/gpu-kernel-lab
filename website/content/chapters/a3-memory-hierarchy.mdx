@@ -102,6 +102,12 @@ __global__ void boxFilterShared(const float* in, float* out, int n) {
 執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。 小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬 — 這個實驗讓你「看見」cache 與 global memory 的分界。 接著跑 `pinned_vs_pageable`, 量出 host↔device 這一層的 pinned/pageable 差距。
 </LabBox>
 
+<Solution>
+預期結果與判讀: `bandwidth_probe` 的曲線有兩個平台 — 小 buffer (放得進 L2) 的 GB/s 可能是 HBM 規格的數倍, 這不是超頻, 是根本沒打到 HBM; buffer 一超過 L2 容量 (A100 40 MB、H100 50 MB), 曲線掉到真正的 HBM 頻寬。 找到「膝點」的位置, 它就是你這張卡的 L2 大小。 `pinned_vs_pageable` 中 pinned 通常快 1.5–3 倍, 因為 pageable copy 要先由 driver staging 到內部 pinned buffer 再 DMA — 等於多搬一次。
+
+完整程式: [bandwidth_probe.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/bandwidth_probe.cpp)、[pinned_vs_pageable.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/pinned_vs_pageable.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

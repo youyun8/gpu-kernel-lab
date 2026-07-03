@@ -77,6 +77,12 @@ Debug 這類 kernel 時, 先縮成兩個 stage 和小 shape 做 correctness, 再
 `async_pipeline` 用一個簡化的兩階段 producer–consumer copy pipeline (CUDA 用 cp.async, HIP 用對應的非同步路徑或 fallback) 示範 prefetch/compute 重疊, 並和單純的同步 copy 比較 latency。 程式碼刻意保持精簡, 重點在 pipeline 的節奏而非完整 GEMM。
 </LabBox>
 
+<Solution>
+預期結果與判讀: async 版快於同步版, 差距取決於「load latency 佔 compute window 的比例」— compute 越輕、tile 越大, overlap 的收益越明顯。 讀程式時盯三個位置: (1) prologue 先填 kStages − 1 個 buffer (輸送帶先上料); (2) 主迴圈的 `__pipeline_wait_prior(kStages - 2)` 只等「最舊那筆」到齊, 而不是等全部 — 這就是 pipeline 與「每次都同步等待」的本質差異; (3) 消費完立刻補發下一筆 async copy, 讓 in-flight 數量恆定。 把 kStages 改成 1 重跑, 你會得到接近同步版的時間 — stage 深度就是 latency 的緩衝池。
+
+完整程式: [async_pipeline.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/05-advanced-scheduling/async_pipeline.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

@@ -237,9 +237,28 @@ __global__ void embeddingGather(const float* table, const int* idx,
 編譯 `stride_bandwidth` 這個 benchmark, 它會對同一份 buffer 用 stride = 1, 2, 4, 8, 16, 32 各測一次 achieved bandwidth, 印出 GB/s 與 % of peak。 你應該會看到一條隨 stride 遞減的曲線, 和上面的 visualizer 對得起來。 接著把 profiler 打開, 對照 `l1tex__t_sectors` 或 rocprof 的 memory efficiency counter。
 </LabBox>
 
+<Solution>
+預期結果與判讀: stride = 1 接近硬體頻寬; stride = 2 掉到約一半; 之後每翻倍再掉, 到 stride = 32 時每個 warp 的 32 個位址落在 32 個不同 segment, effective bandwidth 只剩幾個百分點。 注意小 stride 的實測值常「沒有理論那麼慘」— 那是 L2 把相鄰 warp 要的 bytes 先吸收了 (本章 Cache 一節); buffer 越大於 L2, 曲線越接近理論。 Profiler 佐證: stride = 1 時每個 request 4 個 sector (理想), stride = 2 時 8 個 — sectors/request 的放大倍率就是你浪費的頻寬倍率。
+
+完整程式: [stride_bandwidth.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/stride_bandwidth.cpp)。
+</Solution>
+
 <LabBox path="kernels/02-memory/access-patterns">
 進階存取型態的六個 benchmark: `aosoa_layout`、`vectorized_tail`、`cooperative_tile_load`、`gather_scatter`、`row_padding`、`embedding_lookup`。 每個都內建正確性驗證與 bandwidth 報告。 建議順序: 先跑 `aosoa_layout` 印證上面的 DataLayoutVisualizer, 再跑 `gather_scatter` 觀察 block aggregation 對 atomic scatter 的加速, 最後用 `embedding_lookup` 感受排序對 L2 hit rate 的影響。
 </LabBox>
+
+<Solution>
+六個 benchmark 的預期行為:
+
+- `aosoa_layout`: SoA ≈ AoSoA ≫ AoS (stride-3 讓 AoS 掉約三倍) — 佈局決定天花板。
+- `vectorized_tail`: float4 版正確處理 n = 2²⁴ + 3 (`correctness OK`), 頻寬相當或略優於 scalar, 指令數少約 4 倍 — 在更複雜的 kernel 裡這個差距會轉成效能。
+- `cooperative_tile_load`: shared 版與 naive 結果一致; naive 靠 L1 吸收了大部分重複讀取, 但 load 指令數差 17 倍, 在 L1 壓力大的真實 kernel 中差距更明顯。
+- `gather_scatter`: `scatter_block_agg` 明顯快於 `scatter_naive` — shared memory histogram 把每 block kBlockSize 個 global atomic 換成最多 256 個, 碰撞被便宜的 shared atomic 吸收。
+- `row_padding`: ld = 1024 穩定快於 ld = 1000, 差距是 misaligned row 開頭多出的 transaction。
+- `embedding_lookup`: sorted 版快於 random 版且輸出 bit-exact 相同 — 排序讓 90% 的 hot-row 查詢連續命中 L2, inverse permutation 保住輸出順序。
+
+完整程式在 [access-patterns/](https://github.com/youyun8/gpu-kernel-lab/tree/main/kernels/02-memory/access-patterns)。
+</Solution>
 
 <Quiz
   questions={[

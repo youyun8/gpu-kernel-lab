@@ -100,6 +100,12 @@ Reduction 家族很大, 實務上會依 shape 選不同版本:
 `reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。 依序跑, 觀察 reduction 逐步逼近頻寬上限。
 </LabBox>
 
+<Solution>
+預期結果與判讀: reduction 三個版本的頻寬階梯 — naive (interleaved + divergent) 最慢; shared tree 消除 divergence 與多餘 global 往返; warp shuffle 版把最後 32/64 個值留在 register 合併, 應接近純讀取的頻寬上限 (reduction 只寫一個值, 理論上限就是「把輸入讀一遍」的速度)。 softmax 部分: three-pass 與 online 結果都正確 (online 的 rescale 在數學上恆等), 但 online 只掃兩遍資料 (fused max+sum 一遍、normalize 一遍), memory-bound 下時間比 ≈ 讀取遍數比。 大值測試 (輸入含 80 之類) 兩版都不 overflow, 因為都有 max-subtraction — 拿掉它 `expf(80)` 直接變 inf。
+
+完整程式: [reduction.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/04-reductions-softmax/reduction.cpp)、[softmax.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/04-reductions-softmax/softmax.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

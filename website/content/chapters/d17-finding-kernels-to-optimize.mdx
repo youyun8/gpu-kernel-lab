@@ -79,6 +79,12 @@ g.replay()   # hundreds of launches collapse into one
 `kernels/06-pytorch-integration/profile_model.py` 提供一個含 elementwise 鏈的小模型與 `torch.profiler` 樣板, 印出 top kernel 表並匯出 trace。 跑一次, 找出佔時最多的 op, 作為後續章節要 fuse 的目標。
 </LabBox>
 
+<Solution>
+預期結果與判讀: top kernel 表裡不會有單一巨大 kernel, 而是一串 elementwise op (add、mul、gelu 各自一個 kernel launch) 加上它們之間的 memory 往返 — 每個 op 自己都「很快」, 加總卻很慢, CUDA time 遠大於任何單一 kernel。 這正是 fusion 的目標特徵 (第 19 章會把這條鏈 fuse 成一個 kernel)。 打開匯出的 trace (chrome://tracing 或 Perfetto), 再確認兩件事: kernel 之間的空隙 (launch overhead) 佔比, 以及有沒有意外的 `Memcpy DtoH` (隱性同步, 常來自 `.item()`)。
+
+完整程式: [profile_model.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/profile_model.py)。
+</Solution>
+
 <Quiz
   questions={[
     {

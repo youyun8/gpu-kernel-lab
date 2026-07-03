@@ -121,6 +121,12 @@ class GeluFn(torch.autograd.Function):
 `cpp_extension/` 目錄有完整的 GELU forward+backward extension (`.cpp` + `.cu` + `setup.py` + 測試), 測試會對 `torch.nn.functional.gelu` 做正確性比對並跑 `gradcheck`。 HIP 環境下同一份 `.cu` 由 PyTorch 的 hipify 流程處理。 跑 `python test_gelu.py` 確認 forward 與 backward 都通過。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 測試會報 forward 與 `F.gelu` 的最大誤差 (tanh 近似下應在 1e-6 量級) 以及 `gradcheck` 通過 — 注意 `gradcheck` 用 double 精度跑, 所以 extension 要支援 fp64 或測試轉 dtype。 三個常見翻車點: (1) 忘了 `x.contiguous()`, 對 transposed tensor 直接拿 `data_ptr` 會算錯而不報錯; (2) backward 的公式漏了 chain rule 的 `grad_output` 乘項 — gradcheck 會抓到; (3) 只在 float32 測 — tail shape 與 dtype 都要進測試矩陣 (第 31 章)。
+
+完整程式在 [cpp_extension/](https://github.com/youyun8/gpu-kernel-lab/tree/main/kernels/06-pytorch-integration/cpp_extension)。
+</Solution>
+
 <Quiz
   questions={[
     {

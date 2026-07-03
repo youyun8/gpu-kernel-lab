@@ -112,6 +112,10 @@ omniperf profile -n vadd -- ./vector_add
 `kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。 用它跑 `bandwidth_probe`, 再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling, 對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 兩邊的數字應該一致到幾個百分點內 — harness 的 GB/s 來自「搬運 bytes ÷ event 時間」, profiler 的 Memory throughput % 來自硬體 counter, 量的是同一件事。 若差很多, 常見原因: (1) profiler 下的 kernel 因 replay/鎖頻變慢 (看絕對時間別看比例); (2) harness 的 bytes 算錯 (漏算 read-modify-write); (3) 量到了 warmup 或包含了 memcpy。 Harness 的核心做法在 [benchmark.h](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/common/benchmark.h): 先 3 次 warmup, 再用 GPU event 夾 10 次取平均 — 這正是本章「不要用 CPU timer 包 async launch」的實作。
+</Solution>
+
 <Quiz
   questions={[
     {

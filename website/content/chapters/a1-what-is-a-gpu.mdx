@@ -124,6 +124,16 @@ HIP 的 API 幾乎是 CUDA runtime 的鏡像 (`cudaMalloc` ↔ `hipMalloc`), 多
 先確認 toolchain: 到 `kernels/` 執行 `cmake -B build -S .`, 觀察 CMake log 印出偵測到的是 CUDA 還是 HIP (兩者皆無時會進入 syntax-only 模式, 見 `kernels/common/README`)。 然後跑 `device_query` 認識你的硬體, 再跑 `branch_divergence` 量測 SIMT divergence 的實際代價 — 對照上面兩個 kernel 的差異。
 </LabBox>
 
+<Solution>
+預期結果與判讀:
+
+- CMake log 會印 `gpu-kernel-lab platform: CUDA` 或 `HIP`; 兩者皆無時印 `NONE` 並警告只能做 syntax-only 檢查。
+- `device_query` 印出每張卡的 SM/CU 數。 例如 A100 是 108 個 SM → 約 221,184 threads 才能填滿; 這個數字就是「你的問題夠不夠大」的門檻。
+- `branch_divergence` 中 `divergent_by_lane` 明顯慢於 `uniform_by_warp`。 理論上 divergent 版每個 warp 要序列化執行 heavy + light 兩條路徑, 所以時間接近「兩條路徑之和」而非「較慢者」; 實測比值通常落在 1.5–2 倍 (取決於兩條路徑的成本差)。 關鍵理解: 讓分支條件跟 warp 邊界對齊 (`i / warpSize` 而非 `i`), 總工作量不變, 時間卻大幅下降。
+
+完整程式: [device_query.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/device_query.cpp)、[branch_divergence.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/01-basics/branch_divergence.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

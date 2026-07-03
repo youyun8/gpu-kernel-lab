@@ -94,6 +94,12 @@ Roofline 的好處是能把技巧翻譯成座標變化:
 跑 `roofline_probe`: 它對幾個不同 AI 的 micro-kernel (從純 copy 到每 byte 做很多 FMA) 各量一次, 印出 (AI, GFLOP/s)。 把這些點對照上面的互動 roofline, 你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 五個點 (AI = 0.25, 1, 4, 16, 64) 會呈現清楚的兩段式行為 — 低 AI 區 GB/s 幾乎恆定在頻寬上限、GFLOP/s 隨 AI 線性上升 (你在斜線上); 過了 ridge point (peak FLOP/s ÷ peak BW, A100 fp32 約 12.5 FLOP/byte) 之後 GFLOP/s 封頂、GB/s 反而下降 (你頂到水平線, memory 系統開始等 compute)。 拿你量到的 (AI, GFLOP/s) 對到 `<RooflineChart />` 上, 每個點都應該貼著對應的屋頂 — 若某個點明顯低於兩條屋頂, 代表 latency 沒藏好 (回第 8 章)。
+
+完整程式: [roofline_probe.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/02-memory/roofline_probe.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {

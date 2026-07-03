@@ -81,6 +81,12 @@ compiled = torch.compile(baseline)
 `load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel, 對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時 (warmup + CUDA events), 印出各自時間與相對 speedup。 跑一次, 看看在你的硬體上手寫贏 torch.compile 多少 (或輸多少)。
 </LabBox>
 
+<Solution>
+預期結果與判讀: 三者正確性一致 (合理 tolerance 內); 相對 baseline, fused 版與 `torch.compile` 版都應有數倍加速 — 收益 ≈ 省下的全張量 global memory 往返次數比 (本章前面的估算)。 手寫和 compile 版通常在伯仲之間: compile 生成的 Triton kernel 對「純 elementwise 鏈」已接近最優, 手寫的優勢要在 compile 做不到的 fusion (跨 library 邊界、特殊 layout) 才顯現。 若手寫明顯輸, 檢查是否漏了 vectorized load 或 block size 沒調; 若明顯贏, 檢查 compile 版是否有 graph break (`TORCH_LOGS=graph_breaks`)。
+
+完整程式: [fused_bias_gelu.py](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/06-pytorch-integration/load_inline/fused_bias_gelu.py)。
+</Solution>
+
 <Quiz
   questions={[
     {

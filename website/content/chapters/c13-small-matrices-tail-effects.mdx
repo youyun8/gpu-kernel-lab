@@ -98,6 +98,12 @@ CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形
 `split_k_gemm` 對一個瘦長 (小 M、N, 大 K) 矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。 用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化, 對照本章的 quantization 公式。
 </LabBox>
 
+<Solution>
+預期結果與判讀: `split_k_gemm` 在瘦長形狀下, plain 版的 CTA 數遠小於一個 wave (grid = M/tile × N/tile 很小), GPU 大半閒置; Split-K 版把 CTA 數乘上 split 因子, achieved occupancy 明顯上升、時間下降 — 但 split 過大時 reduction/atomic 開銷反超收益, 曲線是 U 形。 `cta_swizzle` 的 swizzle 版 L2 hit rate 高於 row-major 順序 (同時在跑的 CTA 共用更多 A/B tile), DRAM bytes 隨之下降 — 時間差就是「免費」的 locality 收益。 對照公式: 用本章的 efficiency 式子算 plain 版的 wave 效率, 應該和實測的 occupancy 缺口一致。
+
+完整程式: [split_k_gemm.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/05-advanced-scheduling/split_k_gemm.cpp)、[cta_swizzle.cpp](https://github.com/youyun8/gpu-kernel-lab/blob/main/kernels/05-advanced-scheduling/cta_swizzle.cpp)。
+</Solution>
+
 <Quiz
   questions={[
     {
