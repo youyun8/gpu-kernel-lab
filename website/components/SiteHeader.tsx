@@ -3,6 +3,7 @@ import { siteConfig } from '@/lib/site';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
 import { SettingsNavButton } from '@/components/SettingsModal';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { MobileNav } from '@/components/MobileNav';
 
 const navItems = [
   { href: '/', label: '首頁' },
@@ -19,7 +20,7 @@ export function SiteHeader() {
           <span aria-hidden className="text-primary">▍</span>
           <span>{siteConfig.name}</span>
         </Link>
-        <nav aria-label="主要導覽" className="flex items-center gap-1 text-sm">
+        <nav aria-label="主要導覽" className="hidden items-center gap-1 text-sm md:flex">
           {navItems.map((item) => (
             <Link
               key={item.href}
@@ -41,6 +42,7 @@ export function SiteHeader() {
           <SettingsNavButton />
           <ThemeToggle />
         </nav>
+        <MobileNav navItems={navItems} repo={siteConfig.repo} />
       </AppWidthContainer>
     </header>
   );
