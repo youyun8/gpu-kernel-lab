@@ -55,7 +55,7 @@ compute-sanitizer --tool initcheck ./gpu_histogram_race
 g++ -fsanitize=thread -g -O1 race_demo.cpp -o race_demo && ./race_demo
 ```
 
-第 0 章有這兩個工具抓到 race 的實際輸出範例。
+第 0 章把 data race、lost update、atomic、mutex、reduction 與 fence 的 CPU/GPU 對照完整拆開; 本章只保留 debug workflow 的檢查清單。
 
 ## Synchronization Bug 清單
 
