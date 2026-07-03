@@ -195,16 +195,20 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
         </div>
       )}
 
-      {/* Desktop rail */}
+      {/* Desktop rail — the aside itself is the sticky, self-contained flex
+          column so the chapter list scrolls internally. Keeping `sticky` on the
+          aside (rather than an inner box) means it never runs past its own
+          height and parks, which previously left a large empty gap below the
+          list once the article was scrolled. */}
       <aside
         suppressHydrationWarning
-        className={`relative hidden shrink-0 transition-[width] duration-100 lg:block ${collapsed ? 'w-10' : ''}`}
+        className={`sticky top-20 hidden max-h-[calc(100vh-6rem)] shrink-0 flex-col transition-[width] duration-100 lg:flex ${collapsed ? 'w-10' : ''}`}
         style={collapsed ? undefined : { width }}
       >
         <button
           type="button"
           onClick={() => setCollapsed(!collapsed)}
-          className="mb-2 flex w-full items-center justify-between rounded-lg border border-border bg-card/60 px-3 py-2 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground"
+          className="mb-2 flex w-full shrink-0 items-center justify-between rounded-lg border border-border bg-card/60 px-3 py-2 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground"
           aria-label={collapsed ? '展開側欄' : '收合側欄'}
           aria-expanded={!collapsed}
         >
@@ -213,7 +217,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
         </button>
 
         {!collapsed && (
-          <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto pr-2">
+          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto pr-2">
             <SidebarLists activeSlug={activeSlug} anchors={anchors} />
           </div>
         )}
