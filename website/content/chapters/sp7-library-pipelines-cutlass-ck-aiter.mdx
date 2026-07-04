@@ -1,0 +1,166 @@
+# Library 怎麼實作 Software Pipeline: CUTLASS、CK、AITER
+
+前幾章你手寫過 double buffering、cp.async、warp specialization。 Production library 不會讓每個 kernel 重寫這些 — 它們把 pipeline 的 producer/consumer handshake、多 stage buffer、warp 分工抽象成**可重用的元件**。 這一章看 NVIDIA 與 AMD 各自怎麼在 library 裡實作 software pipeline, 以及 AMD 的 **AITER** 如何把這些打包成推論算子庫。
+
+> 第 2 章 (kernel 內) 與第 6 章 (serving) 已經分別點到 CUTLASS/CK 與 TensorRT-LLM/AITER 在各自層級怎麼實作 overlap。 這一章把散落在那兩章的函式庫段落**收攏成一張由下到上的 NVIDIA↔AMD 對照**, 專注在「pipeline 機制」這條軸線上。
+
+<VendorPipelineFigure />
+
+兩家的名字不同, 但骨架一樣: 非同步載入 → pipeline 抽象 (mbarrier / buffer 狀態) → warp/wave 排程 → matrix engine → tuned GEMM 庫 → 推論 op 庫。 下面逐層對照。
+
+## NVIDIA CUTLASS: `cutlass::Pipeline` 與 Warp Specialization
+
+CUTLASS 把 sp2 章那個「shared-memory ring buffer + producer/consumer」的 handshake, 抽象成一個 `cutlass::Pipeline` 類別。 它在 shared memory 放**兩排 mbarrier**: `full_barrier[]` 與 `empty_barrier[]`, 各有一個在 0/1 之間翻轉的 phase bit。 producer 與 consumer 用四個動作握手:
+
+```cpp
+// CUTLASS pipeline handshake (conceptual). full_barrier/empty_barrier are
+// mbarrier arrays in shared memory; the Stages template parameter sets depth.
+// Producer warpgroup: TMA loads a tile into the next buffer slot.
+pipeline.producer_acquire(state);            // wait until this slot is empty
+cute::copy(tma, gmem_tile, smem[state.index()]);   // async TMA load
+pipeline.producer_commit(state);             // no-op for TMA: the copy's
+                                             // transaction count arrives the barrier
+// Consumer warpgroup: WGMMA consumes the tile once the barrier is full.
+pipeline.consumer_wait(state);               // wait until this slot is full
+warpgroup_mma(acc, smem[state.index()]);     // WGMMA on Tensor Cores
+pipeline.consumer_release(state);            // mark slot empty for the producer
+```
+
+`Stages` (template 參數) 決定 pipeline 幾層深 — 就是 sp2 的「多 stage cp.async」被參數化。 在 Hopper 上 CUTLASS 用 **warp specialization**: 一個 warpgroup 專做 TMA load (producer, 少用 register), 另一個專做 WGMMA (consumer, 多用 register), 靠 `setmaxnreg` 在兩者間重新分配 register。
+
+<WarpSpecializationFigure />
+
+再往上, CUTLASS 提供兩種 **kernel schedule**:
+
+- **Cooperative**: 所有 consumer warpgroup 一起算同一塊 output tile。
+- **Ping-Pong**: 兩個 consumer warpgroup 交替 — 一個在跑 mainloop 的同時, 另一個在做 epilogue, 於是**把 epilogue 也藏進 mainloop** (又一層 pipeline)。 這正是 FlashAttention-3、PyTorch fp8 GEMM 底層用的結構。
+
+<Exercise id="sp7-e1" title="CUTLASS 的 mbarrier 握手" kind="paper" level="進階">
+CUTLASS pipeline 用 `full_barrier` 與 `empty_barrier` 兩排 mbarrier。 (a) producer 該等哪個 barrier、翻哪個? consumer 呢? (b) 為什麼 `PipelineTmaAsync` 的 `producer_commit` 是 no-op? (c) 若只用一排 barrier (只有 full) 會出什麼問題?
+
+<Solution>
+(a) producer 先 `producer_acquire` **等 empty_barrier** (slot 已被 consumer 用完), 載入後 arrive **full_barrier** 通知 consumer; consumer `consumer_wait` **等 full_barrier**, 用完後 `consumer_release` arrive **empty_barrier** 通知 producer。 兩排 barrier 各表達一個方向的依賴。 (b) TMA 的 copy 完成時, 硬體用 **transaction-count** 機制直接 arrive full_barrier, 所以不需要 producer 額外手動 commit → no-op。 (c) 只有 full barrier 就無法表達「slot 已被消費、可以覆寫」這個反向依賴 → producer 可能在 consumer 還沒讀完就覆寫該 buffer (write-after-read race)。 需要 empty barrier 保護 buffer 的重用。
+</Solution>
+</Exercise>
+
+## NVIDIA cuBLASLt / FlashInfer: Pipeline 被包起來
+
+多數人不直接寫 CUTLASS。 **cuBLASLt** 提供 tuned GEMM: 它內含大量 Tensile-風格的特化 kernel, 每個把 stage 數、tile、swizzle 都 baked-in, 你只透過 heuristic / algo selection 挑一個 — pipeline 對你透明。 **FlashInfer**、**TensorRT-LLM** 的 attention/GEMM kernel 則直接建在 CUTLASS pipeline 之上, 是 serving 端拿到「已經 pipeline 化」kernel 的來源。 這對應到 Track 8 的 library 生態: 手寫 (CUTLASS) → tuned lib (cuBLASLt) → serving kernel (FlashInfer/TRT-LLM)。
+
+## AMD Composable Kernel (CK): `BlockwiseGemmPipeline` 與 Intra/Interwave
+
+AMD 的 **Composable Kernel (CK / CK Tile)** 是 CUTLASS 的對應物。 它的 pipeline 核心是 `BlockwiseGemmPipeline`, 一樣把 tile 搬進 **LDS** (AMD 的 shared memory) 做 double buffering, 用 **MFMA** (Matrix Core) 消費。 兩個 CK 特有的重點:
+
+**Local prefetch (三段 VGPR pipeline)**: 除了 global→LDS 的預取, CK 再加一段 LDS→VGPR 的預取, 讓 **MFMA 計算、LDS 讀取、global load 三者同時進行**: 當前 VGPR 正被 MFMA 消費時, 下一批資料已從 LDS 搬進另一組 VGPR, 再下一塊 tile 正從 global memory 載入第三組 buffer。 這是 sp2「多 stage」在 AMD 上的具體形態 (用 VGPR triple buffer 取代 cp.async 的 shared-memory stages)。
+
+**Intrawave vs Interwave scheduling**: CK 讓你選 K-loop 的 wave 排程策略:
+
+- **Intrawave**: 整個 K 維載進每個 wave, 各 wave **獨立**跑自己的 MFMA、彼此不同步。 CU 排程彈性大 → 適合 **compute-bound**。
+- **Interwave**: K 切成 chunk, 所有 wave 同步地載入同一 chunk、一起算、再換下一 chunk。 memory access 被協調、cache 命中率高 → 適合 **memory-bound**。
+
+這是 AMD 側獨有的一個旋鈕: 同一個 GEMM, 依 workload 是 memory- 還是 compute-bound 選不同的 wave-level pipeline 排程。
+
+```cpp
+// CK block GEMM main loop (conceptual). A local-prefetch stage overlaps MFMA,
+// LDS reads, and global loads across three VGPR buffers; the scheduler policy
+// (Intrawave/Interwave) decides how waves coordinate the K-loop.
+for (int k = 0; k < numKTiles; ++k) {
+    global_load_to_lds(next_lds, gmem_tile(k + 1));  // prefetch next tile -> LDS
+    lds_read_to_vgpr(next_vgpr, cur_lds);            // prefetch LDS -> VGPR
+    mfma(acc, cur_vgpr);                             // Matrix Core consumes current VGPR
+    rotate(cur_lds, next_lds); rotate(cur_vgpr, next_vgpr);
+}
+```
+
+<Exercise id="sp7-e2" title="Intrawave vs Interwave 選型" kind="paper" level="挑戰">
+CK 讓你為一個 GEMM 選 intrawave 或 interwave 排程。 (a) 一個瘦長、K 很大但 tile 小、明顯 memory-bound 的 GEMM 該選哪個? 為什麼? (b) 一個大方陣、compute-bound 的 GEMM 呢? (c) 這個選擇對應到 NVIDIA 側的什麼概念?
+
+<Solution>
+(a) **Interwave**: 所有 wave 同步載入同一 K-chunk, memory access 被協調、L2/cache 命中率高, 對 memory-bound 最有利 (瓶頸在搬資料, 協調存取最重要)。 (b) **Intrawave**: 各 wave 獨立跑 MFMA、不互相等待, CU 排程彈性最大, 讓 Matrix Core 盡量飽和, 適合 compute-bound。 (c) 對應 NVIDIA 側「如何安排 warp/warpgroup 在 pipeline 中的角色與同步程度」— 例如 warp specialization 的 producer/consumer 分工、cooperative vs ping-pong schedule。 兩家都在同一件事上給旋鈕: 用什麼 wave/warp 排程去餵飽 matrix engine。
+</Solution>
+</Exercise>
+
+## AMD hipBLASLt: Tuned GEMM 的對應物
+
+**hipBLASLt** 是 cuBLASLt 在 ROCm 的對應: 由 **Tensile** 生成、autotune 出大量特化 GEMM kernel (stage/tile/prefetch 都 baked-in), runtime 依 shape 挑最快的。 使用者同樣看不到 pipeline 細節, 只做 algo selection。 它是 AITER、vLLM、SGLang 在 AMD 上取得 tuned GEMM 的底層來源之一。
+
+## AMD AITER: 把 Pipeline 打包成推論算子庫
+
+**AITER (AI Tensor Engine for ROCm)** 是 AMD 的開源 AI 算子庫, 提供 Python 與 C++ API, 是 **vLLM 與 SGLang 在 ROCm/MI300X 上的預設 backend**。 它涵蓋 LLM 推論的核心算子: **MHA、MLA、Paged Attention、Fused MoE、GEMM、RMSNorm、RoPE+KVCache**。
+
+從 software-pipeline 的角度, AITER 的關鍵在於它是個**匯集多來源 kernel 的算子庫**, 每個 kernel 各有自己手調的 pipeline:
+
+- **CK-based kernel**: block-scale GEMM、fused MoE 直接建在 CK 的 `BlockwiseGemmPipeline` 上 (prefetch + intra/interwave), 拿到前面說的三段 VGPR pipeline。
+- **Triton kernel**: 用 Triton 的 block-level 抽象 (Track 7 第 20 章), 由 compiler 自動 pipeline。
+- **Assembly (ASM) kernel**: 對最關鍵的路徑 (例如 MLA decode) 手寫組語, **完全手動排 instruction-level pipeline** 榨到極限。
+
+這帶來很大的加速: block-scale GEMM ~2×、fused MoE ~3×、MLA decode 可達十幾倍。 而 AITER 這些「已 pipeline 化的快 kernel」, 正是 sp6 章 SGLang/vLLM **overlap scheduler 眼中的「GPU forward」stage** — 兩層 pipeline 疊起來: AITER 負責 kernel 內與 kernel 間的重疊, 引擎的 overlap scheduler 負責把 CPU 排程藏進這些 kernel 的執行時間。
+
+<Callout variant="insight" title="兩層 pipeline">
+AITER (或 CUTLASS/FlashInfer) 解決的是「單一算子內、算子之間」怎麼讓 memory 與 compute engine 同時忙; SGLang/vLLM 的 overlap scheduler (sp6) 解決的是「CPU 排程與 GPU forward」怎麼重疊。 一個 production 推論系統是這兩層 pipeline 的疊加。
+</Callout>
+
+<Exercise id="sp7-e3" title="AITER 在 stack 裡的位置" kind="paper" level="進階">
+(a) AITER 對應 NVIDIA 生態的哪些東西? (b) AITER 的一個 fused MoE kernel 內部的 GEMM, 其 software pipeline 多半來自哪個底層庫? (c) AITER 與 SGLang overlap scheduler (sp6) 是取代關係還是疊加關係? 用一句話說明。
+
+<Solution>
+(a) AITER 對應 NVIDIA 的 **CUTLASS + FlashInfer + TensorRT-LLM kernel** 這一層 (serving 用的高效算子集合), 底層 GEMM 對應 cuBLASLt ↔ hipBLASLt。 (b) 多半來自 **Composable Kernel (CK)** 的 `BlockwiseGemmPipeline` (block-scale GEMM/MoE), 也可能是 Triton 或手寫 ASM kernel。 (c) **疊加**: AITER 提供 kernel 內/間重疊的快算子, overlap scheduler 把 CPU 排程藏進這些算子的 GPU 執行時間 — 兩層不同粒度的 pipeline 同時運作。
+</Solution>
+</Exercise>
+
+## NVIDIA ↔ AMD 對照
+
+| 層 | NVIDIA (CUDA) | AMD (ROCm) |
+| --- | --- | --- |
+| 非同步載入 | `cp.async` / TMA | `buffer_load`→LDS + local prefetch |
+| pipeline 抽象 | `cutlass::Pipeline` (mbarrier full/empty) | CK `BlockwiseGemmPipeline` |
+| warp/wave 排程 | warp specialization (producer/consumer)、cooperative/ping-pong | intrawave / interwave scheduling |
+| matrix engine | WGMMA / Tensor Core | MFMA / Matrix Core |
+| tuned GEMM 庫 | cuBLASLt (Tensile) | hipBLASLt (Tensile) |
+| 推論 op 庫 | CUTLASS · FlashInfer · TensorRT-LLM | **AITER** (CK / Triton / ASM) |
+
+重點不是背名字, 而是看出**同一套 software-pipeline 概念在兩家換了皮**: 非同步預取藏 memory latency、producer/consumer 分工讓兩種引擎同時忙、多 stage buffer 容忍更長 latency、tuned 庫把這些 baked-in、serving 庫再把算子交給引擎的 overlap scheduler 編排。 學會這一套語言, 換平台只是換 API。
+
+<Quiz
+  questions={[
+    {
+      question: 'CUTLASS 的 cutlass::Pipeline 用什麼在 producer 與 consumer 之間握手?',
+      options: ['global memory 上的 flag', 'shared memory 上的兩排 mbarrier (full / empty) 與 phase bit', 'CPU 端的 mutex', 'CUDA stream'],
+      answer: 1,
+      explanation: 'full_barrier / empty_barrier 各表達一個方向的依賴, phase bit 在 0/1 翻轉; TMA 用 transaction count 直接 arrive full。',
+    },
+    {
+      question: 'AMD CK 的 intrawave 與 interwave scheduling 差別是?',
+      options: ['精度不同', 'intrawave 各 wave 獨立跑 (compute-bound 較佳); interwave 所有 wave 同步載入同一 K-chunk (memory-bound 較佳, cache 命中高)', 'intrawave 只支援 fp16', '兩者完全相同'],
+      answer: 1,
+      explanation: 'intrawave 排程彈性大、餵飽 MFMA; interwave 協調 memory access、cache 友善 — 依 workload bound 類型選。',
+    },
+    {
+      question: '關於 AITER, 下列何者正確?',
+      options: ['它是 NVIDIA 的 library', '它是 ROCm 的開源 AI 算子庫, 是 vLLM/SGLang 在 MI300X 上的預設 backend, kernel 來自 CK/Triton/ASM', '它取代了 SGLang 的 overlap scheduler', '它只提供 GEMM'],
+      answer: 1,
+      explanation: 'AITER 匯集 CK/Triton/組語 kernel (MHA/MLA/MoE/GEMM…), 與引擎的 overlap scheduler 是疊加而非取代。',
+    },
+    {
+      question: 'CUTLASS 的 Ping-Pong schedule 多做了哪一層重疊?',
+      options: ['把 H2D copy 藏進 compute', '讓兩個 consumer warpgroup 交替, 一個跑 mainloop 時另一個做 epilogue, 把 epilogue 藏進 mainloop', '把梯度同步藏進 forward', '消除 launch overhead'],
+      answer: 1,
+      explanation: 'Ping-Pong 用兩個 consumer warpgroup 交錯 mainloop 與 epilogue, 是 kernel 內再加一層 pipeline。',
+    },
+  ]}
+/>
+
+<Callout variant="info" title="與 Track 8 的關係">
+Track 8 (生產級 library) 從「功能與生態」的角度介紹 CUTLASS/CuTe、CK/hipBLASLt/AITER、FlashAttention/FlashInfer。 這一章是從 **software pipelining** 的單一視角切進去, 專看它們怎麼實作「重疊」這件事。 兩章互補: 想了解 layout 代數與 API 全貌看 Track 8, 想了解 pipeline 機制看這裡。
+</Callout>
+
+<FurtherReading
+  links={[
+    { citation: 'NVIDIA Corporation, "Synchronization primitives (cutlass::Pipeline)," CUTLASS Documentation, 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/pipeline.md' },
+    { citation: 'Colfax Research, "CUTLASS Tutorial: Design of a GEMM Kernel (Pipelining, Warp Specialization).," 2024.', href: 'https://research.colfax-intl.com/cutlass-tutorial-design-of-a-gemm-kernel/' },
+    { citation: 'PyTorch, "Deep Dive on the CUTLASS Ping-Pong GEMM Kernel," 2024.', href: 'https://pytorch.org/blog/cutlass-ping-pong-gemm-kernel/' },
+    { citation: 'Advanced Micro Devices, Inc., "Intrawave and interwave scheduling with CK Tile," Composable Kernel Documentation, 2024.', href: 'https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/CK-Tile-intra-inter-wave.html' },
+    { citation: 'Advanced Micro Devices, Inc., "AITER: AI Tensor Engine For ROCm," ROCm Blogs, 2025.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html' },
+    { citation: 'ROCm, "AITER (AI Tensor Engine for ROCm)," GitHub, 2025.', href: 'https://github.com/ROCm/aiter' },
+  ]}
+/>

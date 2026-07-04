@@ -55,6 +55,7 @@ import SP3 from './sp3-host-device-streams-graphs.mdx';
 import SP4 from './sp4-pytorch-input-prefetch-pipeline.mdx';
 import SP5 from './sp5-pipeline-parallelism.mdx';
 import SP6 from './sp6-serving-overlap-sglang.mdx';
+import SP7 from './sp7-library-pipelines-cutlass-ck-aiter.mdx';
 
 export const chapterComponents: Record<string, ComponentType> = {
   'p0-parallelization-design': P0,
@@ -111,4 +112,5 @@ export const chapterComponents: Record<string, ComponentType> = {
   'sp4-pytorch-input-prefetch-pipeline': SP4,
   'sp5-pipeline-parallelism': SP5,
   'sp6-serving-overlap-sglang': SP6,
+  'sp7-library-pipelines-cutlass-ck-aiter': SP7,
 };

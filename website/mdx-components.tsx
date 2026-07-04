@@ -36,6 +36,7 @@ import {
   PipelineParallelFigure,
   OverlapSchedulerFigure,
   WarpSpecializationFigure,
+  VendorPipelineFigure,
 } from '@/components/widgets/PipelineFigures';
 import {
   ReleaseAcquireFigure,
@@ -99,6 +100,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     PipelineParallelFigure,
     OverlapSchedulerFigure,
     WarpSpecializationFigure,
+    VendorPipelineFigure,
     ReleaseAcquireFigure,
     CudaFenceScopeFigure,
     CrossBlockFenceProtocolFigure,
