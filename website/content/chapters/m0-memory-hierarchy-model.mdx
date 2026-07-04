@@ -27,11 +27,19 @@ for (int i = 0; i < n; ++i) sum += x[i];
 for (int i = 0; i < n; i += stride) sum += x[i];
 ```
 
+<Callout variant="warn" title="落到真實場景: column-major 走訪讓 bandwidth 掉到 1/16">
+Locality 出問題最經典的形式是「以錯誤的維度掃陣列」。 一個 row-major 存的 `float M[N][N]`, 若內層迴圈固定 column、外層跑 row (`M[i][j]` 中 j 是外層), 每次記憶體存取都跳一整個 row 的距離, 一條 64-byte cache line 帶回 16 個 float 卻只用 1 個, 有效 bandwidth 直接剩 1/16。 這在影像處理 (垂直方向 filter)、matrix transpose、以錯誤 stride 讀 tensor 時天天發生。 判斷方法: 看最內層迴圈的 index 是不是走在記憶體連續的那一維; 若不是, 交換迴圈順序、或先 transpose/重排 layout 讓存取變連續。 GPU 上同一個問題叫 uncoalesced access, 病根一樣。
+</Callout>
+
 ## CPU vs GPU Cache Behavior
 
 CPU latency-oriented: 大 cache、複雜 prefetch、branch prediction、少量 powerful cores。 最重要的是讓 hot working set 留在 cache, 避免 false sharing 與 cache miss。
 
 GPU throughput-oriented: HBM bandwidth 高, 但單 thread latency 很高。 最重要的是 coalescing、足夠 occupancy、shared memory tiling、避免 bank conflict 與 atomic hotspot。
+
+<Callout variant="insight" title="落到真實場景: latency-bound vs throughput-bound 決定你優化什麼">
+CPU 與 GPU 這條性格差異, 在調校時就是「該追 latency 還是追 throughput」的分岔。 一個對延遲敏感的線上服務 (單一 request 要盡快回), 目標是把 hot working set 釘在 L1/L2、避免 cache miss 與 false sharing, 甚至寧可犧牲一點總吞吐; 你會盯著 cache miss rate 與 p99 latency 調。 但同一個模型換到 GPU batch 推論, 單一 request 的延遲反而不是重點 — GPU 本來就用大量 in-flight warp 蓋住每次 HBM 存取的數百 cycle latency, 你該追的是 achieved bandwidth、occupancy 與 coalescing。 在錯的機器上追錯的指標 (例如想在 GPU 上降單 thread latency) 通常白忙一場。
+</Callout>
 
 ## Working Set
 
@@ -43,6 +51,10 @@ If shared memory per block = 64 KiB, one tile already fills the budget.
 If the kernel needs A tile + B tile, tile size must shrink or use staging.
 ```
 
+<Callout variant="insight" title="落到真實場景: working set 放不進 SRAM 就是 FlashAttention 的動機">
+「working set 塞不進 on-chip memory 就得反覆打 DRAM」這件事, 正是近幾年 attention kernel 大改的起點。 傳統 attention 會把整個 `N x N` 的 score matrix (seq len 2048 時就是 4M 個 float、16 MiB) 寫回 HBM 再讀回來做 softmax, 這個中間矩陣遠大於 shared memory (每 block 才幾十到一兩百 KiB), 於是被 HBM 來回搬移的頻寬綁死。 FlashAttention 的核心手法就是縮小 working set: 把 Q/K/V 切成塞得進 SRAM 的 tile, 在片上用 online softmax 邊算邊累積, 從此不再實體化那個巨大的中間矩陣。 每次設計 kernel 都值得先算一次: 我的 working set 多大? 放得進哪一層? 放不進就得像這樣重新 tiling。
+</Callout>
+
 ## First Optimization Question
 
 每次看到慢 kernel, 先回答:
@@ -52,6 +64,10 @@ If the kernel needs A tile + B tile, tile size must shrink or use staging.
 3. 每個 byte 被重用幾次?
 4. working set 放在哪一層: register, shared/LDS, L1/L2, 還是 DRAM?
 5. bottleneck 是 bandwidth、latency、cache miss、bank conflict、還是 synchronization?
+
+<Callout variant="insight" title="落到真實場景: 用第 3 題判斷該不該 fuse kernel">
+這五個問題裡, 「每個 byte 被重用幾次」往往一眼決定優化策略。 舉例: 深度學習裡連續的 elementwise op (`x -> bias add -> GeLU -> dropout`) 若各自是獨立 kernel, 每個 op 都把整個 tensor 從 HBM 讀進來、算一下、再寫回去 — 每個 byte 只被用一次, 純粹被 bandwidth 綁死, 而且中間結果來回搬。 答案是 kernel fusion: 把這幾個 op 合成一個 kernel, tensor 讀進 register 後一次做完再寫回, DRAM traffic 從「4 讀 4 寫」壓到「1 讀 1 寫」。 這正是 `torch.compile`/Triton 這類工具最主要的收益來源。 反過來, 若某個 byte 天生只用一次又無法 fuse (例如單純 copy), 就別浪費時間找 reuse, 直接衝 coalesced bandwidth 上限。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 執行 `stride_bandwidth`, `bandwidth_probe`, `transpose`。 觀察 contiguous、stride、transpose 對 achieved bandwidth 的影響, 並把結果對回 locality 與 coalescing。

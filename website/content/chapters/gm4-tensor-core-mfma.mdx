@@ -27,6 +27,10 @@ store_matrix_sync(&C[row * n + col], facc, n, mem_row_major);
 
 AMD 的對應寫法用 `__builtin_amdgcn_mfma_*` intrinsic (或 rocWMMA 這層可攜封裝), 概念相同: 一個 wavefront 持有 fragment, 一條 MFMA 指令做一塊矩陣乘加。
 
+<Callout variant="insight" title="落到真實場景: 確認你「真的」踩在 Tensor Core 上">
+換上 `wmma` 不代表就吃到 Tensor Core。 最實際的驗證是在 `ncu` 看 `sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active` — 若這個接近 0, 表示編譯器根本沒發出 HMMA, 你可能還在跑純量 FMA。 常見原因: fragment 尺寸不合法、或走了慢速的 accumulator 路徑。 在 AMD 上對應看 omniperf 的 MFMA 使用率。 一個真實情境是 flash-attention 的 QK^T GEMM (`16×16×16` half), 上了 MMA 後 attention kernel 的 matmul 段吞吐可以是 fp32 FMA 的 4–8 倍 — 但前提是這個 metric 有亮起來。
+</Callout>
+
 ## Layout 與 Swizzle 要求
 
 MMA 的代價是**資料佈局被指令規定死了**。 fragment 在 register 的擺放由硬體決定, 每個 lane 持有哪幾個 element 不由你選。 這帶來兩個約束:
@@ -53,6 +57,10 @@ MMA 單元對不同精度提供不同吞吐, 選錯精度就吃不到加速:
 | int8 | int32 | 量化推論 | 搭配 dequant epilogue |
 
 fp32 輸入也能透過 **TF32** (NVIDIA) 或 xf32 模式吃到部分加速 — 幾乎不用改程式, 只是尾數被截短。 低精度路徑的瓶頸常從 FMA pipe 轉成 **scale load、layout conversion 或 accumulator store** (第 7 章 low-precision 一節細談)。
+
+<Callout variant="warn" title="落到真實場景: fp16 訓練跑到一半 loss 變 NaN">
+表裡「fp16 動態範圍小, 需 loss scaling」不是註腳, 是每個做過 mixed-precision 訓練的人踩過的坑: fp16 的最大值約 65504, gradient 一小就 underflow 成 0、activation 一大就 overflow 成 inf, 幾個 step 後 loss 直接 NaN。 這正是 fp16 訓練必須配 loss scaling (把 loss 乘一個大 scale 再反向、更新前除回) 的原因, 也是 bf16 現在成為預設的理由 — bf16 的指數位和 fp32 一樣寬, 幾乎免 scaling。 選精度時別只看 MMA 吞吐表, 先確認你的數值範圍撐得住。
+</Callout>
 
 <Callout variant="insight" title="什麼時候 MMA 效益最大">
 half/bf16 且矩陣夠大、intensity 已接近 compute roof 時, 換 MMA 提升最明顯。 極小矩陣或還在 memory-bound 的 kernel, 先回頭把前三章做好。

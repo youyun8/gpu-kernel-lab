@@ -10,6 +10,10 @@ GPU 一次能同時跑的 CTA 數有上限 (由 SM 數 × 每 SM 能容納的 CT
 
 當 M×N 的 tile 數本來就少 (skinny GEMM), 情況更糟: 可能連一波都填不滿, 大部分 SM 從頭到尾閒著。 傳統 tiling 沿 M、N 切分已經無能為力, 因為 output 就這麼大。 唯一還沒被利用的維度是 **K** — 那正是 Split-K / Stream-K 下手的地方。
 
+<Callout variant="insight" title="落到真實場景: LLM decode 階段的 skinny GEMM">
+最典型的 skinny GEMM 出現在 LLM 自回歸 decode: batch 小、一次只生一個 token, FFN 的 GEMM 變成 `M=8, N=11008, K=4096` 這種又扁又長的形狀。 用 `128×128` 的 output tile 去切, M×N 只切得出約 `1 × 86 = 86` 個 tile, 但 A100 有 108 個 SM — 連一波都填不滿, 一半以上的 SM 從頭閒到尾。 這時把 tile 放大或加 thread 都沒用, 因為 output 就這麼小; 唯一的活路是沿 `K=4096` 這條長邊再切出平行度, 也就是本章的 Split-K / Stream-K。
+</Callout>
+
 ## Split-K
 
 Split-K 的想法很直接: 把每個 output tile 的 K-loop **切成 `splitK` 段, 每段交給一個不同的 CTA** 各算一份 partial sum, 最後把這些 partial 相加。 用平行度換一次額外的 reduction。
@@ -63,6 +67,10 @@ for (int w = begin; w < end; /* advance by whole tiles or partial spans */) {
 
 代價是**排程與 fix-up 邏輯明顯更複雜**: 要處理跨界 tile 的 partial 累加、決定哪個 CTA 負責寫最終結果、以及 workspace 管理。 這也是為什麼 Stream-K 幾乎只在 library (CUTLASS 的 Stream-K scheduler) 裡見到, 而不是手寫。
 
+<Callout variant="insight" title="落到真實場景: 一個 kernel 吃下所有推論 shape">
+Stream-K 在推論 serving 特別有價值, 因為線上 request 的 batch/seqlen 一直變, shape 五花八門。 Split-K 得為每種 shape 挑一個好的 `splitK`, 挑錯就有尾巴; Stream-K 按總工作量均分, 對「一大堆奇形怪狀的中小 GEMM」幾乎不用調參就能把 SM 填滿。 這也是 CUTLASS 把 Stream-K 做成一個可選 scheduler、而 hipBLASLt 等 library 內建類似機制的原因 — 讓同一份 kernel 對整個 shape 分佈都穩, 而不是每個 shape 手挑 config。
+</Callout>
+
 ## 什麼時候用哪個
 
 | 情境 | 建議 |
@@ -73,6 +81,10 @@ for (int w = begin; w < end; /* advance by whole tiles or partial spans */) {
 | 需要 bit-exact 可重現 | Split-K 走 workspace + deterministic reduction, 避開 atomic |
 
 第 6 章接著談另一組正交的 scheduling 技巧 (CTA swizzle、persistent kernel), 它們處理的是「當 tile 數**夠多**時, 怎麼排它們的順序來提高 L2 reuse」— 和本章「tile 數**不夠**時怎麼補平行度」互補。
+
+<Callout variant="insight" title="落到真實場景: 這張表其實是 library 的 heuristic">
+這張決策表不是給人查的, 它就是 cuBLAS/hipBLASLt 內部 heuristic 在做的事: runtime 拿到 `M, N, K` 先估 tile 數與 SM 數的比值, 比值遠大於 1 就走標準 tiling, 略小於整數波就開 Split-K (並挑 `splitK`), 形狀極歪就切 Stream-K。 自己寫 dispatch 時可以照抄這個邏輯: 先算 `numTiles = ceil(M/BM) * ceil(N/BN)`, 拿它和 `numSMs * ctasPerSM` 比, 再決定走哪條路。 正因為你知道每一格對應的症狀 (前面幾節), 才有辦法在 library 選錯時手動 override。
+</Callout>
 
 <LabBox path="kernels/05-advanced-scheduling">
 `kernels/05-advanced-scheduling` 下有 Split-K 與 CTA swizzle 的可執行範例。 用一個 skinny shape (例如 M=N=256, K=16384) 對比標準 tiling 與 Split-K 的 % of peak, 你會看到 Split-K 在這種形狀下把閒置的 SM 補起來的效果; 大方陣 shape 則幾乎沒差 (甚至因 reduction overhead 略降) — 這正說明 Split-K 是 shape-specific 的工具。

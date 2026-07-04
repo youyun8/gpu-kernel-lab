@@ -36,15 +36,27 @@ for (int i = 0; i < kUnroll; ++i) {
 
 一個容易忽略的細節: unroll 要真正產生 ILP, **累加器也要展開**。`for(...) sum += a[i] * b[i];` 就算展開 8 次, 8 條 FMA 仍串在同一個 `sum` 上, 彼此相依、無法重疊; 改用 `sum0..sum3` 四個獨立累加器、最後再相加, 才把相依鏈切短。 這對 latency-bound 的累加迴圈常有立竿見影的效果。
 
+<Callout variant="insight" title="落到真實場景: SAXPY 的 unroll 甜蜜點是 2~4 不是 8">
+把一支 memory-bound 的 SAXPY (`y = a*x + y`) 拿來掃 unroll factor, 你會親眼看到曲線先升後平再掉: unroll 2/4 提供夠多獨立的 load/store 把 memory latency 藏住, 時間下降; 推到 8/16 時 `-Xptxas=-v` 顯示 register 開始暴漲、occupancy 掉一級, 而 memory-bound kernel 根本不缺算術吞吐, 於是持平甚至變慢。 實務判法: 對每個 factor 記下 (時間, register 數), 時間持平但 register 開始跳的那一格就停 — 這是第 8 章「ILP 換 occupancy」的指令層版本。
+</Callout>
+
 ## FMA 與 fast math 的取捨
 
 `fmaf(a, b, c)` 把乘加合併成一條指令, 不只快一倍, 還少一次中間 rounding (精度反而更好)。 編譯器通常會自動合併, 但明確寫出可確保發生。
 
 `--use_fast_math` (nvcc) / `-ffast-math` (hipcc) 把 `sinf`、`expf`、除法等換成低精度高速版本, 並放寬 IEEE 語意。 對容忍度高的 workload (很多 DL inference) 值得, 對需要精確結果的科學計算要謹慎。 也可以細粒度控制: 用 `__expf`、`__fdividef` 等 intrinsic 只在確定安全的位置換快速版本, 而不是整個檔案一刀切。
 
+<Callout variant="warn" title="落到真實場景: 整個檔案開 --use_fast_math 炸了科學計算">
+`--use_fast_math` / `-ffast-math` 對 DL inference 常常白賺速度 (`__expf`、fast divide 的誤差在容忍範圍內), 但它是**整個 translation unit 一刀切**: 它同時把 `sqrtf`、除法換成低精度版, 還放寬了 IEEE 語意 (例如假設沒有 NaN / Inf)。 如果同一個檔案裡混了一段需要精確的 reduction 或物理模擬, 結果會悄悄漂掉、甚至因為「編譯器假設不會有 NaN」而讓你的 NaN 檢查被最佳化掉。 安全作法: 不要全域開, 只在確定安全的熱點用 `__expf`、`__fdividef` 這類 intrinsic 精準換掉那幾個算式。
+</Callout>
+
 ## Branch 與 predication
 
 短小的 if-else, 編譯器常轉成 predicated instruction (兩邊都算、依條件選結果), 沒有真正的分支, divergence 成本趨近於零。 所以「一個小小的邊界檢查」不必焦慮。 真正貴的是: 兩個分支都很長、或迴圈次數 data-dependent 且 warp 內不一致。 優化的手段是在演算法層面讓同 warp 的工作同質 (排序、分桶), 而不是硬拗語法。
+
+<Callout variant="insight" title="落到真實場景: 該擔心的 divergence 長什麼樣">
+邊界檢查 `if (i < n)` 你不用怕 — 編譯器 predicate 掉了。 真正咬人的是 data-dependent 且 warp 內不一致的分支: 例如一個 warp 裡各 token 走不同專家 (MoE)、或各 sequence 長度不同讓迴圈次數天差地遠, 這時 warp 得把每條路徑輪流跑一遍, 有效吞吐被打對折以上。 解法不在語法而在演算法: 先按 expert id / 長度排序或分桶, 讓同一個 warp 的 work 同質, 再進 kernel。 這正是 MoE dispatch、sorted-batch attention 這些前處理存在的理由。
+</Callout>
 
 ## 驗證你的假設: 看編譯器輸出
 
@@ -79,6 +91,10 @@ hipcc -O3 --save-temps kernel.cpp   # inspect the .s file
 - **Spill audit**: 每次加 unroll/vectorization 後都看 register 和 local memory load/store。
 
 例如 normalization kernel 中, `1.0f / sqrtf(var + eps)` 可先算成 `inv_std`, 再讓所有元素乘 `inv_std`; 若每個元素都做一次 sqrt/divide, 指令層級再怎麼調都浪費。
+
+<Callout variant="insight" title="落到真實場景: __restrict__ 讓 GEMM 內迴圈敢重排 load">
+一支手寫 GEMM 的內層迴圈, 加不加 `const float* __restrict__` 差很多: 沒有 restrict, 編譯器必須假設 A、B、C 可能指向重疊記憶體, 於是每次都乖乖「load → 用 → 再 load」不敢把 load 提前或合併; 標上 restrict 後它才敢一次預抓多筆、把 address 計算提到迴圈外、暴露更多 ILP。 看 SASS 或 `-Xptxas=-v` 就能驗證: 加了之後 load 指令被重排、甚至 register 用量下降。 這是「只要你確定指標不重疊就零風險」、該預設加上的一行。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 `vectorized_copy` 比較 scalar 與 float4 版本的 achieved bandwidth;`saxpy_unroll` 展示不同 unroll factor 對 SAXPY 的影響 (含 register 使用與 occupancy 變化)。 跑跑看, 找出你的硬體上 unroll 的甜蜜點 — 你會發現不是越多越好。

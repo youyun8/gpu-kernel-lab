@@ -22,6 +22,10 @@ ext = load(
 
 ROCm 環境下同一套流程可用: PyTorch 的 cpp_extension 會自動把 `.cu` 交給 hipify 轉換再用 hipcc 編譯, 多數「不含 NVIDIA 特有 intrinsic」的 kernel 原始碼一份就能兩邊跑。
 
+<Callout variant="insight" title="落到真實場景: 用 load_inline 在 notebook 裡三分鐘試一個 idea">
+你在 Jupyter 上讀 profiler trace, 懷疑某個 activation 的 elementwise 版本可以更快, 但還不確定值不值得開一個正式 extension 專案。 這時 `load_inline` 就是對的工具: 把 CUDA 原始碼當成 Python 字串貼進 cell, 一跑就編譯載入, 直接對 `torch.nn.functional` 的版本比對數值與計時, 全程不離開 notebook。 驗證有收益之後, 再把同一份 `.cu` 抽成獨立檔案、配 `setup.py` 走正式 build — 這時你要的是可打包、可指定 arch flags、可進 CI 的結構。 選錯工具的代價很實際: 拿 `load_inline` 做 production 打包會每次 import 都重編 (冷啟動數十秒), 拿 setup.py 做快速實驗則是把三分鐘的事變成十分鐘。
+</Callout>
+
 ## 正確處理 tensor: 五個必檢項
 
 <Callout variant="warn" title="上 kernel 前必做的檢查">
@@ -74,6 +78,10 @@ AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
 
 半精度的計算慣例: 以 half 讀寫、內部升到 float 累加 (`static_cast<float>`), 兼顧頻寬與精度 — 這也是大多數官方 kernel 的做法。
 
+<Callout variant="warn" title="落到真實場景: bf16 模型送進只寫死 float 的 kernel">
+你的 GELU extension 在單元測試 (fp32) 全綠, 掛進一個 bf16 混合精度訓練後卻 `RuntimeError: expected scalar type Float but found BFloat16` — 因為 autocast 把輸入變成了 bf16, 而你的 `TORCH_CHECK(x.scalar_type() == at::kFloat)` 直接擋下。 如果你圖省事把 check 拿掉、用 `data_ptr<float>()` 硬讀 bf16 buffer, 那更糟: 不報錯但每個元素的 bit pattern 被當成 float 解讀, 算出滿屏 NaN。 正解就是這節的 `AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, ...)`, 讓 compiler 為 half/bf16 各實例化一份 template, 內部再升 float 累加。 真實 kernel 幾乎都是這樣: 支援哪些 dtype 是設計決定, 不能靠「測試時剛好都是 fp32」蒙混。
+</Callout>
+
 ## 支援 Backward: Autograd Function
 
 要讓 custom op 能被訓練, 必須提供 backward。 用 `torch.autograd.Function` 包住 forward/backward:
@@ -97,12 +105,20 @@ class GeluFn(torch.autograd.Function):
 
 `gradcheck` 用數值微分驗證你的 backward — custom autograd 最容易錯的地方, 務必跑。 注意它要求 double precision 輸入 (數值微分在 fp32 下誤差太大), 所以 kernel 若只支援 fp32, 就先用上一節的 dispatch 補上 double, 或對小輸入用 CPU reference 交叉驗證。
 
+<Callout variant="warn" title="落到真實場景: backward 漏了 chain rule, loss 看起來還在降">
+custom autograd 最陰險的 bug: 你的 GELU backward 寫成 `return grad_gelu(x)`, 忘了乘上傳進來的 `grad_out` (chain rule 的上游梯度)。 forward 完全正確、loss 一開始也真的在降 (因為梯度方向大致對), 所以你以為沒事 — 直到訓練後期收斂到比 baseline 差、或換個 loss scale 就發散, 才驚覺梯度大小一直是錯的。 這種 bug 靠盯著 loss 曲線幾乎抓不到。 `torch.autograd.gradcheck(GeluFn.apply, (x.double().requires_grad_(),))` 會在幾秒內把它逼出來: 數值梯度和你的解析梯度差一個 `grad_out` 的倍數, 立刻 assert 失敗。 這就是為什麼「務必跑 gradcheck」不是形式 — 它是唯一能在訓練前抓到梯度量級錯誤的關卡。
+</Callout>
+
 ## Debug 心法
 
 - **結果錯但不 crash**: 九成是 contiguity 或 dtype — 用非連續輸入 (`x.t()`) 和各 dtype 寫測試逐一排除。
 - **偶發 crash 或錯值**: 常是 stream 問題 (沒用 current stream) 或缺同步;`CUDA_LAUNCH_BLOCKING=1` 讓錯誤在發生點立刻浮現。
 - **越界**: `compute-sanitizer python test.py` 直接指出出錯的 kernel 與位址。
 - **對照組**: 每個 custom op 都該有一個「純 PyTorch 慢速參考實作」, 測試時比對 — 這是你未來改 kernel 時的安全網。
+
+<Callout variant="insight" title="落到真實場景: 用 x.t() 一秒抓出 contiguity bug">
+最常見的「結果錯但不 crash」現場: 你的 kernel 在 benchmark 裡都對, 一接進真實模型就算錯 — 因為模型傳進來的常是某個 `weight.t()` 或 `view` 出來的非連續 tensor, 而你直接 `data_ptr` 線性索引, 讀到的是轉置前的記憶體佈局。 把它變成一行測試: `ref = pytorch_reference(x.t()); out = my_op(x.t()); assert torch.allclose(out, ref)`。 如果這行掛了但 `x` 連續時沒事, 病因就鎖定在 contiguity。 修法二選一: kernel 裡 `x = x.contiguous()` (簡單, 多一次 copy), 或讓 kernel 讀 stride 正確處理非連續 (快, 但要小心)。 這個 `x.t()` 測試應該是你每個 elementwise op 測試矩陣的固定一列 — 它抓到的 bug 佔了 custom kernel 翻車的一大半。
+</Callout>
 
 ## Extension Hardening Checklist
 

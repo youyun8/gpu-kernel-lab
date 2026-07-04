@@ -27,6 +27,10 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int 
 
 每個 output 讀 $2K$ 個 float (8K bytes)、只做 $2K$ 個 FLOP, arithmetic intensity ≈ $2K / 8K = 0.25$ FLOP/byte。 對照 roofline 的 ridge point (現代 GPU 常在 10–100+ FLOP/byte), 0.25 牢牢卡在 bandwidth roof 的最左邊 — 再多 SM 也沒用, 因為 DRAM 餵不動。
 
+<Callout variant="warn" title="落到真實場景: 自己寫的 matmul 只有 cuBLAS 的 3%">
+第一次幫 LLaMA-7B 的 FFN 手寫 CUDA GEMM (shape `M=4096, N=11008, K=4096`) 幾乎都長這樣: 一個 thread 算一個 output、跑一圈 K-loop。 跑出來大概是 cuBLAS 的 2–5%, 而 `ncu` 會直接告訴你原因 — `dram__throughput.avg.pct_of_peak_sustained_elapsed` 貼到 90% 以上, 但 `sm__pipe_fma_cycles_active` 只有個位數百分比。 這不是「kernel 沒調好」, 而是 arithmetic intensity ≈ 0.25 這個死結: 卡在 bandwidth roof, 再怎麼加 thread 都沒用。 後面每一章都是在拆這個結。
+</Callout>
+
 ## Reuse 是唯一的解藥
 
 同一筆 $A_{row,p}$ 會被 $C$ 的一整列用到 ($N$ 次), 同一筆 $B_{p,col}$ 會被一整行用到 ($M$ 次)。 Naive kernel 卻每次都重新從 global memory 讀 — reuse factor = 1。 只要讓一筆 load 被重複使用 $R$ 次, 有效 arithmetic intensity 就乘上 $R$, global traffic 就除以 $R$。
@@ -40,6 +44,10 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int 
 - **Tensor Core / MFMA (第 4 章)**: 換更快的 compute 引擎, 前提是已經不再 memory-bound。
 - **Split-K / Stream-K (第 5 章)** 與 **scheduling (第 6 章)**: 當形狀怪、tile 數不足時, 換一種平行化維度把 SM 填滿。
 - **Epilogue / low precision / autotuning (第 7 章)**: 收尾與跨形狀的自動化。
+
+<Callout variant="insight" title="落到真實場景: FFN 權重被整個 batch 重複用 M 次">
+把 reuse factor 對到 transformer 的 FFN 就很具體: 權重 `B` (`11008×4096`) 對一次 forward 是固定的, 而 `A` 的 M 維是 batch×seqlen — 例如 32 個序列、每個 512 token, `M=16384`。 理想上每個 `B` 元素應該被這 16384 個 token 重複用, 一次 load 攤到上萬次 FMA。 naive kernel 卻每算一個 output 就重讀一次 `B`, 等於把這上萬倍的 reuse 全丟掉。 tiling 要做的, 就是把「同一塊 `B` tile 留在 shared memory / register, 讓一整批 token 掃過它」這件事實作出來。
+</Callout>
 
 ## 優化階梯的全景
 
@@ -58,6 +66,10 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int 
 
 <Callout variant="warn" title="tuning 的順序很重要">
 先讓 global load/store coalesced, 再確保 tile reuse 足夠, 接著調 register tile 與 pipeline stage 數, 最後才碰 Tensor Core/MFMA 與 epilogue fusion。 若還沒爬過 ridge point 就直接上 MMA, 只會讓更快的 compute pipe 空等 memory。
+</Callout>
+
+<Callout variant="insight" title="落到真實場景: 用 profiler 決定下一步爬哪一階">
+實務上別用猜的決定跳哪一階。 每寫完一版就跑 `ncu`: 若 `dram__throughput` 仍接近 100%, 你還在第 1 階 (tiling 沒吃夠 reuse); 若 memory 降下來、`sm__pipe_fma_cycles_active` 拉高但 stall 卡在 `long scoreboard`, 該上第 4 階 (double buffering / cp.async); 若 pipe 使用率低又看到 tail、achieved occupancy 掉, 才輪到第 5、6 章的 Split-K 與 scheduling。 這張表不是線性的教學順序, 而是一份「症狀 → 下一步」的查詢表。
 </Callout>
 
 <LabBox path="kernels/03-gemm">

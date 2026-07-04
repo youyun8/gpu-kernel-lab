@@ -12,6 +12,10 @@
 
 Persistent kernel 的代價是你必須自己管理 queue、termination、fairness 與 memory ordering。 它不是預設選項, 但在 tail effect 嚴重時很有力。
 
+<Callout variant="insight" title="落到真實場景: MoE 的 expert 大小極度不均">
+「工作不均」在 MoE 推論裡是常態而非例外。 top-k gating 之後, 熱門 expert 可能分到幾千個 token, 冷門 expert 只有個位數, 於是若你用 static grid「一個 expert 一組 block」, 算熱門 expert 的 SM 還在忙、算冷門 expert 的 SM 早就閒置, 尾端只剩少數 block 在拖。 persistent kernel 把所有 expert 的 tile 丟進一個 work queue, 常駐的 block 做完手上的就再去領下一個, 先做完的 SM 自動去啃還沒做完的工作 — tail latency 明顯收斂。 這也是為什麼 grouped-GEMM/MoE kernel 幾乎都採 persistent + tile scheduler 的結構, 而不是天真地一個 expert 一個 launch。
+</Callout>
+
 ## Grid-Stride Loop 到 Work Queue
 
 Grid-stride loop 是最簡單的 persistent 思維: thread 在同一個 kernel 中處理多筆資料。 Work queue 則把靜態 stride 改成動態取號:
@@ -28,6 +32,10 @@ __global__ void persistentTiles(const Task* tasks, int num_tasks, float* out) {
 ```
 
 這段程式只適合 task 成本差異很大時。 若每個 task 成本均一, `atomicAdd` 取號反而只是額外 overhead。
+
+<Callout variant="warn" title="落到真實場景: 對 elementwise kernel 硬套 work queue">
+這個「成本均一就別用取號」的提醒是實務上最常被無視的一條。 有人讀完 persistent kernel 很興奮, 回頭把一個純 elementwise 的 `y = gelu(x)` kernel 也改成 global counter 取號, 結果每個 thread 只做一點點運算卻要先搶一次 `atomicAdd(&g_next_task, 1)` — 這個對單一 global 地址的序列化 atomic 直接變成新瓶頸, 比原本的 static grid-stride loop 還慢。 判準很簡單: task 成本差異大、有 tail effect 才值得動態取號; 成本均一的 regular workload 就老老實實用 grid-stride loop, 讓 index 由 `blockIdx * blockDim + threadIdx` 靜態算出, 零同步成本。
+</Callout>
 
 ## Launch Sizing
 
@@ -71,6 +79,10 @@ GEMM 中 persistent scheduling 常用來處理小矩陣、skinny 矩陣或 batch
 
 這些技巧的共同點是: 不再相信二維 grid 天然均衡, 而是把「下一個 tile 是誰」變成可設計的 scheduler。
 
+<Callout variant="insight" title="落到真實場景: batch=1 decode 的 skinny GEMM 塞不滿 GPU">
+Stream-K 最能發揮的地方就是 LLM decode: batch=1 時 QKV/MLP 的 GEMM 退化成 `M=1` 的 GEMV, output tile 數量遠少於 H100 的 132 個 SM, 用傳統 tile-per-CTA 的排程會有一大半 SM 完全沒分到 tile、GPU 利用率個位數。 Stream-K 換個切法: 把 K 維的工作切成連續 stream 攤給所有 SM, 再把各 SM 算出的 partial 用一次 reduce 合併, 讓每個 SM 尾端都還有事做。 這就是 CUTLASS 為什麼在小/skinny 形狀預設偏好 Stream-K scheduler (第 13、22 章), 也是 decode-heavy serving 能榨出額外吞吐的關鍵之一。
+</Callout>
+
 ## Producer-Consumer Queue
 
 動態 queue 要處理三件事:
@@ -81,6 +93,10 @@ GEMM 中 persistent scheduling 常用來處理小矩陣、skinny 矩陣或 batch
 
 若問題可以拆成幾個固定階段, 多個 kernel launch 加上 CUDA Graph/HIP Graph 往往更簡單且更可靠。 Persistent queue 留給真正需要單 kernel 動態排程的情況。
 
+<Callout variant="warn" title="落到真實場景: 少一個 fence 換來間歇性錯誤結果">
+producer-consumer queue 的 ordering 要求是最容易寫出「跑一百次對九十九次」bug 的地方。 典型場景: producer block 把一個 task 的 payload 寫進 ring buffer, 然後 `atomicAdd` 更新 tail index 讓 consumer 知道有新工作。 如果你只做 atomic 更新 index 卻少了 payload 寫入與 index 發布之間的 `__threadfence()`, 在弱記憶體模型的 GPU 上, consumer 可能先看到新的 index、卻讀到還沒寫完的舊 payload — 結果偶發性地算錯, 而且在你自己機器上還常常剛好對。 修法是嚴格的 release/acquire: producer 先寫 payload、`__threadfence()`、再 publish index; 這種東西自己刻很難刻對, 能用 cooperative groups 或成熟 library 就別自己造。
+</Callout>
+
 ## Occupancy 不再只是越高越好
 
 Persistent kernel 常用較少 blocks 長時間常駐, 因此要更注意:
@@ -89,6 +105,10 @@ Persistent kernel 常用較少 blocks 長時間常駐, 因此要更注意:
 - 不要讓一個長 task 佔住整個 block 太久, 導致 block 內其他 threads 閒置。
 - 若使用 spin wait, 要插入 backoff 或拆階段, 避免整張 GPU 忙等。
 - Watchdog 環境下長 kernel 可能被 OS 終止, 開發機上尤其要小心。
+
+<Callout variant="warn" title="落到真實場景: 桌機上跑到一半螢幕黑一下、kernel 掛了">
+這個 watchdog 陷阱在開發機上真的會咬你。 你在一張同時接著螢幕的 GPU (Windows 的 TDR 或 Linux 桌面) 上寫 persistent kernel debug, 一個 block 在 spin wait 等 queue 一直不退出, 或某個 task 意外跑了好幾秒 — 作業系統的 display watchdog 判定 GPU 沒回應, 直接 reset driver, 你看到螢幕閃一下, kernel 回傳 `unspecified launch failure` 或 timeout error。 這不是你的邏輯錯, 是 persistent kernel 常駐太久踩到 GUI 的 timeout。 對策是: 開發時用不接顯示的運算卡, spin wait 一定加 backoff 並設迭代上限, 或把長工作拆階段; production 的無頭伺服器通常沒這問題, 但別在有桌面的機器上驗證常駐 kernel。
+</Callout>
 
 <LabBox path="kernels/05-advanced-scheduling">
 以 `split_k_gemm.cpp` 和 `cta_swizzle.cpp` 為起點, 加一個 persistent tile scheduler: 固定啟動 `SM_count × 2` 個 CTAs, 用 global counter 分配 tile。 比較規則 shape、skinny shape、batch shape 不均三種情況的 tail latency。

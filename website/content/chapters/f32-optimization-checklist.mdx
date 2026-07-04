@@ -12,6 +12,10 @@
 
 若答案是否定的, 先回第 17、28、31 章。 錯的目標會讓所有 micro-optimization 失去意義。
 
+<Callout variant="warn" title="落到真實場景: 花一週優化了 5% 的 kernel">
+你盯著 Nsight 把某個 elementwise kernel 從 200us 榨到 120us, 開心地 merge, 結果 end-to-end 訓練速度動都沒動。 一 profile 整條 timeline 才發現這個 kernel 只佔 step 時間的 5%, 真正的瓶頸是 dataloader 在 CPU 上塞住、GPU 有 40% 時間在等 H2D copy。 這就是 Amdahl 定律的現場: 優化不在 critical path 上的東西, 上限就是那 5%。 所以 Step 1 永遠先做 — 用 Nsight Systems 看整條 timeline 找出真正吃時間的區段 (kernel? copy? launch gap? CPU?), 再決定要不要碰某個 kernel。
+</Callout>
+
 ## Step 2: 判斷瓶頸類型
 
 | 症狀 | 優先技巧 |
@@ -26,6 +30,10 @@
 | Launch overhead 高 | Fusion、CUDA/HIP Graphs、persistent kernel |
 | Copy engine idle 或 copy/compute 串行 | Pinned memory、streams、double buffering |
 
+<Callout variant="insight" title="落到真實場景: 用 SpeedOfLight 一眼定位這張表">
+這張表的入口就是 Nsight Compute 的 `--section SpeedOfLight`: 它同時給你 Compute (SM) 和 Memory 兩個 throughput 百分比。 若看到 Memory 80%+ 而 Compute 30%, 你就落在第一列 (bandwidth-bound) — 去查 coalescing、fusion、tiling; 若兩者都低但 `stall long scoreboard` 很高, 是在等 HBM latency, 落在第二列 — 加 occupancy/ILP 或 prefetch。 換句話說先讓 profiler 告訴你在哪一列, 再從對應的右欄選技巧, 不要憑感覺套。 一個常見誤判是看到 SM 不高就以為要加算力, 其實是 memory stall 讓 SM 閒著 — 這兩者的解法完全相反。
+</Callout>
+
 ## Step 3: Memory 技巧
 
 - Coalesced global load/store。
@@ -39,6 +47,10 @@
 - Cache hint / eviction policy 在資料重用距離明確時才使用。
 - Compress / quantize 降低 bandwidth, 但要計入 scale metadata。
 
+<Callout variant="insight" title="落到真實場景: embedding gather 的 AoS 改 SoA">
+推薦系統的 feature interaction kernel 常要對一堆 embedding 做 gather, 若 embedding 存成 `struct { float vec[128]; int id; float norm; }` 的 AoS, 每個 warp 讀 128 維向量時會把用不到的 `id/norm` 也拖進 cache line, 有效 bandwidth 直接打折。 改成 SoA — 向量一塊連續 buffer、metadata 另一塊 — 讓 warp 的 32 個 thread 讀出連續的 128 bytes, 剛好 coalesce 成整段 transaction。 再配 `float4` vectorized load, 一次搬 16 bytes, transaction 數再減 4 倍。 這正是這一列「coalescing + SoA + vectorized access」三招疊起來的典型 memory-bound 修法。
+</Callout>
+
 ## Step 4: Execution 技巧
 
 - 選 block size 讓 active warps 足以隱藏 latency。
@@ -49,6 +61,10 @@
 - 減少 branch divergence, 或改成 predication / data partition。
 - Warp-level primitive 取代 shared memory 小範圍溝通。
 - Cooperative groups 用於明確表達 tile/warp/block scope。
+
+<Callout variant="insight" title="落到真實場景: 用多 accumulator 補 occupancy 不足">
+一個 register tiling 的 GEMM 每 thread 要 8x8 個 accumulator, register 用很兇, occupancy 只剩 25%, 直覺以為 latency 藏不住會慢。 但實際上它反而快 — 因為每個 thread 手上有 64 個獨立的 FMA 鏈, ILP 高到單靠 in-flight instruction 就把 memory/pipeline latency 蓋掉了, 不需要靠大量 warp 切換。 這就是這一列「用 ILP 補 occupancy 不足: 多 accumulator、多 independent load」的實例: occupancy 不是越高越好, 低 occupancy + 高 ILP 常常勝過高 occupancy + register spill。 判準還是回 profiler — 看 `eligible warps per cycle` 和有沒有 spill, 而不是只盯著 occupancy 數字。
+</Callout>
 
 ## Step 5: Algorithm 技巧
 
@@ -62,6 +78,10 @@
 - Work decomposition: persistent scheduler、work stealing、CTA swizzle。
 - Precompute / prepack static data。
 - Fusion / fission: 根據 memory traffic、register pressure 和 reuse 決定。
+
+<Callout variant="insight" title="落到真實場景: FlashAttention 是這一列的組合技">
+FlashAttention 幾乎把這一列的招式全用上了: 它不 materialize 完整的 `S = QK^T` attention matrix (那是 O(seqlen²) 的 HBM traffic), 而是 tile 過 K/V, 用 online softmax (streaming normalizer) 邊掃邊更新 running max 與 sum, 把 softmax 和兩次 matmul fuse 進一個 kernel。 效果是把原本 memory-bound 的 attention 變成 compute-bound、HBM traffic 從 O(N²) 降到 O(N), 長序列下數倍加速。 這說明「Algorithm 技巧」通常不是單點, 而是 tiling + fusion + online reduction 一起改寫資料流 — 當你發現某個 op 的中間結果大到塞爆 HBM, 就該想能不能用 streaming 的方式 fuse 掉它。
+</Callout>
 
 ## Step 6: Numerics 與資料型別
 

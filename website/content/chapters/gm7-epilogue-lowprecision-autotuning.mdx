@@ -42,6 +42,10 @@ float deq   = acc * (aScale[row] * bScale[col]);   // dequant
 int8_t q    = quantize(deq * outInvScale);         // requant for the next layer
 ```
 
+<Callout variant="insight" title="落到真實場景: H100 上 fp8 訓練的 per-block scaling">
+scale 粒度不是理論選項, 它直接決定精度撐不撐得住。 H100 fp8 (e4m3) 訓練之所以可行, 關鍵就是不用 per-tensor 一個 scalar, 而是 per-block scaling — 例如每 `128×128` 的 block 各自一個 scale, 讓少數 outlier channel 不會把整個 tensor 的 scale 拉爛。 代價正是這段 epilogue: 每個 output block 都要 load 對應的 A/B scale 相乘, GEMM 的瓶頸從 MMA pipe 挪到 scale load 與 dequant。 這也是為什麼 fp8 kernel 的 epilogue 遠比 fp16 複雜, 且 correctness check 一定要用相對 tolerance、盯著 outlier channel 看。
+</Callout>
+
 ## Autotuning 與 Shape Specialization
 
 到這裡累積了一大堆旋鈕: tile 尺寸 (BM/BN/BK)、register tile (TM/TN)、pipeline stage 數、swizzle 因數、split-K 段數、vector width… 這些的最佳組合**強烈依賴 GPU 型號與矩陣形狀**, 沒有單一最佳 kernel。 這就是為什麼 cuBLAS/hipBLASLt 內含成千上萬個 kernel 變體。
@@ -70,6 +74,10 @@ int8_t q    = quantize(deq * outInvScale);         // requant for the next layer
 | 7 | Epilogue fusion 省尾端 traffic, 量化換吞吐, autotuning 收束所有旋鈕 |
 
 一句話收尾: **先讓 load coalesced, 再確保 tile reuse, 接著調 register tile 與 pipeline, 然後才碰 MMA 與 epilogue fusion; shape 歪就上 Split-K/Stream-K, 最後用 autotuning 把旋鈕鎖死。**
+
+<Callout variant="insight" title="落到真實場景: 把整條 track 用在一個 LLM 推論 GEMM">
+把七章串起來看一個 LLaMA FFN 推論 GEMM 的優化路徑: 先 tiling + double buffering 讓它不再 memory-bound (1–3 章), 換 bf16 MMA 吃 Tensor Core (第 4 章), decode 階段 batch 小就切 Split-K 補 occupancy (第 5 章), prefill 階段 tile 多就上 swizzle + persistent 提 L2 與負載平衡 (第 6 章), 最後把 dequant + SwiGLU 融進 epilogue、並用 autotuning 對每種 batch/seqlen 挑好 config (第 7 章)。 真正的 hipBLASLt/cuBLASLt 就是這條路徑的自動化與工業化 — 這門課讓你在它選錯、或你要客製 epilogue 時, 有能力自己接手。
+</Callout>
 
 <LabBox path="kernels/03-gemm">
 `kernels/03-gemm` 的 quantized epilogue 與 autotuning 範例對應本章。 試著在 `sgemm` 階梯上加一個 fused bias+ReLU epilogue, 量測相對「分離 elementwise kernel」的 end-to-end 節省; 再用 `scripts/bench_all.py` 掃幾組 tile 尺寸, 親眼看到不同 shape 的最佳 config 並不相同。

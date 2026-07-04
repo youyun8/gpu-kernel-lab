@@ -19,6 +19,10 @@ float v = x[threadIdx.x * stride + blockIdx.x];  // often uncoalesced
 
 CPU 也有同樣問題, 只是表現為 cache line waste 與 prefetch 失效。
 
+<Callout variant="warn" title="落到真實場景: transpose kernel 的讀或寫必有一邊 uncoalesced">
+Coalescing 最痛的實例是 matrix transpose: `out[x][y] = in[y][x]`。 不管怎麼寫, 讀連續就寫跳躍、寫連續就讀跳躍 — 總有一邊的 warp 落在 32 個不同 segment, 有效 bandwidth 掉一個數量級。 這正是 Track 的 `transpose` lab 要你親眼看到的: naive transpose 的 achieved bandwidth 遠低於 copy。 標準解法是 shared memory tiling: 一個 block 先把一小塊 tile 用 coalesced 方式讀進 shared memory, 在片上完成轉置, 再用 coalesced 方式寫回 — 讓 DRAM 兩邊都連續, 跳躍只發生在快速的 on-chip SRAM。 幾乎所有需要「換維度」的 kernel (transpose、NCHW/NHWC 轉換、attention 的 K 轉置) 都用這招。
+</Callout>
+
 ## Tiling
 
 Tiling 把 global memory 的一小塊搬到 shared memory/LDS 或 cache-friendly working set, 然後重複使用。
@@ -35,6 +39,10 @@ float local = tile[(threadIdx.x + 1) & 255] - tile[threadIdx.x];
 
 GEMM 的 tiling 更典型: A tile 和 B tile 各從 DRAM 載入一次, 被 tile 內許多 multiply-add 重用, AI 因此大幅提高。
 
+<Callout variant="insight" title="落到真實場景: tile size 就是 AI 與 occupancy 的旋鈕">
+GEMM tiling 的 tile size 不是隨便選, 它是「reuse 換 on-chip 資源」的直接旋鈕, 每個 GPU BLAS library (cuBLAS、CUTLASS、rocBLAS) 都對不同 shape 準備了一堆 tuned tile 配置。 直覺是: 一個 `BM x BK` 與 `BK x BN` 的 tile 從 DRAM 載入一次, 貢獻 `BM x BN x BK` 次 multiply-add, 所以 tile 越大、每 byte 被重用越多次、AI 越高、越往 compute-bound 推。 但 tile 一大, shared memory 與 register 用量跟著漲, resident block 變少、occupancy 下降。 這就是為什麼小 matrix 適合小 tile (保 occupancy)、大 matrix 適合大 tile (衝 AI), 也是 library 要 autotune 的原因。 自己寫 tiled GEMM 時, 掃 tile size 畫出效能曲線, 練的就是這個取捨。
+</Callout>
+
 ## Bank Conflicts
 
 Shared memory/LDS 是多 bank SRAM。 如果一個 warp 的多個 lanes 同時打同一個 bank 的不同地址, access 會序列化。
@@ -45,6 +53,10 @@ __shared__ float tile[32][33];  // +1 avoids column-wise bank conflicts
 ```
 
 Padding 的成本是多用一點 SRAM; 收益是避免 bank conflict 讓 shared memory 退化。
+
+<Callout variant="warn" title="落到真實場景: profiler 說 shared memory 慢, 十之八九是 bank conflict">
+Bank conflict 是那種「程式對、就是莫名慢」的效能 bug, 通常靠 profiler 才抓得到。 Nsight Compute 會直接報 shared memory 的 bank conflict 數或 `wavefronts per request` 大於 1; 一旦看到, 十之八九是某個 warp 的 lane 沿 column 存取 `tile[tid][col]` 這種 stride 剛好是 32 (bank 數) 的倍數, 32 個 lane 全打到同一個 bank, 硬體被迫序列化成 32 次。 最常出現在 transpose 與 reduction 的 shared memory buffer。 修法就是上面的 padding trick (`[32][33]` 而非 `[32][32]`), 多一欄讓每列錯開一個 bank, 32-way conflict 直接消失。 代價只是每 block 多幾百 bytes shared memory, 幾乎總是划算。
+</Callout>
 
 ## Data Layout
 
@@ -63,6 +75,10 @@ struct Particles { float* x; float* y; float* z; float* mass; };
 float x = particles.x[i];  // lanes read contiguous floats
 ```
 
+<Callout variant="insight" title="落到真實場景: 粒子/N-body 與推薦系統的 SoA 重排">
+AoS 轉 SoA 是 GPU 移植常見的第一步結構改動。 N-body / 分子動力學 kernel 通常一次只更新某幾個 field (例如積分位置時大量讀 `x, y, z`、少碰 `mass`), AoS 下 lane 之間相隔整個 struct, 讀 `x` 就是上面說的 uncoalesced; 拆成 SoA 後每個 field 各自連續, 存取立刻 coalesced。 推薦系統的 embedding、圖神經網路的 node feature 也一樣, 都偏好 SoA / column 存法。 實務提醒: 不必全域 SoA, 常用「hot field 走 SoA, 冷 field 留在一起」的折衷; 而且轉換本身有成本, 若資料只用一次, 為了 coalescing 先 transpose 一輪不一定划算 — 要放進整體 traffic 一起算。
+</Callout>
+
 ## CPU Cache Blocking
 
 CPU matrix multiply 也靠 blocking:
@@ -78,6 +94,10 @@ for (int ii = 0; ii < n; ii += B)
 ```
 
 目標是讓 A/B/C 的 active block 放進 cache, 減少 DRAM reload。
+
+<Callout variant="insight" title="落到真實場景: block size 對著 L1/L2 容量選">
+CPU cache blocking 的 `B` 不是憑感覺, 是對著 cache 容量算出來的。 三個 `B x B` 的 double block (A、B、C) 要能同時塞進 L1/L2: 若目標 L1 是 32 KiB, 三塊 `B x B` 的 double 共 `3 * B^2 * 8` bytes 要小於它, 解出 `B` 約 36, 實務上取 32 或 48 這種對齊值。 選對了, 內層迴圈的 A/B/C 都命中 cache, 一份資料被 `B` 次乘加重用才被踢出; 選太大就溢出 cache、退回反覆打 DRAM, 選太小則 reuse 不足、blocking 白做。 這和 GPU 選 tile size 對著 shared memory 容量是同一個思路, 只是一邊看 L1/L2、一邊看 shared memory/register。 真實的 BLAS (OpenBLAS、MKL) 甚至為 L1/L2/L3 做多層 blocking。
+</Callout>
 
 ## Optimization Order
 

@@ -24,6 +24,10 @@
 
 **L1 / L2 cache** 由硬體自動管理。 L1 每 SM/CU 一份; L2 全晶片共用, 對於有 locality 的存取 (例如 GEMM 的 tile、CTA swizzling 帶來的 reuse) 特別重要。 近代 GPU 的 L2 已經到數十 MB (H100 為 50 MB, MI300X 甚至外加 256 MB 的 Infinity Cache), 「讓工作集落在 L2」本身就是一種優化策略。
 
+<Callout variant="warn" title="落到真實場景: register spill 讓一個 fused kernel 慢一倍">
+Register spill 是寫「大 fused kernel」時的隱形殺手。 情境很典型: 你為了省 HBM 來回而把 attention 或一個大 elementwise chain 全塞進一個 kernel, 累加器 (accumulator)、中間變數、迴圈展開後的暫存全要 register — 一超過每 thread 上限 (Ampere/Hopper 是 255), 編譯器就 spill 到 local memory, 而 local memory 實體住在 HBM。 病徵是: 你以為省了 memory traffic, profiler 卻顯示 `local_load`/`local_store` 爆量, kernel 反而變慢。 這在 Triton 裡表現為 autotuner 選了太大的 `BLOCK_M/BLOCK_N`; 在 nvcc 下可看 `-Xptxas -v` 印出的 `spill stores/loads` 是否非零。 解法: 縮小 tile、拆成多階段、或用 `__launch_bounds__` 提示編譯器省著用 register。
+</Callout>
+
 **Global memory (HBM)** 容量最大、latency 最高。 它的有效頻寬高度依賴 memory coalescing (第 6 章)。 理論頻寬算法:
 
 $$
@@ -55,6 +59,10 @@ std::printf("  pinned:   %6.1f GB/s\n", copyGbPerSec(dev, pinned, kBytes));
 Lab 的 `pinned_vs_pageable` 用 256 MiB 的 H2D copy 實測兩者。 Pinned 通常快 1.5–3 倍, 而且只有它能真正非同步 — pageable copy 即使呼叫 `cudaMemcpyAsync` 也會退化成同步行為 (第 28 章)。
 
 另外還有 **unified memory** (`cudaMallocManaged`): 讓 host/device 共用一個指標, 由驅動自動搬頁。 原型開發方便, 但效能敏感的程式仍偏好顯式管理 — 你比 page-fault 機制更清楚資料何時在哪。
+
+<Callout variant="insight" title="落到真實場景: 為什麼大模型要做 activation offload 與 prefetch">
+「PCIe 比 HBM 慢 50 倍」這件事, 在訓練放不下的大模型時會被逼到極限。 當 model + optimizer state + activation 超過 80 GB HBM, 框架 (DeepSpeed ZeRO-Offload、PyTorch FSDP CPU offload) 會把部分 optimizer state 或 activation 暫存回 host DRAM, 需要時再搬回來。 因為 PCIe Gen4 x16 只有 ~32 GB/s, 搬 16 GB 的 state 就要半秒 — 若同步等它, GPU 全程發呆。 所以這些系統一定用 pinned buffer + `cudaMemcpyAsync` + 獨立 stream, 把「下一層的搬入」和「這一層的 compute」重疊 (prefetch), 讓 PCIe 傳輸藏在計算後面。 unified memory 的自動 page fault 在這種場景通常太慢又不可控, 因此 production 幾乎都手動管理搬運時機。
+</Callout>
 
 ## 把階層讀成一張優化地圖
 
@@ -97,6 +105,10 @@ __global__ void boxFilterShared(const float* in, float* out, int n) {
 ```
 
 每個 input 元素從 global memory 只被搬一次, 之後的 17 次讀取全部發生在便宜的 shared memory — 這就是「把熱資料往上搬」的最小完整範例 (完整程式在 `kernels/02-memory/access-patterns/cooperative_tile_load.cpp`)。
+
+<Callout variant="insight" title="落到真實場景: KV cache 的 placement 決策">
+「這筆資料該住哪一層」在 LLM 推論裡是一個天天要拍板的系統設計題, 對象是 KV cache。 每一層、每個 head 的 K/V 隨序列增長, 一個長 context 的 request 可能吃掉數 GB — 它太大, 放不進 shared memory 或 register, 只能待在 HBM。 於是優化重點變成 placement 的另一面: 用 paged KV cache (vLLM 的 PagedAttention) 把它切成固定大小的 block 管理, 減少碎片; 用 quantization (KV cache FP8/INT8) 直接砍掉一半 bytes; decode 時再把當前 tile 拉進 shared memory 做 attention。 這正是本節「最快的記憶體若造成 spill 就變最慢」的推論: 硬把整個 KV cache 往上搬不可能, 真正的槓桿是減少它的 bytes 與提高 L2/HBM 的存取效率。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 執行 `bandwidth_probe`: 它對不同大小的 buffer 做 streaming copy, 量測 achieved bandwidth。 小 buffer 會落在 cache 內 (看起來超過 HBM 頻寬), 大 buffer 才反映真實 HBM 頻寬 — 這個實驗讓你「看見」cache 與 global memory 的分界。 接著跑 `pinned_vs_pageable`, 量出 host↔device 這一層的 pinned/pageable 差距。

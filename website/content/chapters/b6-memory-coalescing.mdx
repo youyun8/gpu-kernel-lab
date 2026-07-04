@@ -22,6 +22,10 @@ $$
 
 把 stride 從 1 拉到 2, 你會看到 transaction 數量翻倍、efficiency 掉到 50%。 這正是 AoS (array of structs) 常見的陷阱。
 
+<Callout variant="insight" title="落到真實場景: 為什麼 CNN 幾乎都改用 NHWC">
+「warp 要什麼就把資料排成什麼」這條原則, 在卷積網路上的化身就是 NCHW vs NHWC 之爭。 傳統 NCHW (channel 在外) 讓一個 warp 沿 channel 方向存取時 stride = `H*W`, 嚴重 uncoalesced; NHWC (channel 在最內) 讓同一空間位置的相鄰 channel 連續排列, warp 沿 channel 讀就是連續的。 這不是小事: cuDNN 的 Tensor Core 卷積路徑幾乎只在 NHWC 上跑到全速, PyTorch 的 `channels_last` memory format、TensorFlow 預設的 NHWC 都是為此。 實務上把一個 CNN 從 NCHW 切到 `channels_last` 常常在 Ampere/Hopper 上直接快 1.5–2 倍 — 一行 `.to(memory_format=torch.channels_last)`, 換到的就是 coalesced + Tensor Core。
+</Callout>
+
 ## AoS vs. SoA: 同一份資料, 兩種下場
 
 假設每個 particle 有 `x, y, z` 三個 float, 你要對所有 particle 的 `x` 做運算。
@@ -78,6 +82,10 @@ SoA 讓「同一個欄位跨 element」變成連續存取, 這正是 warp 想要
 
 `cudaMalloc` / `hipMalloc` 回傳的指標本身保證至少 256-byte 對齊; misalignment 幾乎都來自你自己的 offset 運算 (例如 `ptr + 3`、對 2D 陣列用未 padding 的 row width)。 對 2D 資料用 `cudaMallocPitch` 或自行把 row stride 補到 128 bytes 的倍數, 可以讓每一 row 的開頭都對齊。
 
+<Callout variant="warn" title="落到真實場景: 一個 tensor slice 就讓 vectorized kernel 崩掉">
+Misalignment 在框架裡最陰險的來源是 tensor slicing。 base tensor 是 256-byte 對齊的沒錯, 但 `x[:, 1:]` 或 `x[1:]` 產生的 view 起始位址被推移了 1 個元素 — 對 float 就是偏 4 bytes。 這時如果你的 custom kernel 用 `reinterpret_cast<float4*>` 做 vectorized load 求快, 會直接吃到 misaligned address 而 crash (`misaligned address` runtime error), 或在 half 上悄悄退化成慢路徑。 這也是為什麼寫 elementwise kernel 時要嘛檢查指標對齊再決定走 float4 還是 scalar path, 要嘛像 PyTorch/Triton 那樣對 alignment 做 specialization。 更隱蔽的版本: 一個 kernel 平時輸入都對齊、跑得飛快, 某天上游多插了一個 slice, 效能無聲掉一半 — 因為每個 warp 的存取現在都跨兩個 segment。
+</Callout>
+
 ## 讀和寫都要 coalesced
 
 Coalescing 的規則對 load 與 store 同樣成立, 但兩者的病徵不同: uncoalesced read 會多搬進沒用的 bytes; uncoalesced write 更糟, 部分寫入一個 segment 可能觸發 read-modify-write。 經典案例是 matrix transpose — 讀 row-major 是 coalesced 的, 寫 column-major 天生是 strided 的, 這正是第 7 章要用 shared memory 解決的問題。
@@ -91,6 +99,10 @@ Coalescing 的規則對 load 與 store 同樣成立, 但兩者的病徵不同: u
 ## Cache 能救回多少?
 
 L1/L2 會緩解部分懲罰 — 第一個 warp 搬進來的 segment, 相鄰 warp 若剛好要用就是 cache hit。 所以「stride 小」的 uncoalesced 存取實測可能沒有理論那麼慘。 但別把這當藉口: cache 容量有限, 資料量一大 (超過 L2) 或存取分散, 懲罰就會全額浮現。 用大 buffer 量測才反映真實情況 — 這也是 lab 的 `stride_bandwidth` 用大陣列的原因。
+
+<Callout variant="warn" title="落到真實場景: benchmark 用小 tensor, 上線用大 tensor, 結果反轉">
+「cache 會救回來」這件事最會坑人的地方, 是讓你的 benchmark 說謊。 情境: 你在筆記本上拿 `[512, 512]` 的 tensor 比較兩個 kernel, uncoalesced 那版因為整個工作集塞得進 40–50 MB 的 L2, 幾乎沒懲罰, 甚至因為指令較簡單還略快 — 你據此下了結論、合了 PR。 上線遇到 production 的 `[8192, 8192]` (256 MB, 遠超 L2), coalescing 懲罰全額回歸, 那版慢了兩三倍。 這是效能工作最常見的翻車: 量測規模不代表真實規模。 保險做法是永遠用「明顯大於 L2」的 buffer 做 access-pattern 的 benchmark, 或用 profiler 直接看 `dram__bytes` 而非只看牆鐘時間 — DRAM traffic 不會被 L2 的假象騙到。
+</Callout>
 
 ## Advanced Access Patterns
 
@@ -142,6 +154,10 @@ __global__ void saxpyTail(const float* x, float* y, float a, int tail_start, int
 ```
 
 注意前提: `reinterpret_cast<float4*>` 要求 16-byte 對齊, device allocation 本身沒問題, 但對指標做過奇數 offset 就會 crash。 `vectorized_tail` 用 n = 2²⁴ + 3 驗證主體 + 尾端的正確性。
+
+<Callout variant="insight" title="落到真實場景: bf16 activation kernel 為什麼一定要打包成向量">
+Vectorized load 在低精度 LLM kernel 裡不是可選優化, 而是拿到頻寬的前提。 一個 bf16 只有 2 bytes, 若每個 thread 一次只讀一個 bf16, 一個 warp 的 request 只有 64 bytes, 遠不足以填滿 128-byte segment, 你永遠拿不到 peak HBM 頻寬。 所以真實的 GELU / SiLU / RMSNorm elementwise kernel 幾乎都用 `float4` (= 8 個 bf16) 或 `__nv_bfloat162` 一次搬一整包, 讓每 thread 處理 8 個元素、每 warp 湊滿寬 transaction。 更進一步, `__hadd2`/`__hfma2` 這類 packed 指令讓一條指令同時算兩個 bf16, compute 也翻倍。 這就是為什麼看高效能推論 kernel, 到處是 `float4` 與 `half2` — 對 2-byte 型別, 不 pack 等於自廢一半頻寬與一半算力。
+</Callout>
 
 ### Cooperative loading: block 協力搬 tile
 
@@ -195,6 +211,10 @@ __global__ void scatterAtomicAggregated(const int* idx, unsigned int* bins, int 
 ```
 
 `gather_scatter` 對 4M 筆資料實測 gather、naive scatter、block-aggregated scatter 三種路徑的差距。 Atomic contention 的更多變化 (warp aggregation、privatization) 見第 26 章。
+
+<Callout variant="warn" title="落到真實場景: GNN 的 scatter_add 撞在 super-node 上">
+Scatter + atomic 的序列化, 在圖神經網路的 message passing 上是效能天花板。 PyG / DGL 的 aggregation 本質是 `scatter_add`: 把每條 edge 的 message 累加到目標節點的 feature。 問題出在真實圖的度數分佈是冪律 — 一個 super-node (例如社群網路裡的名人、推薦圖裡的熱門商品) 可能有上百萬條入邊, 所有這些 edge 的 atomicAdd 全撞向同一個節點的同一個位址, 完全序列化, 一個 hotspot 就拖垮整個 kernel。 標準解法正是本節的思路放大: 先按目標節點排序 edge (segmented reduction), 讓同一節點的貢獻連續、可在 warp/block 內先聚合再一次寫出, 把百萬次全域 atomic 降到一次。 這也是為什麼 GNN 框架的 fused aggregation kernel 幾乎都內建 sort-by-destination。
+</Callout>
 
 ### Row padding: 對齊每一 row 的開頭
 

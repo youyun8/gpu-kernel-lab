@@ -17,6 +17,10 @@ CUTLASS 把一個 GEMM 拆成嵌套的層級, 每層對應第 12 章優化階梯
 
 每一層都是可替換的 template 參數: 換 tile 尺寸、換 scheduler (Stream-K)、換 epilogue (bias + GELU)、換 dtype (fp8/int4), 底下其他層的優化原封不動 — 這就是「可組合」的意思, 也是它相對黑盒 cuBLAS 的根本差異。
 
+<Callout variant="insight" title="落到真實場景: fp8 GEMM 只想換 epilogue">
+假設你在做 LLM 量化訓練, 需要一個 fp8 GEMM 但輸出要 fuse 一個 per-row scale + SiLU 再寫回 bf16。 用 cuBLASLt 你只能祈禱它剛好有這個 epilogue enum; 用 CUTLASS 你保留 Hopper 的 `CollectiveMainloop` (TMA + wgmma pipeline) 不動, 只把 `CollectiveEpilogue` 換成一棵 `bias → SiLU → cast` 的 visitor tree。 分層的價值就在這裡: 你不必為了改最後 5% 的 elementwise 邏輯而重寫整條 mainloop, 而 mainloop 正是最難寫對、最吃硬體特性的部分。 這也是 `torch._scaled_mm` 能長出各種 fusion 變體卻共用同一套 pipeline 的原因。
+</Callout>
+
 ## CuTe: 3.x 的地基
 
 CUTLASS 3.x 重寫的核心是 **CuTe** — 一套描述「layout」的代數。`Layout = Shape : Stride`, 把「這塊資料在記憶體/register 裡怎麼擺」變成可組合、可運算的一等公民:
@@ -33,6 +37,10 @@ auto frag = local_partition(tensor, thr_layout, threadIdx.x);
 ```
 
 第 7 章的 padding/XOR swizzle、第 12 章 MMA fragment 的怪異佈局, 在 CuTe 裡都是 layout 代數的一次 `composition`。 這解決了手寫 MMA kernel 最痛的部分: 佈局的正確性由型別系統保證, 而不是靠人肉推 index。
+
+<Callout variant="warn" title="落到真實場景: 手推 wgmma fragment 的那個 bank conflict">
+還記得第 12 章手寫 shared → register 載入時, 你算錯一個 stride, 結果不是崩潰而是「數字對但慢 3 倍」— profiler 顯示 shared load 全是 32-way bank conflict? wgmma 對 operand 在 shared memory 的擺法有嚴格且反直覺的要求 (128-byte swizzle atom), 人肉推 offset 幾乎必錯。 CuTe 讓你寫 `composition(Swizzle<3,3,3>{}, layout)` 而不是硬編一堆魔術數字: 只要 tile 的邏輯 shape 對, swizzle 就由型別系統挑對的那一種。 這就是為什麼 FlashAttention-3 敢在 Hopper 上做複雜的 warp-specialized 佈局 — 佈局錯誤在編譯期就被擋下, 而不是等你盯著 Nsight Compute 才發現。
+</Callout>
 
 ## 實際用起來像什麼
 
@@ -53,6 +61,10 @@ gemm.run(stream);
 ```
 
 選 config 不用猜: **CUTLASS Profiler** (`cutlass_profiler --operation=gemm --m=4096 ...`) 會枚舉所有合法變體並實測 — 和第 13 章 cuBLASLt 的離線 tuning 是同一件事, 只是候選集是你自己編譯出來的。 Python 使用者另有 `cutlass` Python package 與 DSL, 能在 notebook 裡 JIT 實例化 GEMM。
+
+<Callout variant="insight" title="落到真實場景: MoE 的那些 skinny GEMM">
+你在 serving 一個 MoE 模型, 每個 expert 的 GEMM 形狀是 `M=2048, N=1408, K=2048` 這種非典型尺寸, 而 cuBLASLt 的 heuristic 對它挑的 tile 明顯次優。 正確做法不是硬啃原始碼, 而是 `cutlass_profiler --operation=gemm --m=2048 --n=1408 --k=2048 --A=f16:row --B=f16:col`, 讓它把幾百個 tile/stage/scheduler 組合實測一遍, 挑出前幾名 config 編進你的 dispatch table。 這和你會為固定 batch 形狀做 hipBLASLt/TunableOp tuning 是完全一樣的工程動作, 差別只是這次候選集是你自己編出來的 CUTLASS 變體。 production 裡這一步通常在部署前離線跑一次, 結果落盤重用。
+</Callout>
 
 ## 誰在用它
 
@@ -77,6 +89,10 @@ CUTLASS 的正確使用方式通常不是 fork 後手改 mainloop, 而是替換 
 - **Manifest/dispatch**: production 應把 supported dtype/layout/arch 明確列出, fallback 到 cuBLASLt。
 
 這樣做能保留 upstream 更新的好處。 手改深層 pipeline 只有在你明確知道現有 collective 缺哪個硬體特性時才值得。
+
+<Callout variant="warn" title="落到真實場景: fork 之後再也 rebase 不回去">
+很多團隊踩過這個坑: 為了加一個 activation, 直接 fork CUTLASS 改 mainloop, 半年後 CUTLASS 出了 Blackwell 支援與新的 tcgen05 pipeline, 你的 fork 卻和 upstream 差了幾千行, rebase 的成本高到只能放棄, 於是永遠停在舊架構。 正確路徑是把客製收斂到 extension point — activation 進 epilogue visitor, 特殊形狀進 dispatch table, 佈局用 CuTe composition 表達 — 讓你的程式碼只依賴穩定的 template 介面。 這樣下一代硬體出來時, 你換的是 upstream 的 collective, 而不是重寫自己的分支。 vLLM/TensorRT-LLM 大量使用 CUTLASS 卻很少 fork 它, 靠的就是這個紀律。
+</Callout>
 
 <LabBox path="kernels/03-gemm">
 把你第 12 章的最佳手寫 kernel、`sgemm_cublas`, 以及 CUTLASS profiler 對同形狀枚舉出的最佳 GEMM 三方對照 (clone CUTLASS 後 `make cutlass_profiler -j`, 用 `--m --n --k` 指定你的形狀)。 觀察: profiler 選出的 tile 尺寸和你手調的差多少? Stream-K scheduler 在小矩陣形狀 (第 13 章) 下贏多少?

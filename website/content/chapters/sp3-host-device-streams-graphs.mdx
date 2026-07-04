@@ -36,6 +36,10 @@ torch.cuda.current_stream().wait_stream(copy_stream)
 out = model(dev)
 ```
 
+<Callout variant="insight" title="落到真實場景: 放不進 GPU 的 20 GB 離線推論">
+這個雙 stream 樣板最常出現在資料放不進 GPU 的離線推論: 一個 20 GB 的特徵矩陣切成 chunk, stream 0 把 chunk n+1 搬上 GPU 的同時, stream 1 的 kernel 在算 chunk n。 只要 host buffer 用 `cudaHostAlloc` 開成 pinned, DMA 引擎與 SM 就真正並行, wall time 從 `copy + compute` 逼近 `max(copy, compute)`。 PyTorch 端等價寫法就是上面的 `pin_memory=True` 配 `non_blocking=True` — 這也正是第 4 章 CUDA prefetcher 的基礎。
+</Callout>
+
 <Exercise id="sp3-e1" title="重疊能省多少" kind="paper" level="入門">
 一個 workload 把資料切成 4 個 chunk, 每 chunk: H2D 2ms、compute 3ms、D2H 1ms。 (a) 完全序列 (單 stream, 不重疊) 總時間? (b) 理想 3-stage pipeline 的總時間 (瓶頸 stage = compute)? (c) 加速比?
 
@@ -64,6 +68,10 @@ processKernel<<<grid, block, 0, sCompute>>>(dIn, dOut);
 ```
 
 Event 也用來**量測**時間 (`cudaEventElapsedTime`) — 這正是第 4 章 (效能測量) 用的計時法。 但注意: 忘記加 event、或誤用 default stream 造成隱性同步, 是 pipeline 失效最常見的 bug。
+
+<Callout variant="insight" title="落到真實場景: DDP 用 event 把 all-reduce 藏進 backward">
+跨 stream event 的教科書級應用是 DDP 的 gradient all-reduce 重疊 backward: 框架把 NCCL all-reduce 丟到一條 comm stream, 在 compute stream 每算完一個 bucket 的 grad 就 record 一個 event, 讓 comm stream `wait` 該 event 後才開始通訊那個 bucket。 於是後面幾層的 backward compute 與前面幾層的 all-reduce 重疊, 通訊被藏進計算。 少了這個 event, comm stream 可能讀到還沒寫完的 grad — 就是下一題那種 race 的變形。
+</Callout>
 
 <Exercise id="sp3-e2" title="找出隱性同步" kind="paper" level="進階">
 以下 pseudocode 想重疊 copy 與 compute, 卻幾乎沒有加速:
@@ -112,6 +120,10 @@ g.replay()                               # replays the whole model with ~one lau
 ```
 
 Graph 消的是 CPU-side 的 launch overhead — 它與 stream overlap 正交: stream 藏 memory latency, graph 藏 launch latency。 兩者都是把「CPU 忙 vs. GPU 忙」重疊的手段, 這正是第 6 章 SGLang overlap scheduler 的伏筆。
+
+<Callout variant="warn" title="落到真實場景: capture 期間夾了 host 同步或動態 shape">
+CUDA Graph 最常見的翻車是 capture 期間混進了 host 同步或會變的 shape: 例如迴圈裡有 `.item()`、`.cpu()`、印 loss, 或每步 batch/seq-len 不同。 capture 只錄下當時的指標與大小, replay 時 shape 一變就讀到錯的 buffer 或直接崩。 這就是為什麼 `torch.compile(mode="reduce-overhead")` 對動態 shape 會頻繁 re-capture 甚至 fallback, 以及 vLLM/SGLang 只對固定的一組 batch size 各 capture 一張 graph。 修法: 固定 shape、把新資料 `copy_` 進 capture 時的 static tensor、capture 內不做任何 host sync。
+</Callout>
 
 <Exercise id="sp3-e3" title="Graph 何時值得" kind="paper" level="進階">
 某 decode step 依序 launch 60 個小 kernel, 每個 kernel GPU 上只跑 3µs, 但每次 launch 的 CPU overhead 約 5µs。 (a) 不用 graph, 一個 step 的時間下限受什麼決定? (b) 估算一個 step 的時間。 (c) 用 CUDA graph 後理論上限變多少? (d) 為什麼大 batch 的 prefill 用 graph 效益較小?

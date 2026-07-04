@@ -8,6 +8,10 @@ CK 是 AMD 的 C++ template kernel library, 設計哲學與 CUTLASS 同源: 把 
 
 CK 支援 fp32/fp16/bf16/fp8/int8, 提供 GEMM、batched/grouped GEMM、fused GEMM+epilogue、attention 等 device op。 vLLM 與 SGLang 在 ROCm 上的 FlashAttention 路徑, 有相當部分就是 CK 實作的。
 
+<Callout variant="insight" title="落到真實場景: 在 MI300X 上跑不到 CK attention">
+你把一個在 H100 上跑得好好的模型搬到 MI300X, 發現 attention 慢得離譜 — 一查 log, vLLM 走的是 Triton fallback 而不是 CK 的 fused attention。 這通常是因為你的 head dim 或 causal/alibi mask 組合不在 CK 已 instantiate 的 device op 清單裡, CK 是 template library, 沒編出來的變體執行期就是不存在。 排查方式是看 vLLM 的 attention backend 選擇 log、確認 ROCm build 有帶對應的 CK instance, 必要時開 `VLLM_USE_TRITON_FLASH_ATTN=0` 之類的開關強制走 CK。 這就是 template kernel library 的雙面刃: 對 tune 過的形狀極快, 對沒編出來的形狀直接 fallback。
+</Callout>
+
 ## hipBLASLt 與 Tensile: BLAS 這一層
 
 第 13 章講過 hipBLASLt 的 heuristic 與 tuning; 這裡補上它的 kernel 從哪來。 **Tensile** 是 AMD 的 GEMM kernel 生成器: 以 YAML 描述 problem space, 自動生成大量 assembly/HIP kernel 變體並離線 benchmark, 產出「per-架構、per-形狀」的 solution library。 hipBLASLt 執行期依形狀查表選 kernel — 所以它對「tune 過的形狀」極快, 對沒 tune 過的形狀靠 heuristic 泛化。
@@ -23,15 +27,27 @@ PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=1 python train.py
 # results land in tunableop_results.csv and are reused on the next run
 ```
 
+<Callout variant="insight" title="落到真實場景: 第一個 iteration 慢到像掛了">
+你在 MI300X 上第一次開 `PYTORCH_TUNABLEOP_TUNING=1` 跑 training, 結果第一個 step 花了好幾分鐘, 團隊以為是 deadlock。 其實是 TunableOp 正在對你這個模型每一種 GEMM 形狀 (QKV projection、MLP up/down 等) 現場枚舉 hipBLASLt algo 並實測 — 這是一次性的 warmup 成本, 結果會寫進 `tunableop_results.csv`, 之後的 run 直接命中最佳 kernel。 正確做法是把 tuning run 當成部署前的離線步驟, 把產生的 CSV 連同 image 一起版本化; 千萬別在每次 CI 或每個 pod 冷啟時重跑 tuning。 這和 Tensile 離線生成 solution library 是同一個哲學: 貴的搜索只做一次, 執行期只查表。
+</Callout>
+
 ## rocWMMA 與 MFMA intrinsic: 自己動手這一層
 
 想手寫 matrix core kernel 時有兩個高度可選: **rocWMMA** 提供與 CUDA `wmma` 相似的 fragment API (portable 程式碼的好選擇); 或直接用 `__builtin_amdgcn_mfma_*` intrinsic 控制每一條 MFMA 指令 (對應第 12 章 Step 5 的 HIP 版)。 MFMA 指令以 wavefront (64 lanes) 為單位運算 16×16×16 或 32×32×8 等 shape, fragment 佈局同樣由指令規定 — CuTe/CK 存在的理由在 AMD 側一樣成立。
+
+<Callout variant="warn" title="落到真實場景: 照抄 Tensor Core tile 尺寸的下場">
+一個常見移植錯誤: 把 NVIDIA 上調好的 `16×16×16` wmma tile 直接搬到 rocWMMA, 假設 MI300X 也一樣。 問題是 CDNA 的 matrix core 對某些 dtype 只有 `16×16×16`、對另一些 (如特定 fp8 路徑) 最有效率的是 `32×32×8` 或 `16×16×32`, 選錯 shape 會讓 MFMA 吞吐掉一大截, 而且 fragment 在 register 裡的佈局也完全不同。 更隱蔽的是 wavefront 是 64 lanes 而非 32, 你的 tile 到 thread 的對映需要重算, 否則會靜默算錯。 想榨效能就直接用 `__builtin_amdgcn_mfma_*` 對著 ISA 文件挑 shape, 想要可攜就用 rocWMMA 並針對 CDNA 重新 profile tile 尺寸 — 不要相信 NVIDIA 的直覺。
+</Callout>
 
 ## AITER: AMD 的 AI Kernel 百寶箱
 
 **AITER** (AI Tensor Engine for ROCm) 是 AMD 較新的高階 kernel 集合, 目標很直接: 把 LLM 訓練/推論常用的關鍵 op — attention (prefill/decode/MLA)、GEMM (含 fp8/int8 量化)、MoE kernel、norm/activation fusion — 以「開箱即用 + 針對 CDNA 手調」的形式提供 Python/C++ API。 它內部混用 CK、Triton 與手寫 assembly, 對外只暴露統一介面。
 
 AITER 的定位是「生態加速器」: vLLM 與 SGLang 的 ROCm backend 大量接入 AITER kernel (attention、MoE、量化 GEMM), 在 MI300X 上帶來顯著加速 — 對使用者而言通常只是一個環境變數或 config 開關 (例如 vLLM 的 `VLLM_ROCM_USE_AITER=1`)。 這是第 25 章推論引擎 kernel 棧在 AMD 側的直接體現。
+
+<Callout variant="insight" title="落到真實場景: 一個環境變數換掉半個 kernel 棧">
+你負責一個跑在 MI300X 上的 LLM serving 服務, SLA 要求 decode 的 p99 latency 壓下來。 與其自己手寫 fused MoE kernel, 第一件該試的事是 `VLLM_ROCM_USE_AITER=1`: 這一個開關會把 attention、MoE dispatch、fp8 量化 GEMM 一整批換成 AMD 針對 CDNA 手調過的 AITER 實作, 常常直接吃到兩位數百分比的吞吐提升。 重點是要 A/B 量測 — 開關前後各抓一次 token-level latency histogram, 確認提升來自哪個 op, 因為 AITER 對某些形狀有效、對另一些可能和 CK 打平。 這正是「你的價值在於知道該開哪個 backend flag」的具體體現, 而不是從零寫 kernel。
+</Callout>
 
 ## 對照表: 兩個生態的一一對應
 

@@ -13,6 +13,10 @@
 
 Reference 要覆蓋 tail shape: 0、1、31、32、33、warpSize ± 1、tileSize ± 1、prime sizes、misaligned pointer、non-contiguous stride。
 
+<Callout variant="warn" title="落到真實場景: 只測 N=1024 的漂亮 shape">
+一個 reduction kernel 在所有 2 的次方 shape 都對, demo 也漂亮, 上線後某個 batch 算出垃圾。 追下去發現 kernel 假設 `N` 是 `blockDim.x` 的整數倍, 最後一個不滿的 tile 讀進未初始化或越界的記憶體 — 而測試剛好都用 1024、4096 這種整除的 shape, 永遠踩不到那條 path。 這就是為什麼 reference 對比一定要掃 tail shape: `N = 0`(空輸入是否 no-op)、`31/33`(warp 邊界)、`257`(tile 邊界 +1)、還有 prime size 讓沒有任何 tile 整除。 真正的 production bug 幾乎都躲在這些「不好看」的 shape 裡, 不是躲在 1024。
+</Callout>
+
 ## Error Checking
 
 所有 launch 都應在 debug/test 模式檢查:
@@ -29,6 +33,10 @@ CUDA_CHECK(cudaStreamSynchronize(stream));
 ```
 
 `cudaGetLastError` / `hipGetLastError` 抓 launch configuration 和非法參數; stream synchronize 才能抓 kernel 執行中發生的 illegal memory access。 Benchmark hot path 可移除同步, 但測試不能省。
+
+<Callout variant="warn" title="落到真實場景: 錯誤報在無辜的下一個 kernel 上">
+CUDA 的 kernel launch 是非同步的, 所以 kernel A 的 illegal memory access 常常不是在 launch A 時報出來, 而是在你之後某個 `cudaMemcpy` 或 launch B 才浮現 — 於是 stack trace 指向完全無辜的 B, 你在 B 裡怎麼找都找不到 bug。 這也是為什麼 debug 時要設 `CUDA_LAUNCH_BLOCKING=1` 或在每個 launch 後加 `cudaStreamSynchronize` 逼錯誤即時歸位。 對照組: 生產 hot path 為了效能會拿掉這些同步, 所以務必只在 debug/test build 開; 兩邊行為不同這件事本身也要記在心上。
+</Callout>
 
 ## Sanitizer 與 Race Detection
 
@@ -57,6 +65,10 @@ g++ -fsanitize=thread -g -O1 race_demo.cpp -o race_demo && ./race_demo
 
 第 0 章把 data race、lost update、atomic、mutex、reduction 與 fence 的 CPU/GPU 對照完整拆開; 本章只保留 debug workflow 的檢查清單。
 
+<Callout variant="warn" title="落到真實場景: 偶爾錯一格的 shared-memory reduction">
+你寫的 block reduction 大部分時候對, 但每幾百次跑會有一個 block 的結果少加了幾個元素 — 難以重現、換台機器又不見。 這種「只在特定 warp scheduling 下發生」的 bug 用一般測試幾乎抓不到, 但 `compute-sanitizer --tool racecheck` 一跑就直接指出是哪兩行對同一個 shared 位址做了沒有 `__syncthreads()` 隔開的 read 與 write。 關鍵是要用小 shape 跑 sanitizer: 它會讓 kernel 慢上 10 到 100 倍, 拿去跑大 benchmark 不切實際, 而且大 shape 反而因為 warp 排得比較「整齊」更難觸發 race。 CI 裡放一條 small-shape sanitizer job, 比事後在生產追這種 heisenbug 便宜太多。
+</Callout>
+
 ## Synchronization Bug 清單
 
 最常見錯誤包括:
@@ -69,6 +81,10 @@ g++ -fsanitize=thread -g -O1 race_demo.cpp -o race_demo && ./race_demo
 - Atomic counter publish 早於 payload 寫入。
 
 每次加 pipeline 或 queue, 都要畫出 producer/consumer 的 happens-before 關係。
+
+<Callout variant="warn" title="落到真實場景: 藏在 boundary branch 裡的 __syncthreads()">
+最典型的 hang 是把 `__syncthreads()` 寫進一個依賴 `threadIdx` 的 branch, 例如處理 tail tile 時寫成 `if (idx < n) { ...; __syncthreads(); }`。 當 `n` 不是 block size 整數倍, 有些 thread 進不了 branch、永遠到不了那個 barrier, 到達的 thread 就一起卡死 — 而且又是只有 tail shape 才觸發。 這類 bug 在小 shape 或整除 shape 下完全正常, 換個 `n=257` 就整個 kernel 掛住或行為未定。 規則很簡單: barrier 必須讓 block 內所有 thread 都會到達, tail 的處理要放在 barrier 前後、而不是把 barrier 包進條件裡。
+</Callout>
 
 ## Determinism 與 Reproducibility
 
@@ -95,6 +111,10 @@ if (threadIdx.x == 0) partials[blockIdx.x] = block_sum;
 ```
 
 `kernels/00-parallel-foundations` 的 `gpu_block_reduce` 與 `gpu_threadfence` 分別實作兩種收尾, 可以直接比對多次執行的 bit pattern。
+
+<Callout variant="warn" title="落到真實場景: 用 == 比對結果的 flaky CI">
+有人寫了一個 `assert(gpu_sum == expected)` 的測試, 綠了幾週後開始隨機紅一次, 重跑又過 — 典型的 flaky test。 根因是 kernel 收尾用 `atomicAdd` 累加各 block 的 partial sum, 完成順序 run-to-run 不固定, 浮點加法又不具結合律, 所以最低幾個 bit 每次都可能不同, 精確 `==` 當然會偶爾失敗。 兩條修法看需求選: 若只要數值等價, 測試改用 `abs(a-b) <= atol + rtol*abs(b)` 的 tolerance; 若產品要 bit-exact reproducibility (例如要能重現訓練), 就把 atomic 收尾換成固定順序的 two-pass reduction tree, 順便設 `torch.use_deterministic_algorithms(True)` 之類的開關關掉非決定性路徑。
+</Callout>
 
 ## Tolerance 設計
 

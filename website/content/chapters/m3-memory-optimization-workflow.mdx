@@ -17,6 +17,10 @@ if atomics dominate:
     contention / serialization
 ```
 
+<Callout variant="insight" title="落到真實場景: 讓 Nsight 的一句 summary 幫你分類">
+這個分類步驟在真實工具裡幾乎是自動的。 Nsight Compute 跑完會直接在 "GPU Speed of Light" 給出 memory 與 compute 的百分比、並在 warp stall 頁列出主因 (long scoreboard = 等 global memory, MIO throttle = shared memory/atomic 塞車); rocprof 也給對應 counter。 你要做的是把它對回上面這棵決策樹: memory 高、compute 低就是 bandwidth-bound, 去查 coalescing; stall 主因是 long scoreboard 但 achieved bandwidth 卻不高, 就是 latency/coalescing 問題; bank conflict counter 高就修 shared memory layout。 別一看到 kernel 慢就開始亂改, 先讓 profiler 告訴你它屬於哪一類, 再挑對應的 transformation。
+</Callout>
+
 ## Step 2: Measure The Right Bytes
 
 不要只看 input size。 估算 traffic 要包含:
@@ -35,6 +39,10 @@ naive apparent traffic = 3 reads + 1 write = 16 bytes/output
 with cache/shared reuse, DRAM traffic can approach 1 read + 1 write = 8 bytes/output
 ```
 
+<Callout variant="insight" title="落到真實場景: 別忘了 write-allocate 這種隱形 traffic">
+「數對 bytes」在實務上最常被漏掉的是那些看不見的 traffic。 CPU 上寫一個沒讀過的陣列, 硬體會先把該 cache line 讀進來才寫 (read-for-ownership / write-allocate), 所以「純寫」其實暗藏一次讀 — 這也是 `memset` 大陣列比預期慢、以及 non-temporal store (`_mm_stream`) 能加速的原因。 GPU 上的隱形 traffic 則是「沒有 reuse 導致的重複載入」: 上面 stencil 若沒把 `in[i]` 留在 shared/register, 相鄰 output 會把同一個元素從 DRAM 重載三次, 真實 traffic 是理論下限的好幾倍。 所以估 traffic 時要問的不是「input 多大」, 而是「這顆 kernel 實際讓多少 bytes 穿過 DRAM 界面」, 把 write-allocate、重複載入、padding 全算進去, 才對得上 profiler 量到的數字。
+</Callout>
+
 ## Step 3: Pick A Transformation
 
 | 症狀 | 優先嘗試 |
@@ -46,6 +54,10 @@ with cache/shared reuse, DRAM traffic can approach 1 read + 1 write = 8 bytes/ou
 | atomic hotspot | privatized bins, warp/block aggregation, two-pass reduction |
 | latency stalls | more occupancy, prefetch/async copy, more independent work |
 
+<Callout variant="warn" title="落到真實場景: 對著症狀選, 別看到 tiling 就 tiling">
+這張表的價值是逼你「先確診再開藥」, 因為同一個 transformation 用錯地方會白費甚至變慢。 常見誤診: kernel 慢就直覺加 tiling — 但若瓶頸其實是 stride 造成的 uncoalesced access (症狀是 stride bandwidth 低), 該做的是改 layout 或 transpose, 硬加 tiling 只是把 uncoalesced 的讀搬進 shared memory, 根源沒解。 反過來, 明明是 repeated global loads (每個 byte 反覆從 DRAM 載入) 卻只顧著 vectorize, 也治標不治本。 正確流程是 Step 1 分類 -> 對照這張表挑一個 transformation -> 只改這一個 -> 重量。 這也呼應 lab 的鐵律: 一次只改一件事, 否則你分不清是哪個改動起了作用。
+</Callout>
+
 ## Step 4: Check Side Effects
 
 每個 memory optimization 都可能移動瓶頸:
@@ -56,6 +68,10 @@ with cache/shared reuse, DRAM traffic can approach 1 read + 1 write = 8 bytes/ou
 - Padding 增加 footprint, 可能降低 cache residency。
 - Privatization 增加 merge phase, 可能增加 total work。
 
+<Callout variant="warn" title="落到真實場景: tiling 加速了單一 kernel, 整體卻更慢">
+Side effect 最容易被忽略, 因為它常常「在別的地方」冒出來。 典型故事: 你把 GEMM tile 加大, 單看這顆 kernel 的 achieved TFLOP 漂亮上升, 但 shared memory / register 用量暴增讓 resident block 從 4 掉到 1, occupancy 崩了 — 在 batch 很多小 GEMM 或需要靠 occupancy 藏 latency 的場景, 端到端反而變慢。 另一個常見的是 vectorized load (`float4`) 要求 16-byte alignment, 你為了對齊而 pad, 結果 footprint 變大、cache residency 下降。 所以每做一個 memory optimization, 別只看目標指標, 要回頭量 occupancy、register 數、以及「整條 pipeline」的時間 — 局部最佳解不等於全域最佳解。
+</Callout>
+
 ## Step 5: Validate Numerics
 
 Memory optimization 也可能改變運算順序。 Reduction、histogram、scatter、atomic add 都可能產生 nondeterminism 或 floating-point low-bit 差異。 Correctness tests 應包含:
@@ -65,6 +81,10 @@ Memory optimization 也可能改變運算順序。 Reduction、histogram、scatt
 - non-multiple tile sizes
 - random data
 - adversarial data: same histogram bin, skewed rows, NaN/Inf if relevant
+
+<Callout variant="warn" title="落到真實場景: tail 沒處理好, 只有非 32 倍數的 shape 會錯">
+這些邊界 size 不是形式主義, 它們專門抓 memory optimization 最愛引入的 tail bug。 你把 kernel 改成 `float4` vectorized load 或加了 tiling 後, 若 tail handling 寫錯, `n = 1024` (剛好整除) 一切正常、CI 綠燈, 但上線遇到 `n = 1000` 就讀寫越界或漏算最後幾個元素 — 這種只在「非對齊 / 非 tile 倍數」才現形的 bug 最難在事後定位。 所以測試一定要涵蓋 `warpSize-1`、`warpSize+1`、非 tile 倍數與 misaligned 起點。 浮點也要留意: 換了 reduction 順序或改用 atomic 後, 結果可能在低位 bit 變動, 驗證要用合理 tolerance 而非 bitwise 相等, 除非你刻意保證固定順序。 一句話: 快但錯的 memory optimization 就是資料損毀。
+</Callout>
 
 ## Minimal Experiment Template
 

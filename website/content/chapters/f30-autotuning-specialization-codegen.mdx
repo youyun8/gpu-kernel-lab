@@ -18,6 +18,10 @@
 
 不要盲目全排列。 先用硬體限制剪枝: shared memory 上限、register 上限、alignment、MMA instruction shape、occupancy 下限。
 
+<Callout variant="insight" title="落到真實場景: Triton matmul 的 config 爆炸">
+你在 Triton 寫一個 fused matmul, 用 `@triton.autotune` 掛了一串 config: `BLOCK_M` 選 64/128/256、`BLOCK_N` 同樣三種、`BLOCK_K` 32/64、`num_warps` 4/8、`num_stages` 2/3/4 — 全排列就 108 組, 每組第一次跑都要 JIT 編譯, 光暖機就好幾分鐘。 正確做法是先剪枝: `BLOCK_M * BLOCK_K` 兩份 (double buffer) 的 fp16 tile 必須放得下 shared memory, `num_stages` 高又會再乘上去, 很多組合光 smem 就爆掉, 根本不該編譯。 剩下的 shape 相依性也很現實 — 一個 `M=8, N=4096, K=4096` 的 skinny GEMM, `BLOCK_M=256` 的 tile 有 97% 是浪費, 這種 config 應該直接不放進候選。
+</Callout>
+
 ## Template Specialization
 
 C++ template 讓編譯器看到常數, 才能 unroll、消除 branch、分配靜態 shared memory:
@@ -33,6 +37,10 @@ __global__ void matmulKernel(const half* A, const half* B, float* C, int m, int 
 
 Runtime `if` 適合功能選擇; performance-critical tile shape 通常要 compile-time specialization。
 
+<Callout variant="insight" title="落到真實場景: CUTLASS 為什麼整個 kernel 都是 template">
+CUTLASS 把 tile shape、warp shape、instruction shape、stage 數、layout 全做成 template parameter, 不是為了炫技, 而是因為只有編譯期看得到這些常數, 編譯器才能: 靜態配置 `__shared__` buffer (大小是常數, 不能用 runtime 值)、把 K-loop 完全 unroll 讓 `cp.async` 的 pipeline 展開、以及消掉 boundary 判斷的 branch。 代價很實際 — 每多一組 `<M, N, K, stages>` 就多一份 instantiation, build time 和 binary size 線性膨脹, 所以生產上會用 codegen 只產生「這個模型真的會用到的 shape」那幾份, 而不是把整個空間都編出來。
+</Callout>
+
 ## Search Strategy
 
 實務 autotuner 需要控制時間:
@@ -44,6 +52,10 @@ Runtime `if` 適合功能選擇; performance-critical tile shape 通常要 compi
 - **Fallback**: tuner 失敗或新 shape 未命中時, 用 library 或保守 kernel。
 
 測量時要 warm up、固定 clock 或至少記錄環境、使用 GPU events、並檢查 correctness。 Autotuner 找到「最快錯誤答案」是常見事故。
+
+<Callout variant="warn" title="落到真實場景: torch.compile 第一次跑巨慢">
+使用者常抱怨 `torch.compile` 的模型第一個 batch 卡住幾十秒甚至幾分鐘 — 那不是 bug, 是 Inductor/Triton 在對每個 fused kernel 掃 autotune config、逐一 JIT 編譯並實測。 這正是 search budget 的問題: 沒有 cache 的話每次 process 重啟都重付一次。 生產上要打開 persistent cache (`TORCHINDUCTOR_CACHE_DIR` / Triton 的 autotune cache), 讓調校結果按 GPU 型號、dtype、shape 落地到磁碟, 下次直接命中。 同一個現象在 TensorRT 叫 tactic selection, engine build 也是在做一樣的事 — 所以 engine 一定要序列化存起來, 別每次 deploy 重 build。
+</Callout>
 
 ## Cost Model 與 Heuristics
 
@@ -57,6 +69,10 @@ Runtime `if` 適合功能選擇; performance-critical tile shape 通常要 compi
 - Tail effect: tile 數是否能填滿 SM/CU。
 
 Library heuristic 也是 cost model。 cuBLASLt、hipBLASLt、CUTLASS profiler、CK profiler 都是在幫你搜尋和快取這個空間。
+
+<Callout variant="insight" title="落到真實場景: cuBLASLt 的 heuristic 先排序再實測">
+呼叫 `cublasLtMatmulAlgoGetHeuristic` 時, library 不會把所有可行 algo 都跑一遍給你, 而是用內建 cost model 依你的 M/N/K、dtype、layout 先排出 top-k 候選 (通常十幾個), 你再對這幾個實測挑最快。 這就是 cost model 的正確定位: 它不必準到選出絕對第一, 只要把「值得實測」的候選從幾百個縮到十幾個, 省下的是編譯與 benchmark 的時間。 自己寫 autotuner 時照抄這個兩段式 — 先用 roofline + smem/occupancy 估算砍掉九成候選, 再對剩下的實測, 遠比暴力全測務實。
+</Callout>
 
 ## Code Generation 的時機
 
@@ -90,6 +106,10 @@ KernelFn pick_kernel(KernelKey key) {
 ```
 
 Bucket 要小心: shape 差一點點可能讓 tail effect 完全不同。 小矩陣和 skinny 矩陣尤其不適合粗 bucket。
+
+<Callout variant="warn" title="落到真實場景: batch bucket 把 decode 的 M=1 歸錯類">
+LLM 推論服務的 dispatch table 常按 batch/token 數分 bucket, 例如 `m_bucket` 用 `[1, 16, 64, 256, ...]`。 危險在於 decode 階段每步 `M=1` (甚至到 8), 這種 skinny GEMM 的最佳 kernel (通常是 split-K 或 GEMV 特化) 跟 prefill 的大 `M` 完全不同 tail 行為; 若 bucket 把 `M=1..16` 併成一格、套的又是為大 M 調的 tile, decode latency 會莫名偏高。 正確做法是對這些 latency-critical 的小 M 給細 bucket 甚至專屬 kernel, 而 prefill 的大 M 反而可以用粗 bucket。 記住 dispatch 一定要有 fallback: 遇到沒命中的 shape 時退回 library 或保守 kernel, 而不是 crash 或選到隨便一個 tuned 結果。
+</Callout>
 
 ## Autotuning 的陷阱
 

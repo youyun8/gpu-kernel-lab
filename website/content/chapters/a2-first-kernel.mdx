@@ -14,6 +14,10 @@ $$
 
 三層各有明確的角色: thread 是計算的單位、block 是「協作」的單位 (同步與 shared memory 的邊界)、grid 是「一次 launch 的全部工作」。 Block 大小通常選 128–512 且為 warp size 的倍數; 本站的範例慣用 256。
 
+<Callout variant="insight" title="落到真實場景: block size 選錯會直接壓低 occupancy">
+「block size 選 256」不是背口訣, 它是 occupancy 的槓桿。 舉例: 某 SM 上限是 2048 個 resident thread, 若你為了「多一點 shared memory per block」而把 block 設成 768, 一個 SM 只能塞 2 個 block = 1536 threads, 憑空浪費 25% 的 latency-hiding 能力; 改成 512 或 256 反而剛好整除。 這也是為什麼 Triton kernel 幾乎都把 `BLOCK_SIZE` 開成 autotune 參數 (`triton.Config` 掃 128/256/512), 讓框架實測選最佳值。 選非 warp 倍數 (例如 100) 更糟: 最後那個 warp 有 lane 是浪費的, 還可能拖累 coalescing。 拿不準時先用 CUDA 的 occupancy calculator API 反推允許的最大 block。
+</Callout>
+
 ## 完整流程: 配置、搬運、launch、取回
 
 寫 GPU 程式的 host 端固定有四拍: 在 device 上配置記憶體 → 把輸入從 host 複製過去 → launch kernel → 把結果複製回來。
@@ -111,6 +115,10 @@ GPU_CHECK(cudaDeviceSynchronize());  // catches errors raised during execution
 
 Debug 神器再補一個: `compute-sanitizer` (CUDA) 或 HIP 的 sanitizer 工具能抓越界存取與 race condition, 比肉眼快得多。
 
+<Callout variant="warn" title="落到真實場景: 錯誤被延後到另一個無關 API 才爆">
+沒有貼身檢查 launch 錯誤, 是新手最容易踩、也最難 debug 的坑。 因為 launch 是非同步的, 一個越界寫入或非法 launch 參數的錯誤, 常常要到幾行之後某個完全無辜的 `cudaMemcpy` 或 `cudaDeviceSynchronize` 才回報 — 你會盯著那個 memcpy 看半天, 真兇卻在上面的 kernel。 在 PyTorch 裡這表現為堆疊指向一個跟錯誤無關的 op; 解法是設環境變數 `CUDA_LAUNCH_BLOCKING=1` 讓每次 launch 同步, 錯誤就會定位到真正出事的那一行。 更惡劣的是越界寫入常是 silent corruption: 程式不 crash、loss 卻慢慢變成 NaN。 養成「每個 launch 後接 `GPU_CHECK(cudaGetLastError())` + 一次同步」的習慣, 或直接掛 `compute-sanitizer` 跑一遍, 能省下數小時。
+</Callout>
+
 ## Grid-stride loop: 更有彈性的寫法
 
 「一個 thread 處理一個元素」要求 grid 隨資料大小變動。 另一個常見寫法是 grid-stride loop: launch 固定數量的 threads, 每個 thread 以整個 grid 的大小為步幅處理多個元素:
@@ -127,6 +135,10 @@ __global__ void vectorAddStride(const float* a, const float* b, float* c, int n)
 
 好處: grid 大小與資料大小解耦 (可依硬體選擇)、天然處理任意 n、每 thread 有多筆工作可提高指令層級平行度。 後面的 reduction (第 10 章) 會大量使用這個 pattern。
 
+<Callout variant="insight" title="落到真實場景: persistent kernel 就是 grid-stride 的極致">
+Grid-stride 的「固定 launch 數量、每個 thread 掃多筆」思路, 放大之後就是 persistent kernel — LLM 推論裡越來越常見。 做法是只 launch 剛好等於「SM 數 × 每 SM 可駐留 block 數」的 block, 讓它們常駐, 再用一個 grid-stride 風格的迴圈從 global work queue 一批批領工作, 避免反覆 launch 的 overhead。 FlashDecoding、SGLang/vLLM 的部分 fused kernel、以及 NCCL 的通訊 kernel 都用這個模式把 launch 與同步成本攤到近乎零。 對只做一次的大 vector add 感受不到差別; 但當同一個小 kernel 每秒被呼叫上萬次 (decode loop), 省掉的 launch overhead 就是實打實的 latency。
+</Callout>
+
 ## Compile 流程
 
 CUDA 用 `nvcc`, HIP 用 `hipcc`。 兩者都會把 host 程式碼交給系統 C++ 編譯器, 把 device 程式碼編成中介表示 (PTX / GCN-CDNA ISA), 最後在載入時 JIT 或 AOT 成實際 GPU 指令。
@@ -141,6 +153,10 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 
 `-arch=sm_80` / `--offload-arch=gfx90a` 指定目標架構 (A100 / MI200)。 編給錯的架構, CUDA 可能靠 PTX JIT 救回來 (變慢), ROCm 則直接跑不起來 — 查你的卡: `nvidia-smi --query-gpu=compute_cap --format=csv` 或 `rocminfo | grep gfx`。 本站的 kernels 用 CMake 包起來, 自動偵測平台並帶入正確的 arch flag, 你不必手記這些參數。
 
+<Callout variant="warn" title="落到真實場景: no kernel image is available for execution">
+這個 arch 匹配問題最常見的化身, 是部署時的執行期錯誤 `no kernel image is available for execution on the device`。 情境: 你在 A100 (`sm_80`) 上編好的 custom CUDA extension, 或一個只 build 了舊 arch 的 PyTorch wheel, 拿到 H100 (`sm_90`) 或 B200 (`sm_100`) 上跑就炸 — binary 裡沒有那張卡的 SASS, 又沒有可 JIT 的 PTX。 這也是為什麼 release wheel 常用 `TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0"` 一次編多個 arch (fatbin), 代價是編譯變慢、檔案變大。 保底做法是額外帶上 `-gencode arch=compute_90,code=compute_90` 塞一份 PTX 進去, 讓未來的新卡至少能 JIT 起來 (慢但能跑)。 ROCm 這邊沒有 PTX fallback, `--offload-arch` 沒對就是直接跑不了。
+</Callout>
+
 ## Kernel Shape Patterns
 
 第一個 kernel 學完後, 立刻把索引模式整理成幾個模板:
@@ -152,6 +168,10 @@ hipcc -O3 --offload-arch=gfx90a vector_add.cpp -o vector_add
 - **One warp per small unit**: 短 row reduction、小 softmax、top-k 小段落。 用 warp shuffle 取代 shared memory, 降低同步成本。
 
 還有兩個習慣要從第一天建立: pointer 可標 `const` 和 `__restrict__` 時就標, 讓編譯器知道 aliasing 較少; 所有 kernel launch 在 debug/test 模式都要接 `cudaGetLastError()` / `hipGetLastError()` 和一次同步, 否則錯誤會延後到無關 API 才爆出來。
+
+<Callout variant="insight" title="落到真實場景: 一個 layernorm 就對應多種 shape pattern">
+這幾個 shape pattern 不是分類學, 而是你拆解真實 op 時的第一個決策。 拿 transformer 的 LayerNorm 舉例: 輸入是 `[tokens, hidden]`, 自然選「one block per logical unit」— 一個 block 負責一個 token 的整條 hidden 向量, 因為求 mean/variance 需要 block 內 reduction, 正好用 shared memory + `__syncthreads()`。 但如果 hidden 很小 (例如 128), 改用「one warp per small unit」讓一個 warp 處理一個 token、用 warp shuffle 做 reduction, 省掉 shared memory 與同步, 更快。 而它後面接的 elementwise scale/bias epilogue 又回到「1D contiguous」。 選錯 pattern 的後果很具體: 硬用 1D-per-element 去做需要跨 thread reduction 的 softmax, 你會被迫多寫一輪 global memory 存中間結果。
+</Callout>
 
 <LabBox path="kernels/01-basics">
 編譯並執行 `vector_add`。 它會配置兩個輸入 vector、在 GPU 上相加、和 CPU 的結果比對 (correctness check), 再用 benchmark harness 報告 achieved bandwidth (GB/s) 與 % of peak。 Vector add 是純 memory-bound, 你會看到 GFLOP/s 很低但 bandwidth 接近硬體上限 — 這是正常的, 第 5 章的 roofline 會解釋為什麼。

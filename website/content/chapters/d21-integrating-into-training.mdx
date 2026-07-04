@@ -24,11 +24,19 @@ def _(x):
 
 註冊完別急著上線, 先跑 `torch.library.opcheck(gelu, (x,))` — 它自動檢查 fake 實作、autograd、以及 op 在各 dispatch key 下的一致性, 把「compile 時才爆的錯」提前到測試期。
 
+<Callout variant="warn" title="落到真實場景: fake 實作 shape 寫錯, compile 才爆">
+你的 GELU fake 用 `torch.empty_like(x)` 沒問題 (shape 不變)。 但換成一個 row-reduction op (輸出 shape 是 `x.shape[:-1]`), 如果 fake 偷懶回 `torch.empty_like(x)`, 直接呼叫時完全正常 (真 kernel 回的是對的 shape), 一旦包進 `torch.compile` 就爆: Inductor 靠 fake 實作在不執行 kernel 的情況下推 shape 規劃記憶體, fake 說輸出是 `[B, S, H]`、真 kernel 給 `[B, S]`, 下游 op 的 buffer 大小全錯, 報一個看似無關的 stride/shape mismatch。 這種 bug 只在 compile 路徑出現、eager 完全測不到 — 正是 `opcheck` 存在的理由: 它會拿 fake 和真實 output 比 shape/dtype/stride, 在測試期就抓出這種不一致。 所以「註冊完先跑 opcheck」不是禮貌, 是唯一能在 compile 前發現 meta 錯誤的關卡。
+</Callout>
+
 ## 與 torch.compile 共存
 
 註冊為 custom op 後, `torch.compile` 會把它當成一個不可分割的節點: 它不會嘗試 fuse 進去 (那是你的 kernel 內部的事), 但會正確地在它前後 fuse 其他 op、追蹤相依、規劃記憶體。 避免用會導致 graph break 的寫法 (例如 op 內部呼叫 `.item()` 或依 data-dependent 的 Python 控制流), 否則 compile 的效益會被打斷。
 
 用 `TORCH_LOGS=graph_breaks python train.py` 檢查你的 op 有沒有引入 graph break;`torch._dynamo.explain` 能列出完整的 break 原因清單。 另一個相容性維度是 CUDA Graph (`mode="reduce-overhead"`): 你的 kernel 必須「capture-safe」— 不在 kernel 路徑上做 host 同步、不配置新記憶體 (用 PyTorch 的 allocator 拿 workspace), 否則會讓整個 graph capture 失敗。
+
+<Callout variant="warn" title="落到真實場景: kernel 裡一個防呆 assert 毀掉整條 graph">
+你在 custom op 裡加了個「安全檢查」: `if x.abs().max().item() > 1e4: raise ...`, 防止上游餵爆值。 立意良善, 但那個 `.item()` 是災難: 它強制一次 device-to-host 同步, 每次呼叫都在 `torch.compile` 圖裡插一個 graph break, 你精心融好的前後 fusion 全被切斷。 更糟的是上 `mode="reduce-overhead"` 時, 這個 host 同步讓 CUDA Graph capture 直接失敗, 整個 reduce-overhead 白開。 用 `TORCH_LOGS=graph_breaks` 一跑就看到 break 指回這一行。 修法: 防呆檢查移到 op 外面、或做成純 device 的 clamp 不落回 host。 這是最常見的「eager 下完全正常、compile 下效能莫名消失」的元凶 — 任何 `.item()`、`.cpu()`、`print(tensor)` 在 hot op 路徑上都是 compile 殺手。
+</Callout>
 
 ## 多 GPU 注意事項
 
@@ -54,6 +62,10 @@ def test_gelu_perf_regression():
 
 關鍵: baseline 綁定硬體 (不同 GPU 數字不同)、用穩健的計時 (warmup + events + 多次取中位數)、留合理容忍度避免 flaky。 除了絕對時間, 也保留一條「相對 torch.compile / 原生實作」的比值測試 — PyTorch 升級後若內建實作追上來了, 這條測試會提醒你: 也許該功成身退, 刪掉 custom kernel 回歸內建 (維護成本歸零也是一種優化)。
 
+<Callout variant="warn" title="落到真實場景: library 升級讓 kernel 悄悄退化 20%">
+一個真實會發生的劇情: 你的 fused kernel 半年前基準是 0.80 ms, CI 一直綠。 某天有人把 PyTorch 從 2.3 升到 2.5, 順帶換了 CUDA runtime — 你的 kernel 沒改一行, 卻因為新版 compiler 對某個 loop 的暫存器配置變了, 悄悄變成 0.98 ms (退化 22%)。 沒有 regression 測試的話, 這 22% 會混在「升級後整體變化」裡沒人發現, 半年後才有人抱怨訓練變慢、再花三天二分。 有了 `assert t <= baseline_ms * 1.10` 這條 CI gate, 升級的那個 PR 當場就紅、責任歸屬清楚。 這就是為什麼效能要當成 correctness 一樣進 CI: 效能退化和數值錯誤一樣是 bug, 只是它不會拋 exception, 只會讓帳單變貴。
+</Callout>
+
 ## Deployment Checklist
 
 上線前逐項確認:
@@ -67,6 +79,10 @@ def test_gelu_perf_regression():
 - **Observability**: benchmark、profiler trace、版本資訊、tuning cache 都能追溯。
 
 這份 checklist 的目的不是增加流程, 而是避免 custom kernel 成為訓練系統裡最難 debug 的黑盒。
+
+<Callout variant="insight" title="落到真實場景: determinism 那格如何在複現 bug 時救你">
+checklist 的 determinism 一格平常沒人在意, 但這個場景會讓你慶幸有做: 研究員回報「同 seed 兩次訓練 loss 對不上」, 要複現一個數值 bug。 他們開了 `torch.use_deterministic_algorithms(True)`, PyTorch 的內建 op 都乖乖走確定性路徑 — 但你的 custom kernel 裡有個 `atomicAdd` 做 reduction (第 10 章), atomic 的浮點累加順序每次執行都不同, 於是它成了整個系統裡唯一的非確定性來源, 兩次 run 就是差一點。 如果你當初照 checklist 讓 kernel 在 deterministic mode 下「報錯或切到確定性 fallback」, 研究員會立刻看到明確訊息、知道要關掉它或用 fallback; 沒做的話, 這個 bug 會被誤導去查 dataloader、去查 dropout, 浪費好幾天。 上線前那一格勾選, 換的是別人 debug 時的幾天。
+</Callout>
 
 <LabBox path="kernels/06-pytorch-integration/custom_op_autograd">
 `custom_op_autograd/` 有完整範例: 用 `torch.library.custom_op` 註冊 GELU (含 fake/meta 與 backward)、一個 `torch.compile` 相容性測試, 以及一個 regression benchmark 樣板 (記錄 baseline JSON、比對容忍度)。 跑 `python test_custom_op.py`, 確認 op 能被 compile、gradcheck 通過、且效能在預算內。

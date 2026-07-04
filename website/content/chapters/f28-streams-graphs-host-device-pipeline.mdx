@@ -14,6 +14,10 @@
 
 先用 timeline profiler 看 stream lane。 若 GPU 上出現很多空洞, 不要急著改 kernel; 先把 pipeline 接順。
 
+<Callout variant="warn" title="落到真實場景: 一行 .item() 讓 GPU 每步空等">
+最經典的隱性同步就藏在 PyTorch training loop 裡的一行 `if loss.item() > threshold:` 或 `print(loss.item())`。 `.item()` 會把一個 GPU scalar 搬回 CPU, 為此必須 block 住 CPU 直到該 step 的所有 GPU 工作跑完 — 等於在每個 iteration 插一個 `cudaDeviceSynchronize`, GPU 做完就得空等 CPU 走完 Python。 在 Nsight Systems timeline 上你會看到每步之間規律的 GPU 空洞。 修法是把 logging 改成每 N 步才 `.item()` 一次, 或用 `loss.detach()` 累積、在 epoch 尾端一次搬回。 同理 `tensor.cpu()`、`.numpy()`、`nonzero()`、把 GPU tensor 拿去做 Python `if` 判斷, 都是同一類殺 pipeline 的隱性同步。
+</Callout>
+
 ## Pinned Memory 與 Asynchronous Copy
 
 H2D/D2H copy 要和 kernel 重疊, host buffer 通常需要 pinned memory:
@@ -48,6 +52,10 @@ for (int chunk = 0; chunk < chunks; ++chunk) {
 
 理想情況下, chunk `i` 在 compute 時, chunk `i+1` 正在 H2D, chunk `i-1` 正在 D2H。 Chunk 太小會被 launch/copy overhead 吃掉; chunk 太大又失去 overlap。
 
+<Callout variant="insight" title="落到真實場景: 一個放不進 VRAM 的 batch inference">
+double buffering 最實際的用途是「資料量大於顯存」的離線批次推論。 假設你要對一億筆 embedding 做一個 transform, 全部 host data 有幾百 GB、遠超 80 GB HBM, 只能分 chunk 串流。 天真寫法是 for-loop 裡「copy 一塊 → 算一塊 → copy 回來」, 但這樣 copy engine 在 compute 時完全閒置, 反之亦然, 整體時間約是 copy + compute 相加。 用兩組 buffer 加兩個 stream 讓第 `i` 塊在算的同時第 `i+1` 塊在 H2D、第 `i-1` 塊在 D2H, 只要 PCIe 頻寬和 compute 大致平衡, 端到端時間就從「copy + compute」壓到「max(copy, compute)」, 近乎腰斬。 前提是 host buffer 必須 pinned, 否則 copy 無法真正非同步。
+</Callout>
+
 ## Events、Dependencies 與 Stream Semantics
 
 多 stream 不是自動並行。 你必須用 event 表示真正的依賴:
@@ -59,6 +67,10 @@ kernel<<<grid, block, 0, compute_stream>>>(d);
 ```
 
 避免在 hot path 使用全 device synchronize。 需要等某一段工作時, 等 event 或同步特定 stream。
+
+<Callout variant="warn" title="落到真實場景: 以為開了兩個 stream 就會並行">
+一個很常見的誤解: 開了 `copy_stream` 和 `compute_stream` 兩個 stream, 就假設 copy 和 compute 會自動 overlap。 但 stream 只表達「這條 lane 內部依序、lane 之間無隱含依賴」— 如果 kernel 真的要吃 copy 的結果, 你必須用 event 把依賴顯式建出來, 否則 compute_stream 上的 kernel 可能在 copy 還沒完成時就啟動, 讀到垃圾資料、間歇性算錯。 反過來另一個坑是「假並行」: 兩段本來獨立、你以為並行的工作, 因為都用了 default stream (stream 0) 而被隱式序列化, timeline 上兩條 lane 其實一前一後。 正確做法是明確 `cudaEventRecord` + `cudaStreamWaitEvent` 表達真依賴, 並確認獨立工作各自在 non-default stream 上。
+</Callout>
 
 ## CUDA Graphs / HIP Graphs
 
@@ -79,6 +91,10 @@ for (int iter = 0; iter < iters; ++iter) {
 
 Graph 適合 shape、address、控制流相對固定的迭代。 若每次 shape 都不同, 需要 graph cache 或退回一般 launch。
 
+<Callout variant="insight" title="落到真實場景: LLM decode 被 CPU launch 拖垮">
+CUDA Graph 對 LLM decode 是決定性的。 每個 decode step 只算一個 token, 內部卻要 launch 幾十甚至上百個小 kernel (每層的 QKV proj、attention、MLP、norm、RoPE...), 每個 kernel 的 GPU 執行時間可能只有幾微秒, 但 CPU 端 launch 一個 kernel 的固定開銷也是幾微秒 — 於是 GPU 常常做完一個 kernel 就空等 CPU 送下一個, profiler 上 kernel 之間全是 launch gap, GPU 利用率低得可憐。 因為 decode 每步的 shape 與 address 都固定, 正好適合 graph capture: 把整個 decode step 的 launch DAG capture 一次, 之後每步 `cudaGraphLaunch` 一次 replay, CPU 開銷從「上百次 launch」壓成「一次」。 這就是 vLLM 的 CUDA Graph 模式和 PyTorch `torch.compile` 的 cudagraph 能大幅拉高 decode 吞吐的原因; 代價是 batch size 變動時要為每個常見 size 各 capture 一份 graph。
+</Callout>
+
 ## Kernel Fusion 與 Pipeline 的取捨
 
 Fusion 可以省掉 launch 和 global memory round trip, 但也可能:
@@ -88,6 +104,10 @@ Fusion 可以省掉 launch 和 global memory round trip, 但也可能:
 - 讓中間結果無法重用或無法被 library kernel 接手。
 
 決策方式很直接: 若兩個 op 之間只傳一個大中間 tensor, 且後續沒有其他 consumer, fusion 通常划算。 若中間 tensor 被多處使用, 或其中一段已有高度優化 library kernel, fusion 要用 end-to-end benchmark 證明。
+
+<Callout variant="warn" title="落到真實場景: 硬把 GEMM fuse 進去反而更慢">
+一個真實的反例: 你想把 `Linear → bias → GELU` 三步 fuse 成一個 kernel 省掉中間 tensor 的 round trip, 聽起來一定賺。 但 GEMM 那一段其實是 cuBLASLt/CUTLASS 花了無數 tuning 才逼到接近 peak 的 kernel; 你手寫的 fused kernel 為了塞下 epilogue, register pressure 上升、occupancy 掉、tile 排程也不如 library, 結果 GEMM 本體慢了 30% — 省下的那一次 bias/GELU 的 memory round trip 根本補不回來。 正解是別動 GEMM 本體, 而是用 library 自己的 epilogue fusion (第 22 章 CUTLASS 的 epilogue visitor、cuBLASLt 的 epilogue enum) 把 bias/GELU 掛在它高度優化的 kernel 尾巴上。 這就是「其中一段已有高度優化 library kernel 時, fusion 要 end-to-end 證明」的具體含義 — 只 fuse elementwise、把重活留給 library。
+</Callout>
 
 ## Multi-GPU 與 Communication Overlap
 

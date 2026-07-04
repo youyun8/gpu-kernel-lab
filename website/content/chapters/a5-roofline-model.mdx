@@ -25,6 +25,10 @@ $$
 
 拖動上面的 FLOPs / bytes, 看你的點如何在圖上移動。 Vector add 這種 AI ≈ 0.1 的 kernel 死死貼在斜線上 — 這解釋了第 2 章為什麼它 GFLOP/s 很低卻很正常: 它已經接近 bandwidth 屋頂了, 低的是 compute 而非效率。 GEMM 隨著 tiling 把 AI 往右推, 才有機會爬到 compute 屋頂。
 
+<Callout variant="insight" title="落到真實場景: 同一個 GEMM, prefill 是 compute-bound、decode 是 memory-bound">
+Ridge point 兩側的分野, 在 LLM 推論裡就是 prefill 與 decode 的本質差異 — 而且用的是同一份 weight。 Prefill 一次處理整段 prompt 的幾百上千個 token, weight 從 HBM 搬一次就被大量 token 重複使用, AI 很高, 落在 ridge point 右邊 → compute-bound, 瓶頸是 Tensor Core, 該衝的是低精度與 pipe utilization。 Decode 每步只算一個 token 的 GEMV, 幾乎沒有 reuse, 每個 output 都要把對應 weight 從 HBM 搬一遍, AI 極低 → memory-bound, 瓶頸是 HBM 頻寬, 該做的是 batching (攤薄 weight 搬運)、weight quantization (減 bytes)、KV cache 壓縮。 搞混這兩者, 你可能花力氣對 decode 上 Tensor Core, 但它根本卡在搬 weight, 算力再強也閒著。
+</Callout>
+
 ## 常見 Kernel 的 AI 落點
 
 建立幾個錨點, 以 fp32、不做任何 reuse 優化的 naive 實作估算:
@@ -51,6 +55,10 @@ $$
 - **階層式 roofline**: 對每一層 memory (L1、L2、HBM) 各畫一條斜線。 一個 kernel 可能對 HBM 是 compute-bound、對 L2 卻是 bandwidth-bound — 這告訴你瓶頸在哪一層。 Nsight Compute 的 roofline section 可以直接畫出來。
 
 還有一個隱藏假設要記得: roofline 假設 memory 與 compute 完全重疊。 若你的 kernel 因為 latency 沒被藏好而兩者都閒著 (latency-bound), 它會遠低於兩條屋頂 — 這種情況先回第 8 章補 occupancy 或 ILP, 再談 roofline。
+
+<Callout variant="warn" title="落到真實場景: 量測 AI 遠低於理論值, 抓到 uncoalesced 存取">
+理論 AI 與量測 AI 的落差, 是 profiler 幫你抓 access-pattern bug 的利器。 真實情境: 你算某 kernel 的理論 AI 是 4 FLOP/byte, 但 Nsight Compute 的 roofline section 把量測點畫在 AI ≈ 1 的位置, 且遠低於 bandwidth 屋頂。 差 4 倍代表你實際從 DRAM 搬的 bytes 是理想的 4 倍 — 幾乎一定是 uncoalesced / strided 存取 (第 6 章), 硬體把整段 128-byte segment 搬進來卻只用了其中 1/4。 判讀方法很機械: 拿 profiler 的 `dram__bytes` 除以你手算的理想 bytes, 這個放大倍率就是被浪費的頻寬。 修好 layout (SoA、對齊、vectorized load) 後量測 AI 會往理論值靠攏, 點也跟著往右上移。 這比盯著 GFLOP/s 猜有效率得多。
+</Callout>
 
 ## 怎麼把你的 Kernel 標上去
 
@@ -89,6 +97,10 @@ Roofline 的好處是能把技巧翻譯成座標變化:
 - **Quantization / compression**: bytes 下降, AI 上升, 但要把 scale metadata 和 dequant FLOP 算進去。
 
 所以每次優化後都要重算一次點。 當 bandwidth-bound kernel 被 tiling 推過 ridge point, 下一步就不再是減 bytes, 而是提高 compute pipe utilization。
+
+<Callout variant="insight" title="落到真實場景: FP8 weight 為什麼對 decode 是雙贏、對 prefill 只賺一半">
+用 roofline 座標看 quantization, 才知道它什麼時候真的有用。 把 weight 從 FP16 換成 FP8, 做了兩件事: bytes 砍半 (斜線效果 — 對 memory-bound kernel 直接把有效頻寬翻倍), 且 Hopper/Blackwell 的 FP8 Tensor Core peak 又比 FP16 高一截 (抬高水平屋頂)。 對 memory-bound 的 LLM decode (GEMV): 它貼在斜線上, bytes 減半幾乎等於 latency 減半 — 這是 weight-only quantization (AWQ、GPTQ) 在推論如此普及的原因。 對 compute-bound 的 prefill (大 GEMM): 它已頂在水平屋頂, 減 bytes 幫不上忙, 真正吃到的是更高的 FP8 compute roof, 但前提是 activation 也量化、AI 仍在 ridge 右側。 別忘了把 scale metadata 的搬運與 dequant FLOP 算進去 — 對極小的 GEMV, 這些額外成本有時會吃掉一部分收益。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 跑 `roofline_probe`: 它對幾個不同 AI 的 micro-kernel (從純 copy 到每 byte 做很多 FMA) 各量一次, 印出 (AI, GFLOP/s)。 把這些點對照上面的互動 roofline, 你會清楚看到低 AI 的點貼著斜線、高 AI 的點頂到水平線。

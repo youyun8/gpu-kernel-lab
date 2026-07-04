@@ -49,6 +49,10 @@ float avgMs = ms / kIters;
 </Platform>
 </PlatformTabs>
 
+<Callout variant="warn" title="落到真實場景: 忘了 synchronize 的假 30% 加速">
+「我改了 kernel, 快了 30%」最常見的假象, 就出在用 Python 的 `time.time()` 包住一個沒同步的 GPU op。 因為 launch 是非同步的, `time.time()` 量到的其實是 CPU 把 kernel 丟進 queue 的時間, kernel 可能根本還沒跑完 — 你「優化」的往往只是 launch overhead 或 dispatch 路徑。 正確做法在 PyTorch 裡是量測前後各補一次 `torch.cuda.synchronize()`, 或直接用 `torch.cuda.Event(enable_timing=True)` (本章 CUDA event 的 Python 版)。 更省事的是用 `torch.utils.benchmark.Timer`, 它內建 warmup 與同步。 這個坑害過無數 PR: benchmark 顯示大勝, 合進去卻發現端到端毫無變化, 因為那 30% 是量測假象。
+</Callout>
+
 ## 從時間換算成有意義的數字
 
 光有毫秒沒用, 要換成 achieved bandwidth 或 throughput, 才能和硬體 peak 比較:
@@ -72,6 +76,10 @@ $$
 - **卡上有沒有別人**: 共用機器上其他 process 會搶 SM 與頻寬。 量測前用 `nvidia-smi` / `rocm-smi` 確認卡是空的。
 - **報中位數而非平均**: 中位數對偶發的抖動 (OS 排程、ECC scrub) 更穩健; 更好的做法是同時報告 p10/p50/p90, 讓分佈說話。
 - **資料內容也可能影響時間**: 例如含大量 denormal 的浮點運算會慢。 用貼近真實的輸入分佈。
+
+<Callout variant="warn" title="落到真實場景: CI 效能回歸為什麼一直誤報">
+把「控制環境」丟掉, 最直接的後果是效能 CI 到處亂叫。 常見情境: 團隊架了個 nightly benchmark 想抓 kernel 回歸, 但跑在共用的雲端 GPU 上、沒鎖頻、也沒獨佔整卡 — 結果同一份 commit 今天 p50 是 1.8 ms、明天 2.1 ms, 全因為 boost clock 浮動、鄰居 process 搶 L2、或熱節流。 這種噪音一大, 真正 5% 的回歸就淹沒在雜訊裡, 大家開始無視警報。 production 的 perf CI 標配是: `nvidia-smi -lgc` 鎖定時脈、獨佔整張卡、丟掉 warmup、報 p50/p90 而非單次, 並設定「連續 N 次超過門檻才 alert」來壓假陽性。 用貼近真實的 shape 與輸入分佈也屬於同一件事 — denormal 或極端值會讓時間漂移。
+</Callout>
 
 ## 第一次使用 profiler
 
@@ -107,6 +115,10 @@ omniperf profile -n vadd -- ./vector_add
 - **Regression benchmark**: 固定 input seed、shape set、clock/environment, 記錄 p50/p90。 Production kernel 不只要最快一次, 還要穩定。
 
 一個常用 sanity check: 把問題大小加倍。 若時間幾乎不變, 你量到的是 launch overhead 或同步; 若時間約加倍, 你量到的是 throughput path; 若時間超線性增加, cache、TLB、L2 residency 或 memory capacity 可能變成新瓶頸。
+
+<Callout variant="insight" title="落到真實場景: 用 batch sweep 找 memory-bound 的膝點">
+這個「加倍問題大小」的 recipe, 在調 serving 吞吐時就是掃 batch size 找拐點。 對一個 GEMM-heavy 的推論 kernel, 你從 batch 1、2、4… 一路量 latency: 小 batch 區 latency 幾乎不動 (你在 memory-bound / latency-bound 區, 卡在等 weight 從 HBM 搬進來, 增加 batch 幾乎免費), 過了某個膝點 latency 開始隨 batch 線性上升 (轉成 compute-bound, Tensor Core 吃滿了)。 那個膝點就是你的最佳 batch size — 在它之前加 batch 只賺不賠, 之後就是拿 latency 換 throughput。 這正是 dynamic batching scheduler (Triton Inference Server、vLLM) 在做的決策; 沒有這條 sweep 曲線, 你只能瞎猜 `max_batch_size`。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 `kernels/common` 裡的 benchmark harness 已經幫你實作了 warmup + event timing + % of peak。 用它跑 `bandwidth_probe`, 再用上面的 `ncu` / `rocprofv3` 指令對同一個 binary profiling, 對照 harness 印出的數字和 profiler 的 speed-of-light section 是否一致。

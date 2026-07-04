@@ -70,6 +70,10 @@ race_demo: 8 threads x 1000000 increments, expected total 8000000
 
 不但錯, 而且**每次執行結果都不同** — 這是 data race 的招牌特徵: 結果取決於 threads 恰好怎麼交錯, 換一台機器、換一次執行都可能不一樣。
 
+<Callout variant="warn" title="落到真實場景: GPU histogram 掉數量、每次還不一樣">
+這個 `++counter` 掉更新的實驗不是玩具, 它就是真實 GPU kernel 的縮影。 寫一個 histogram/feature-count kernel, 若用 `bins[b] = bins[b] + 1` 讓多個 thread 更新同一個 bin, 得到的計數會少於真實值、而且每次執行都不同 — 和這裡的 `race_demo` 一模一樣。 最陰險的是 skewed data: 若大部分 token 都落在同一個熱門 bin (例如 NLP 裡的高頻詞), 競爭最激烈、掉的最多。 病徵和修法都對得上: 結果 run-to-run 不同就先懷疑 race, 改用 `atomicAdd` 或每個 block 先在 shared memory 私有累積再合併。
+</Callout>
+
 ## 同步工具箱: CPU ↔ GPU 對照
 
 ### Mutual exclusion: lock
@@ -102,6 +106,10 @@ pthread_mutex_unlock(args->mutex);
 
 **GPU 上幾乎不用 lock。** 原因很結構性: 一個 warp 的 32 個 threads 同步執行 (lockstep), 如果 lane 0 拿到 lock 而 lane 1 在 spin-wait 等同一個 lock, 兩個 lane 在舊架構上會互相等待到 deadlock; 就算硬體支援 (independent thread scheduling), 數十萬個 threads 排隊拿一個 lock 也等於把整台 GPU 序列化。 GPU 的做法是: **用 atomic 取代 lock**, 或者**重新設計演算法讓競爭消失** (privatization — 每個 block 先在自己的 shared memory 裡累積, 最後才合併, 見第 26 章)。
 
+<Callout variant="warn" title="落到真實場景: 有人真的在 CUDA 裡手刻 spin lock">
+新手把 CPU 直覺搬到 GPU 時, 常會想用 `atomicCAS` 手刻一個 mutex 來保護 shared 結構 — 在舊架構 (Volta 之前無 independent thread scheduling) 上這幾乎必然 hang: 同一個 warp 裡 lane 0 拿到鎖、lane 1 在 spin 等, 但 SIMT 要求兩者 lockstep, 拿鎖的 lane 走不到釋放的那行, 整個 warp 卡死。 就算硬體支援, 讓數十萬 thread 排隊搶一把鎖也等於把整台 GPU 序列化。 正確心態是: 在 GPU 上看到「想加鎖」的衝動, 先問能不能改成 atomic, 或用 privatization 讓競爭根本不存在。
+</Callout>
+
 ### Atomics
 
 把 read-modify-write 變成一條不可分割的指令, 兩邊語法幾乎平行:
@@ -120,6 +128,10 @@ atomicAdd(&bins[items[i]], 1);
 CPU 端的 `std::memory_order` 控制這個 atomic 同時對**其他記憶體操作**提供多強的順序保證: 純計數器用 `relaxed` 就夠; 若要「寫完資料再舉旗, 別人看到旗就看得到資料」, 需要 release/acquire。 GPU 端的對應概念是 **atomic scope**: CUDA 的 `atomicAdd_block` / `atomicAdd_system`、HIP 的對應 API, 以及 `__threadfence_block()` / `__threadfence()` / `__threadfence_system()` 分別控制「保證做到 block 內 / device 內 / 跨 device+host 可見」。 Scope 越大越慢 — 只買你需要的可見範圍。
 
 `gpu_histogram_race.cpp` 用 histogram 對照「壞版 (`bins[b] = bins[b] + 1`) vs 正確版 (`atomicAdd`)」: 壞版每次執行少掉的數量都不同, 正確版永遠與 host reference 一致。
+
+<Callout variant="insight" title="落到真實場景: atomic scope 只買你需要的可見範圍">
+Atomic scope 選錯是「正確但慢」的隱形稅。 假設一個 kernel 只需要在同一個 block 內累加 partial (例如 block-local histogram 合併), 用 `atomicAdd_block` (CUDA) 就夠, 它只保證 block 內可見, 硬體不必把結果推到整個 device 的 L2 一致點; 若順手寫成預設的 device-scope `atomicAdd`, 每次都多付跨 SM 一致性的成本, 在高競爭 kernel 上是可量測的變慢。 同理 `atomicAdd_system` (跨 device + host) 只在真的要 GPU 與 CPU 或多卡協調時才用。 對應到 CPU 端就是 `std::memory_order`: 純計數器用 `relaxed`, 只有要「寫完資料再舉旗」時才升到 release/acquire — 兩邊哲學一樣, 別買用不到的順序保證。
+</Callout>
 
 ### Reduction: 私有化再合併
 
@@ -159,6 +171,10 @@ Barrier 回答「大家都做完第一階段了嗎?」:
 | 等所有 threads | join 所有 threads | kernel launch 邊界 (或 cooperative launch 的 grid sync) |
 
 `__syncthreads()` 只覆蓋**一個 block**。 上面 `blockReduceSum` 的 tree reduction, 每一輪之間的 `__syncthreads()` 保證「這一輪的寫入完成, 下一輪才讀」 — 拿掉任何一個, 就是 shared memory 上的 data race。 而跨 block 的協調 (例如 single-pass reduction 讓「最後一個完成的 block」收尾) 必須用 `__threadfence()` + atomic ticket, `gpu_threadfence.cpp` 是完整的範例: fence 保證 partial sum 先發佈、才領 ticket, 少了 fence 最後一個 block 可能讀到 stale 資料 — 這種跨 block race 是 `__syncthreads()` 救不了的。
+
+<Callout variant="warn" title="落到真實場景: 想跨 block 同步, 結果在 kernel 裡等別的 block">
+最常見的 barrier 誤用是「以為 `__syncthreads()` 能等整個 grid」。 有人在 kernel 中間想讓所有 block 都算完 phase 1 再一起做 phase 2, 於是加了 `__syncthreads()` — 但它只等自己 block 內的 thread, 其他 block 根本不管, 得到的是難以重現的錯誤結果。 GPU 沒有便宜的 grid-wide barrier: 標準做法是把 phase 1 和 phase 2 拆成兩個 kernel launch, kernel 邊界天然就是全域同步點; 或在明確支援時用 cooperative groups 的 grid `sync()` (需要 cooperative launch 且 occupancy 受限)。 記住這個分工: block 內用 `__syncthreads()`, block 間用 kernel 邊界或 `__threadfence()` + atomic ticket。
+</Callout>
 
 ## 常見陷阱
 

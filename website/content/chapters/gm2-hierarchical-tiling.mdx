@@ -4,6 +4,10 @@
 
 <HierarchicalTilingFigure />
 
+<Callout variant="insight" title="落到真實場景: 一個 CUTLASS tile config 就是這三層">
+翻開 CUTLASS 針對 SM80 half GEMM 的一個 tile config, 你會看到 `ThreadblockShape 128×128×32`、`WarpShape 64×64×32`、`InstructionShape 16×8×16` — 這正是本章的三層: threadblock tile 進 shared memory、warp tile 對齊到 Tensor Core 指令、instruction/thread tile 落在 register。 記住這個對應是有用的: 當 hipBLASLt 或 cuBLASLt 對你的 shape 選了某個 config、效能卻不如預期時, 你要能從這三個數字反推「是哪一層的 reuse 或 occupancy 被卡住」。
+</Callout>
+
 ## Block Tiling — 進 shared memory
 
 第一層: 把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。 每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
@@ -63,6 +67,10 @@ __global__ void sgemmTiled(const float* A, const float* B, float* C, int m, int 
 
 global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。 但 shared memory 的 bandwidth 也有限, 而且每個 thread 只算一個 output — 下一層要解掉這個。
 
+<Callout variant="insight" title="落到真實場景: 32×32 tile 的 shared memory 帳單">
+把 `kTile=32` 的 fp32 版本算一下 shared memory: `sA` + `sB` = 2 × 32 × 32 × 4B = 8 KB/block。 在一顆每 SM 有 100 KB shared memory 的 A100 上, 這允許約 12 個 block 同時常駐 — occupancy 還算健康。 但只要換成第 3 章的 double buffering (兩份 buffer) 或把 tile 放大到 `64×64`, shared memory 立刻翻倍到 16–32 KB, 常駐 block 數掉一半。 這就是為什麼 tile size 從來不是「越大越好」, 而是 reuse 與 occupancy 的拔河 — `ncu` 的 achieved occupancy 就是你的儀表板。
+</Callout>
+
 ## Thread / Register Tiling — outer product
 
 第二層 (跳過 warp tiling 先看最有感的一步): 讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 **register** 反覆用, 把 shared memory 的存取次數再攤薄。 這一步通常帶來整條階梯上最大的單步跳躍。
@@ -88,6 +96,10 @@ for (int p = 0; p < kTile; ++p) {
 ```
 
 注意 outer-product 結構: 每一步從 shared memory 讀 `TM + TN` 個值, 做 `TM × TN` 次 FMA — shared memory 存取相對 FLOP 的比例又下降一階。 這也是「低 occupancy + 高 ILP」路線的實例: `acc[TM][TN]` 吃掉大量 register, 但 4×4 = 16 條獨立 FMA 鏈本身就是絕佳的 latency hiding。
+
+<Callout variant="warn" title="落到真實場景: TM×TN 開太大, 悄悄 register spill">
+`8×8` 的 register tile 很誘人 — 每步 16 個 load 換 64 個 FMA。 但 `acc[8][8]` 就是 64 個 float 佔 64 個 register, 加上 operand 與 index, 一個 thread 很容易衝破每 thread 255 register 的上限, 編譯器就把 accumulator spill 到 local memory (實際上是 DRAM)。 症狀很反直覺: 你把 tile 從 `4×4` 放大到 `8×8`, GFLOP/s 不升反降。 檢查方法很直接 — 編 kernel 時看 `nvcc -Xptxas -v` 印出的 `spill stores` / `spill loads` 是否非零, 或在 `ncu` 看 local memory traffic。 這也是 register tile 通常停在 `8×8` 附近的原因。
+</Callout>
 
 ## Warp Tiling — 中間那層
 

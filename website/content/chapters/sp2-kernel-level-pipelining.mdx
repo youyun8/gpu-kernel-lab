@@ -26,6 +26,10 @@ computeTile(sA[cur], sB[cur]);       // drain: last tile
 
 用第 1 章的語言: 這是深度 2 的 pipeline, stage 是「load」與「compute」。 關鍵前提是 **load(k+1) 不依賴 compute(k)** — 下一塊 tile 的位址早就知道, 所以能提前發。 理想情況每個 k-tile 從 `L + C` 攤成 `max(L, C)`。
 
+<Callout variant="insight" title="落到真實場景: SGEMM 主迴圈的 long-scoreboard stall">
+把這段主迴圈放到真實的 SGEMM 上: 假設 K=4096、kTile=8, 主迴圈跑 512 次 iteration。 單 buffer 版每次都卡在 `__syncthreads` 後等 global load 回來, ncu 會看到很高的 `Long Scoreboard` stall、FMA 佔比偏低。 換成這裡的 double buffering 後, 第 t 次的 `loadTile(nxt)` 與 `computeTile(cur)` 疊在一起, long-scoreboard stall 明顯下降。 這正是 sp2-e4 要你在 `sgemm_step4_double_buffer` 上實測的東西 — 加速通常來自把那 512 次 load 的 latency 藏進 FMA。
+</Callout>
+
 <Exercise id="sp2-e1" title="Double buffering 的 shared memory 代價" kind="paper" level="進階">
 一個 GEMM kernel 用 `128×8` 的 A tile 與 `8×128` 的 B tile, fp32。 (a) 單 buffer 需要多少 shared memory? (b) double buffering 呢? (c) 若某 GPU 每個 SM 有 100 KB shared memory 且想要 2 個 block 同時常駐, double buffering 還放得下嗎?
 
@@ -66,6 +70,10 @@ for (int t = 0, s = 0; t < numTiles; ++t, s = (s + 1) % kStages) {
 
 更深的 pipeline 能容忍更長的 memory latency: 只要 `stages × compute_per_tile ≥ memory_latency`, load 就被完全藏住。 Hopper 的 **TMA** 更進一步, 用一個 descriptor 描述整塊 tile 的 copy。 AMD 對應的是 LDS 的 direct-load 路徑。
 
+<Callout variant="insight" title="落到真實場景: A100 上為何預設開 3-4 stage">
+cp.async 的多 stage 正是 A100 上 FlashAttention-2 與 CUTLASS GEMM 預設開 3–4 stage 的原因: HBM latency 動輒 400–600 cycles, 光 double buffering (只 1 個 load 在途) 藏不住 (見 sp2-e2)。 實務上你在 CUTLASS 直接把 template 的 `Stages` 設成 3 或 4, 讓 3 個 k-tile 的 `cp.async` load 同時在途; 開太多 (例如 6) 則 shared memory 爆掉、occupancy 掉, 整體反而變慢。 甜蜜點要用 ncu 掃 `Long Scoreboard` 與 achieved occupancy, 通常落在 3–4。
+</Callout>
+
 <Exercise id="sp2-e2" title="要幾個 stage 才藏得住 latency" kind="paper" level="挑戰">
 某 kernel 每個 k-tile 的 compute 花 200 cycles, 而 global memory latency 是 550 cycles。 (a) depth-2 (double buffering) 能完全藏住 load 嗎? (b) 至少要幾個 stage? (c) 每多一個 stage 的代價是什麼?
 
@@ -105,6 +113,10 @@ if (warpRole == kProducer) {
 ```
 
 好處: producer 與 consumer 用**不同的硬體引擎** (TMA/LSU vs. Tensor Core), 分開後兩者能真正同時滿載; 而且各自的指令排程更單純, 更容易讓 compiler 產生緊湊的 schedule。 這正是 Hopper WGMMA + TMA kernel 高效的關鍵之一。
+
+<Callout variant="warn" title="落到真實場景: producer/consumer 比例調錯就露 bubble">
+在 Hopper WGMMA kernel 上調 warp group 分工時最容易踩的坑, 是 producer 給太少: 只留 1 個 warp group 搬資料、其餘全算, 結果 TMA 追不上 WGMMA 的胃口, consumer 一直 `wait_full` 空等, ncu 上看到 Tensor Core active 反而下降。 反過來 producer 太多又浪費本可拿去算的 warp。 CUTLASS 的 Cooperative / Pingpong schedule 就是在調這個比例、順帶把 epilogue 藏進 MMA。 換 shape 或 dtype 後最佳比例會變, 必須重新 autotune — 這就是 sp2-e3 說的「producer/consumer 要平衡」。
+</Callout>
 
 <Exercise id="sp2-e3" title="Warp specialization vs. 對稱 warp" kind="paper" level="挑戰">
 一個 block 有 8 個 warp。 方案 A: 8 個 warp 都做「load 一點、算一點」。 方案 B: 2 個 producer warp 專搬資料、6 個 consumer warp 專算。 (a) 方案 B 為什麼可能讓 Tensor Core 使用率更高? (b) 什麼情況下方案 B 反而更差? (c) producer 太少會發生什麼?

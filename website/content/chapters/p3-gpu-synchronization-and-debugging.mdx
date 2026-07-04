@@ -25,6 +25,10 @@ __global__ void scale(float* x, int n, float a) {
 }
 ```
 
+<Callout variant="insight" title="落到真實場景: grid-stride loop 讓同一份 kernel 吃任何 batch">
+Grid-stride loop 在 production 裡的價值是「launch 配置與資料大小解耦」。 你的 elementwise kernel (activation、scale、bias add) 部署後會遇到 `n` 從幾千到上億都有: 若寫死「一個 thread 一個元素」, 小 `n` 時大半 block 閒置、大 `n` 時可能超過單次 grid 上限。 改成 grid-stride loop 後, 你可以固定 launch 一個「剛好填滿 GPU」的 grid (例如 `2 * SM 數 * 每 SM 最大 block`), 讓每個 thread 用 `i += blockDim.x * gridDim.x` 迴圈掃過多個元素, 同一份 kernel 對任何 `n` 都保持高 occupancy。 PyTorch/框架的 elementwise kernel 幾乎都是這個寫法。
+</Callout>
+
 ## Locks 與 Semaphores 為何少見
 
 CPU 上 mutex/semaphore 是日常工具; GPU kernel 內則通常避免 blocking lock 或 semaphore。 原因有三個:
@@ -39,6 +43,10 @@ GPU 的替代方案通常是:
 - 用 **privatization + reduction** 消除 hot global update。
 - 用 **kernel boundary / streams / events** 表達 phase sequencing。
 - 用 cooperative groups 只在明確支援的 launch 模式下做 grid-level sync。
+
+<Callout variant="insight" title="落到真實場景: dynamic work queue 也盡量避開全域鎖">
+就算你真的需要「多個 block 動態搶工作」(例如 ragged/sparse workload 的 persistent kernel), 標準做法也不是加一把 global lock, 而是用一個 atomic counter 當 work index: 每個 block `atomicAdd(&next_tile, 1)` 拿下一個 tile id 去做, 直到超過總數。 這其實就是 GPU 版的 dynamic scheduling, 用一次 atomic 取代整段 critical section, 沒有任何 thread 需要 block/spin 等別人。 若連這個 atomic counter 都成為熱點 (太多 block 同時搶), 再退一步改成每個 block 一次領一批 (batch of tiles), 攤薄 atomic 次數 — 一路都在「用 atomic + 減少競爭」而不是「加鎖」。
+</Callout>
 
 ## Device Atomics
 
@@ -78,6 +86,10 @@ if (threadIdx.x < 128) {
 }
 ```
 
+<Callout variant="warn" title="落到真實場景: 邊界檢查把最後一個 block 的一半 thread 擋在 barrier 外">
+這個 divergent barrier bug 最常在「處理不整除資料量」時不小心寫出來。 你有 1000 個元素、block size 256, 最後一個 block 只有前 232 個 thread 有效; 若把 reduction 寫成 `if (i < n) { ...; __syncthreads(); }`, 那 24 個 out-of-range 的 thread 不會進 barrier, 有效 thread 就永遠等不到全員到齊, kernel hang 或給出垃圾。 正確寫法是讓所有 thread 都無條件抵達 `__syncthreads()`, 邊界只用來決定「載入真值還是載入 0」: 例如 `partials[tid] = (i < n) ? in[i] : 0.0f;` 之後再無條件 `__syncthreads()`。 規則一句話: barrier 永遠不能放在會 diverge 的分支裡。
+</Callout>
+
 ## Fence: Visibility Without Waiting
 
 Barrier 是「等人」; fence 是「保證我的寫入先被看見」。 跨 block single-pass reduction 會用 `__threadfence()` 加 atomic ticket:
@@ -97,6 +109,10 @@ Reduction 是 GPU 平行化必學模式: 每個 thread 算 private partial, warp
 
 `kernels/00-parallel-foundations/gpu_block_reduce.cpp` 是基礎版; `kernels/04-reductions-softmax` 則延伸到 warp shuffle、softmax 與更完整的 reduction optimization。
 
+<Callout variant="insight" title="落到真實場景: softmax / layernorm 骨子裡就是 reduction">
+Reduction 不只出現在「加總」這種玩具例子, 它是 Transformer 每一層的隱形骨架。 Softmax 要先對一整 row 求 max (reduction)、再求 exp 的 sum (reduction), 才能 normalize; LayerNorm 要對 feature 維度求 mean 與 variance (兩個 reduction); attention score 也要沿 key 維度 reduce。 這些 kernel 全部套用同一個模式: 每個 thread 算 private partial, warp 內用 `__shfl_down_sync` 合併, block 內用 shared memory tree reduce, 而不是每個元素都 atomic 到全域。 這也是為什麼 FlashAttention 之類的 fused kernel 要煞費苦心維護 running max 與 running sum — 它們在做「不把整個 row 讀進來也能正確 reduce」的 online reduction, 直接決定了整個 attention 的記憶體與速度。
+</Callout>
+
 ## Debugging
 
 CPU race 用 ThreadSanitizer:
@@ -114,6 +130,10 @@ compute-sanitizer --tool racecheck ./gpu_block_reduce
 ```
 
 ROCm/HIP 對應 workflow 是 `rocgdb`, `rocprofv3`, HIP runtime error checks, 以及能支援的 sanitizer build。 Host-side threading bug 仍可用 ThreadSanitizer。
+
+<Callout variant="insight" title="落到真實場景: 在 CI 跑小 shape 的 racecheck job">
+`compute-sanitizer --tool racecheck` 跑起來比原生慢 5 到 20 倍, 所以沒人會在 production shape 上開它 — 但這不代表它沒用。 實務做法是在 CI 加一個專門的 sanitizer job, 只跑最小、最刁鑽的 shape: `warpSize-1`、`warpSize+1`、非整除 tile、單一 block。 漏掉的 `__syncthreads()` 這類 shared-memory race 在小 shape 一樣會被 racecheck 抓到並印出衝突的兩條 access, 而在大 shape 你只會看到「偶爾數字對不上」卻無從下手。 這是抓 race 最便宜的保險: 開發時本機跑一次, CI 每次 PR 用小 shape 把關, memcheck 順便抓越界。 ROCm 端對應的是 `rocgdb` 加上 `hipcc -fsanitize=address` build。
+</Callout>
 
 ## Pitfalls
 

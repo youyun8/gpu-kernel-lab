@@ -11,6 +11,10 @@ LLM 推論分成兩個 phase, 效能特性截然不同:
 
 一個 serving 系統必須同時把兩種 phase 塞滿 GPU, 這催生了 continuous batching (動態把新 request 併入正在跑的 batch)、chunked prefill (把長 prompt 切塊與 decode 交錯) 等排程策略 — 而這些排程直接決定了底層 kernel 收到什麼形狀 (第 13 章的 wave quantization/Stream-K 在這裡變得極其實際)。
 
+<Callout variant="warn" title="落到真實場景: 一個長 prompt 卡住所有人的 decode">
+這兩個 phase 混在一起會產生一個很痛的 production 症狀: 一個使用者送了 30K token 的長 prompt, 它的 prefill 是一個吃滿 Tensor Core 的大 kernel, 佔住 GPU 好幾十毫秒, 而此時所有其他人的 decode step 全被卡住, 互動式服務的 p99 latency 瞬間爆掉。 chunked prefill 就是為此存在: 把那個長 prefill 切成小塊, 每塊之間插入一輪 decode, 讓生成中的 request 不會被餓死。 調 `chunked_prefill_size` 本質上是在調底層 kernel 收到的形狀 — 太大則 decode 被卡, 太小則 prefill 的 GEMM 填不滿 GPU。 這就是為什麼「排程參數」和「kernel 效能」在 serving 裡是同一件事。
+</Callout>
+
 ## vLLM: PagedAttention 起家的通用引擎
 
 vLLM 的招牌是 **PagedAttention** (第 24 章) 帶來的高效 KV cache 管理與高吞吐 continuous batching。 它的 kernel 棧是「按場景挑最好的」:
@@ -35,13 +39,25 @@ for (int e = lane; e < kHeadDim; e += kWarpSize) dst[e] = src[e];
 
 只要 head dim 夠寬, warp 內的讀取仍然 coalesced — 代價主要是 page table 查表與 page 分散造成的 cache/TLB locality 損失。 Lab 的 `kv_page_gather` (在 `kernels/04-reductions-softmax`) 把 paged 與 contiguous 兩種佈局並排實測, 你可以親眼看 indirection 的成本有多小 (或多大, 取決於 page size)。
 
+<Callout variant="insight" title="落到真實場景: prefix caching 靠的就是這層 indirection">
+這層 `page_table` 查表看起來只是多一次記憶體讀取, 但它是 vLLM 一堆高階功能的地基。 因為 KV 是分頁的, 兩個共用同一段 system prompt 的 request 可以讓它們的 block table 指向同一批物理頁 — 這就是 automatic prefix caching, 省掉重算共享前綴的 prefill。 同理, beam search 的多個 beam、parallel sampling 的多個 sample 都能 copy-on-write 地共享 KV 頁, 只在分歧時才配置新頁。 換句話說, 你在 attention kernel 裡多付的那一次 `page_table[token / kPageSize]` 查表, 換來的是整個 serving 層的記憶體共享能力 — 這筆交易在高並發下極度划算。
+</Callout>
+
 ## SGLang: RadixAttention 與 Kernel 選型
 
 SGLang 以 **RadixAttention** 聞名 — 用 radix tree 自動在 request 之間共享 KV cache 前綴 (system prompt、few-shot 範例), 大幅提高快取命中。 在 kernel 層, SGLang 深度整合 **FlashInfer** 作為 attention 後端 (第 24 章), GEMM/量化走 CUTLASS/cuBLASLt, ROCm 上同樣接 AITER。 它和 vLLM 的差異更多在排程與 cache 策略, kernel 棧的組成高度重疊 — 這說明底層 kernel 已經是共享的公共財, 競爭在如何編排它們。
 
+<Callout variant="insight" title="落到真實場景: agent 工作負載讓 RadixAttention 大贏">
+RadixAttention 的價值在特定 workload 下會被放大到誇張。 想像一個 LLM agent 或 few-shot 分類服務: 每個 request 都帶著同一段幾千 token 的 system prompt + tool 說明 + few-shot 範例, 只有最後幾十個 token 不同。 沒有前綴共享時, 每個 request 都要為那幾千 token 重跑一次 prefill; SGLang 的 radix tree 自動偵測到這個共享前綴、直接命中已算好的 KV, prefill 成本幾乎歸零, 吞吐可以翻好幾倍。 這也解釋了為什麼「選引擎」要看 workload: 高前綴重疊的 agent/RAG 場景 SGLang 的 cache 策略特別亮眼, 而底層 attention kernel 其實和 vLLM 共用同一個 FlashInfer。
+</Callout>
+
 ## TensorRT-LLM: NVIDIA 的編譯式引擎
 
 TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 它以 TensorRT 為基礎, 內部大量使用 **CUTLASS** 生成的 GEMM/量化 kernel 與手寫的 fused attention (含 in-flight batching, 即 vLLM 的 continuous batching)。 編譯式的好處是能做跨層 fusion、精細的 kernel 選擇與 plugin; 代價是彈性較低 (改模型要重編)、只綁 NVIDIA。 它代表「為特定硬體壓到極致」的一端, 與 vLLM/SGLang「可攜 + 靈活」的一端形成光譜。
+
+<Callout variant="warn" title="落到真實場景: 改個 LoRA 就要重新 build engine">
+編譯式的代價會在你迭代快的時候咬人。 假設你在 A/B 測試不同 LoRA adapter 或調整 max sequence length, 用 vLLM 只是換個啟動參數; 用 TensorRT-LLM 每次改這類影響 graph 的東西, 都可能要重新 build engine, 而一次 build 在大模型上動輒數十分鐘, 還要為每種 GPU 型號 (A100/H100) 各 build 一份。 所以選型的實務判準是迭代頻率: 模型與形狀穩定、追求單卡極致吞吐的固定產線, TensorRT-LLM 的 offline 編譯換來的 fusion 很值; 需要頻繁換模型/adapter、跨 NVIDIA 與 AMD 部署的團隊, vLLM/SGLang 的執行期靈活性通常更省整體工程成本。
+</Callout>
 
 ## 一張圖看懂 Kernel 棧的分工
 
@@ -70,6 +86,10 @@ TensorRT-LLM 走另一條路: 把模型「編譯」成高度優化的 engine。 
 - **Backend flags**: FlashInfer、AITER、Triton、CUTLASS provider 的開關會直接換 kernel 棧。
 
 最佳配置取決於 workload: 短 prompt 高 QPS、長 context、batch offline decoding、低延遲互動式服務, 四者的最優 kernel 組合可能不同。 Trace + token-level latency histogram 比單一 tokens/s 更有診斷價值。
+
+<Callout variant="warn" title="落到真實場景: 把 fp8 KV cache 當免費午餐">
+最誘人也最容易誤用的 lever 是 KV dtype: 從 fp16 換成 fp8 直接把 decode 的 KV cache bandwidth 減半, 在 memory-bound 的 decode 上看起來是白吃的加速。 但它不是免費的 — 每次讀 KV 都要 dequant (乘 scale), 若 scale layout 沒和 KV block 對齊, 反而在 decode hot path 上引入額外 memory traffic 抵消收益; 更嚴重的是長上下文下 fp8 KV 的精度損失會累積, 表現為輸出品質悄悄下降卻沒有任何報錯。 正確做法是把 KV dtype 當成需要驗證的變更: 開 fp8 後同時量 token-level latency histogram (確認真的變快) 和一組 eval 指標 (確認品質沒掉), 而不是看到吞吐上升就直接上線。
+</Callout>
 
 <LabBox path="kernels/04-reductions-softmax">
 先跑 `kv_page_gather` 感受 paged KV cache 的 indirection 成本, 並試著改 `kPageSize` (16 → 4 → 64) 觀察 locality 的變化。 然後做一次「考古」: 裝一個 vLLM 或 SGLang, 對一次 generate 用 `torch.profiler` 或 Nsight Systems 抓 timeline, 試著認出裡面的 attention kernel、GEMM、norm/RoPE fused kernel, 並區分哪些屬於 prefill、哪些屬於 decode。 把你在第 17 章學的 trace 分析用在真實的推論引擎上。

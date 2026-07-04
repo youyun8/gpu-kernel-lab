@@ -36,6 +36,10 @@ __global__ void reduceSum(const float* in, float* out, int n) {
 }
 ```
 
+<Callout variant="insight" title="落到真實場景: 為什麼 reduction 的目標是「讀一遍的速度」">
+量一支 sum / norm reduction 時, 別拿 FLOP 當指標 — 它幾乎不算數, 你唯一要追的是 achieved bandwidth 對 HBM peak 的百分比。 上面這支 kernel 的理論極限就是「把輸入讀一遍」的時間 (輸出只有 gridDim 個 partial)。 naive 的 atomic 版可能只跑到峰值頻寬的 5–10%, 這支 shared-tree + warp-shuffle 版則應該逼近 80–90%。 所以驗收標準很明確: 用第 4 章的 benchmark 算出 GB/s, 除以 spec 上的 HBM 頻寬, 接近 1 就沒有再優化的空間了。
+</Callout>
+
 ## 最後一哩: 跨 block 的合併
 
 每個 block 產出一個 partial sum 之後, 還要合併成一個值。 三種做法各有取捨:
@@ -57,6 +61,10 @@ $$
 $$
 
 實作上就是把本章的 reduction 用兩次 (max 一次、sum 一次), 再做一次 elementwise 正規化 — naive 版本共掃三遍資料。 Row 夠短時一個 warp/block 處理一個 row, 中間值全程留在 register, 這正是 fused softmax kernel 的形狀 (第 20 章用 Triton 重寫的就是它)。
+
+<Callout variant="insight" title="落到真實場景: 不減 max 的 softmax 在 logits 上直接變 NaN">
+LLM 最後一層對著幾萬個 vocab 算 softmax, logits 動輒到 30~50; `expf(50)` 已經是 5e21, 再大幾個就 overflow 成 inf, 接著 inf / inf = NaN, 整個 loss 爆掉。 這不是理論顧慮 — 混合精度訓練裡漏掉 max-subtraction 是很典型的 NaN 來源。 本章的三遍作法 (max → sum → normalize) 與 online 版都內建這個減 max, 所以數值穩; 自己手寫 fused softmax 時, max-subtraction 是不能省的第一步, 而不是「算完 exp 再回頭補救 overflow」。
+</Callout>
 
 ## Online softmax: 一次掃描搞定
 
@@ -95,6 +103,10 @@ Reduction 家族很大, 實務上會依 shape 選不同版本:
 - **Segmented reduction**: key/value 已排序或有 segment offsets 時, 每段各自 reduce。 Histogram、embedding gradient、sparse ops 常用。
 
 數值上也要選策略: 普通 sum 可用 tree reduction; 長向量或精度敏感可用 pairwise/Kahan 類補償, 但會增加 FLOP 和 register。 Softmax 則應優先用 max-subtraction 或 online normalizer, 不要靠 `expf` 之後再補救 overflow。
+
+<Callout variant="insight" title="落到真實場景: 用 shape 決定 reduction 變體">
+同樣是「對最後一維求和 / 求 max」, 真實 workload 的形狀決定你該挑哪個變體。 BERT 類的 LayerNorm, hidden=768/1024 的短 row → warp-per-row (一個 warp 一列, shuffle all-reduce) 最省。 GPT 對 vocab=50k 算 softmax 的長 row → block-per-row 甚至 multi-block per row + 第二階段 reduce。 推薦系統的 embedding 依 segment offset 做 segmented reduction。 而一批長度參差不齊的 sequence, 用 persistent kernel 動態領 row 才能壓掉 tail effect。 選錯變體 (例如拿 block-per-row 去做幾百萬條超短 row) 會讓一半的 thread 閒著。
+</Callout>
 
 <LabBox path="kernels/04-reductions-softmax">
 `reduction` target 內含 naive → shared tree → warp shuffle 三個版本, 各報告 achieved bandwidth 與 % of peak;`softmax` target 比較 three-pass 與 online 版本, 並對 CPU reference 做數值正確性檢查 (含大值 overflow 測試)。 依序跑, 觀察 reduction 逐步逼近頻寬上限。

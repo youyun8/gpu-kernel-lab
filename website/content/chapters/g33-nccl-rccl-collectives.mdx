@@ -12,6 +12,10 @@
 
 訓練一個大模型通常三種同時用 (3D parallelism), 所以通訊 library 的效率直接決定 scaling 曲線的斜率。
 
+<Callout variant="warn" title="落到真實場景: 加卡卻沒變快的 data-parallel 訓練">
+你把 data-parallel 訓練從 8 卡擴到 64 卡, 期待近 8 倍加速, 結果只快了 3 倍多, GPU 利用率還掉下來。 profile 一看, 每個 step 尾巴都卡在 gradient all-reduce: 模型 gradient 幾個 GB, 每 step 都要全量 all-reduce 一次, 而跨節點只有網卡 (幾十 GB/s) 而非 NVLink, 通訊時間追上甚至超過 backward 的 compute。 這就是分散式訓練最常見的 scaling 殺手 — 瓶頸不在算力而在 GPU 間交換 gradient 的頻寬。 對策是後面會講的 compute/comm overlap (backward 邊算邊 all-reduce)、gradient bucketing, 以及用 ZeRO/FSDP 把全量 all-reduce 拆成 reduce-scatter + all-gather 攤到各卡。
+</Callout>
+
 ## 核心 primitives
 
 以 4 張 GPU、每張有一個向量為例:
@@ -43,6 +47,10 @@
 
 NCCL/RCCL 會依 size、拓樸自動選演算法 (`NCCL_ALGO` 可以強制指定來做實驗)。 這也是為什麼 benchmark 一定要掃一整條 size 曲線, 單一點的數字沒有代表性。
 
+<Callout variant="insight" title="落到真實場景: tensor-parallel 的小訊息偏偏踩到 ring">
+tensor parallelism 每一層都有 all-reduce, 但訊息常常只有幾十 KB (一個 activation shard), 落在 latency 主宰區。 若 NCCL 這時選了 ring, `2(n-1)` 步的固定 latency 會讓每層都多等一截, 在 8 卡上尤其明顯 — 這種 workload 就該讓它走 tree (步數 O(log n))。 做法是先用 `NCCL_ALGO=Tree` 和 `NCCL_ALGO=Ring` 各跑一次你的實際 message size, 對比 latency 再決定; 有時也用 `NCCL_ALGO=NVLS` (NVLink SHARP) 讓 switch 幫忙 reduce。 反過來, data-parallel 的 gradient all-reduce 是百 MB 級大訊息, ring 的滿載 link 才是對的 — 所以「選哪個演算法」沒有標準答案, 取決於你這條 collective 的 size。
+</Callout>
+
 ## algbw 與 busbw: 兩種頻寬, 別搞混
 
 Benchmark 輸出兩個數字 (沿用 nccl-tests 的慣例):
@@ -57,6 +65,10 @@ $$
 
 其他 primitive 的係數: all-gather 與 reduce-scatter 是 $(n-1)/n$, broadcast 是 1。
 
+<Callout variant="insight" title="落到真實場景: busbw 只跑到規格的一半怎麼辦">
+你在 8 卡 H100 (NVLink 4, 單向約 450 GB/s 級) 上跑 nccl-tests, 大訊息的 busbw 平坦在 230 GB/s 就上不去 — algbw 看起來還隨卡數變差, 讓你以為程式有問題。 先別慌: algbw 本來就會隨卡數變小, 不能跨卡數比; 要看的是 busbw, 它才是硬體視角、可以直接對規格。 230 GB/s 只到理論一半, 常見原因是拓樸沒走滿 (某些卡間得繞 PCIe 而非 NVLink)、NCCL 沒偵測到 NVSwitch、或 message 還不夠大沒進入頻寬區。 用 `nvidia-smi topo -m` 確認每對 GPU 是不是 `NV#` 直連, 並確認曲線的平坦段取的是夠大的 size — 這個「busbw vs 規格」的比值就是你判斷通訊有沒有跑滿硬體的唯一正確指標。
+</Callout>
+
 ## 拓樸與互連
 
 busbw 的「理論頻寬」由互連決定:
@@ -69,6 +81,10 @@ busbw 的「理論頻寬」由互連決定:
 
 **Intra-node** (NVLink/xGMI, 數百 GB/s) 與 **inter-node** (網卡, 數十 GB/s) 差了一個數量級, 所以 NCCL 的拓樸偵測會盡量讓 ring 在節點內多繞、跨節點的邊最少; 多機訓練的 parallelism 配置 (tensor parallel 放節點內、data parallel 跨節點) 也是同一個邏輯。 `nvidia-smi topo -m` / `rocm-smi --showtopo` 可以看你機器的實際拓樸。
 
+<Callout variant="warn" title="落到真實場景: 把 tensor-parallel 切到跨節點">
+規劃 64 卡 (8 節點 x 8 卡) 訓練時, 一個常見的災難是把 tensor-parallel group 排成跨節點 — 例如 TP=8 卻讓這 8 卡分散在不同機器。 TP 的 all-gather/reduce-scatter 每層都來、又在 critical path 上, 一旦走網卡 (數十 GB/s) 而非節點內 NVLink (數百 GB/s), 每層都被網路 latency 拖住, 整體 throughput 崩掉。 正確的 rank 佈局是: 高頻、latency 敏感的 TP 綁在同一節點的 8 卡 (吃 NVLink/NVSwitch), 低頻的 data-parallel all-reduce 才跨節點走網路。 這也是為什麼要先 `nvidia-smi topo -m` 看清楚哪些卡是 `NV#` 直連, 再決定 rank 到 GPU 的 mapping — 拓樸感知的佈局往往比任何 kernel 優化都更能拉高多機 scaling。
+</Callout>
+
 ## 與 compute overlap
 
 通訊如果串行在 compute 後面, 多卡的收益會被吃掉一大塊。 標準做法 (第 28 章的 stream/event 機制直接適用):
@@ -76,6 +92,10 @@ busbw 的「理論頻寬」由互連決定:
 - Collective 發在**專用的 communication stream** 上, 與 compute stream 並行。
 - 用 **event** 建立依賴: gradient bucket 算完 → record event → comm stream wait event → all-reduce 該 bucket。 Backward 還在算後面的層時, 前面層的 gradient 已經在路上 — PyTorch DDP 的 gradient bucketing 就是這個模式。
 - 注意 SM 競爭: NCCL kernel 也占 SM, overlap 不是免費的; 這正是 profiler timeline (第 16 章) 要看的東西。
+
+<Callout variant="insight" title="落到真實場景: DDP gradient bucketing 的重疊機制">
+PyTorch DDP 不是等整個 backward 算完才 all-reduce, 而是把 gradient 分成一個個 bucket (預設約 25MB): 某個 bucket 的所有 gradient 一算好, autograd hook 就在 comm stream 上發這個 bucket 的 all-reduce, 同時 backward 繼續往前算更早的層。 於是「前面層的 gradient 正在網路上飛」和「後面層還在算」完全並行, 把通訊藏進 compute 後面。 bucket 太小 → collective 太多、每個都吃固定 launch/latency 成本; 太大 → 要等很久才湊滿一個 bucket, 重疊的空間變小 — 這是要調的旋鈕。 但別忘了天花板: NCCL kernel 自己也占 SM, 和 compute 搶資源, 所以 overlap 省下的時間不是白拿的, 要在 Nsight Systems 的 timeline 上確認 comm 真的被蓋住而不是在跟 compute 互卡。
+</Callout>
 
 ## NCCL ↔ RCCL: 同一份 code, 兩個平台
 

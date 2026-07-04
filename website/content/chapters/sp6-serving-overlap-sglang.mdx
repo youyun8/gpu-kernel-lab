@@ -8,6 +8,10 @@
 
 這本身就是一種 pipeline 思維: 把「request 生命週期」解耦成一個個 step, 讓 batch 這個「工作站」永遠保持滿載, 而不是被最慢的 request 卡住 (回想第 1 章的 stage 平衡與木桶效應)。
 
+<Callout variant="insight" title="落到真實場景: chatbot 混長短 request">
+這在真實 chatbot 服務裡差距是數量級的: 一個 batch 混著「幫我改個錯字」(輸出 10 token) 和「寫一篇長文」(輸出 2000 token) 的 request, static batching 會讓那些短 request 佔著 slot 空轉到最長的跑完。 vLLM/SGLang 的 continuous batching 讓短 request 一結束就把 slot 讓給佇列裡的新 request, 實測 throughput 相對 static batching 常有數倍提升。 這也是為什麼線上 serving 幾乎不用 static batching。
+</Callout>
+
 <Exercise id="sp6-e1" title="Continuous vs static batching" kind="paper" level="進階">
 一個 batch 有 8 個 request, 輸出長度分別是 10, 10, 10, 10, 500, 500, 500, 500 個 token。 假設每個 decode step 對整個 batch 花固定時間。 (a) static batching 下, 前 4 個短 request 完成後到整批結束, 有多少 step 它們的 slot 是浪費的? (b) continuous batching 如何回收這些 slot? (c) 這對整體 throughput (tokens/sec) 的影響?
 
@@ -47,6 +51,10 @@ while running:
 
 實務上 SGLang 用 `--enable-overlap-schedule` (新版預設開啟) 把 scheduler 放在獨立 process, 用 result queue 把 GPU 結果延後一個 step 取回。 這樣做的前提是排程與 forward 之間沒有硬依賴需要立刻解決 — 大多數 decode step 成立。
 
+<Callout variant="insight" title="落到真實場景: decode 小 batch 時 CPU 開銷最傷">
+這在 decode-heavy 服務最關鍵: 小 batch 的 decode step, GPU forward 可能只要 5–8ms, 而 CPU 端要查 radix cache、建 attention metadata、sample、detokenize, 輕鬆吃掉 3ms 以上。 不重疊時 GPU 每 step 有近三成時間在等 CPU (見 sp6-e2); SGLang 的 `--enable-overlap-schedule` 把 scheduler 放獨立 process、領先一個 batch, 就把這 3ms 藏進 GPU 的 forward, GPU 使用率逼近 100%。 反過來, 大 batch prefill 時 GPU forward 幾十 ms, CPU 那 3ms 佔比很小, overlap 的收益就有限 — 收益大小完全取決於 CPU/GPU 的時間比。
+</Callout>
+
 <Exercise id="sp6-e2" title="overlap scheduler 的收益上限" kind="paper" level="挑戰">
 某 decode step: GPU forward 8ms, CPU 排程 3ms。 (a) 不重疊時每 step 多久? GPU 利用率? (b) 完美重疊後每 step 多久? (c) 若換成很大的 batch 讓 GPU forward 變 40ms, 而 CPU 仍 3ms, overlap scheduler 還重要嗎? (d) 反過來, 什麼情境 overlap scheduler 最關鍵?
 
@@ -67,6 +75,10 @@ LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt
 
 **Chunked prefill** 把長 prompt 的 prefill 切成小 chunk, 讓每個 forward 只做一塊 prefill, 並可與其他 request 的 decode **混在同一個 batch** (SGLang 的 `--enable-mixed-chunk`)。 於是 prefill 與 decode 這兩個 stage 在時間上被打散、交錯, 避免長 prefill 造成的 decode 卡頓 (head-of-line blocking)。
 
+<Callout variant="insight" title="落到真實場景: 長文件貼進來時別讓別人的回覆凍住">
+這是長 context 服務的必備開關: 一個使用者貼了 8000-token 的文件進來 prefill, 若不切, 同 batch 其他人正在 stream 的回覆會突然卡頓 (inter-token latency 從 5ms 跳到幾十甚至上百 ms), 使用者體感就是「打字打到一半凍住」。 SGLang 的 `--chunked-prefill-size` (vLLM 也有對應設定) 把長 prefill 切塊與 decode 混批, 換來平順的 ITL, 代價是那個長 prompt 的首 token 延遲 (TTFT) 略增。 調這顆旋鈕就是在 TTFT 與 ITL 之間選一個服務要的平衡點。
+</Callout>
+
 <Exercise id="sp6-e3" title="為什麼要切 prefill" kind="paper" level="挑戰">
 一個 batch 裡有 1 個 4096-token 的 prompt 要 prefill, 還有 30 個 request 正在 decode。 假設整包 prefill 一個 forward 要 80ms, 而純 decode step 只要 5ms。 (a) 不切 prefill, 那 30 個 decode request 這一步要等多久? (b) 把 prefill 切成 8 個 chunk (每 chunk ~10ms) 並與 decode 混合, 對 decode 的延遲有何改善? (c) 代價是什麼?
 
@@ -82,6 +94,10 @@ LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt
 ## Prefill/Decode Disaggregation (延伸)
 
 再往前一步, 有些系統 (SGLang PD disaggregation、vLLM 的相關功能) 把 prefill 與 decode **拆到不同 GPU/節點**: prefill GPU 專做 compute-bound 的 prompt 處理, 算完把 KV cache 傳給 decode GPU 專做 memory-bound 的逐 token 生成。 這是把「prefill vs decode」這兩個 stage 從時間上的重疊, 升級成空間上的**專用化 pipeline**, 各自用最適合的 batch 策略與硬體, 代價是要在兩者間搬 KV cache。
+
+<Callout variant="insight" title="落到真實場景: PD 分離的真實部署長相">
+真實部署長這樣: DeepSeek 與 SGLang 的 PD disaggregation 把一組 GPU 專門當 prefill node (追求 prompt 吞吐、大 GEMM 吃滿 compute), 另一組當 decode node (大 batch continuous batching 攤銷 KV/權重讀取), 中間用高速網路 (甚至 RDMA/NVLink) 把 KV cache 從 prefill 搬到 decode。 好處是兩種性質相反的 workload 不再互相干擾, 各自用最適配置與 batch 策略; 代價是每個 request 要多一次跨節點 KV 傳輸與更複雜的路由。 通常規模夠大、prefill 與 decode 資源比例失衡時才划算。
+</Callout>
 
 <Exercise id="sp6-e4" title="PD 分離的動機" kind="paper" level="挑戰">
 (a) prefill 與 decode 各是 compute-bound 還是 memory-bound? (b) 兩者混在同一 GPU 上為什麼難同時最佳化? (c) 分離後各自能怎麼調 batch? (d) 分離的主要成本是什麼?

@@ -27,6 +27,10 @@ double efficiency = static_cast<double>(cta_count) / (static_cast<double>(waves)
 
 推廣一下, 這也解釋了一個常見的觀察: 把 N 從 2048 加到 2064, 時間卻跳了一大截 — 多出的那一小條 tile 剛好多開了一個 wave。 Deep learning 的 layer 尺寸若能配合 tile 與 wave 的整數倍 (例如 batch 或 hidden dim 選 tile size 的倍數), 常常白拿幾成效能, NVIDIA 的 DL performance 文件對此有專門建議。
 
+<Callout variant="insight" title="落到真實場景: 把 hidden dim 湊成 tile 的倍數白賺幾成">
+這條 wave 效率公式直接影響你怎麼選模型維度。 假設 tile=128、GPU 一 wave 跑 128 個 CTA: 一個 N=2048 的 GEMM 剛好 16 個 tile-column, 整除; 但工程師手滑把 FFN 中間層設成 hidden=2050, N 方向多出一小條殘 tile, 就可能多開整整一個 wave, 時間跳一級而 FLOP 幾乎沒變。 NVIDIA 的 DL performance 文件因此建議把 batch、hidden、vocab 這些維度對齊 tile 尺寸的倍數 — 這是改一個超參數就白拿 10–20% 的免費午餐。
+</Callout>
+
 ## Tail effect
 
 同一個 wave 內, 若各 CTA 工作量不均 (例如邊界 tile 較小), 整個 wave 要等最慢的 CTA 收工。 最後一個 wave 又常常最空 — 兩者疊加就是 tail effect, 對小矩陣或不整除的形狀特別明顯。
@@ -56,17 +60,29 @@ atomicAdd(&C[row * n + col], acc);
 
 兩種合併策略的取捨和第 10 章 reduction 相同: atomic 版省 launch 但結果順序不定; workspace + 第二個 kernel 的版本確定性強, library 通常兩種都備著。 選多大的 split? 太小填不滿, 太大則 reduction 與 workspace 成本上升 — 這本身就是個 autotuning 問題。
 
+<Callout variant="insight" title="落到真實場景: 瘦長 GEMM 的 Split-K">
+語音模型或某些 projection 會出現 M、N 只有幾十、K 卻上千的形狀 (例如 M=48、K=4096)。 由 M×N tile 決定的 CTA 可能只有個位數, A100 的 108 個 SM 大半閒置, achieved occupancy 慘不忍睹。 Split-K 把那條長 K 切成 8 段, CTA 數直接乘 8, 瞬間填滿機器 — 代價是最後要 reduce 8 份 partial。 但別無腦加大 split: 切太多段, reduction 與 workspace 成本反超收益, 實測曲線是 U 形, 最佳 split 本身就是個 autotuning 參數。
+</Callout>
+
 ## Stream-K: 把工作攤成一條流
 
 Split-K 仍以「整數個 tile」為單位切割, 形狀不巧時還是會不均。 **Stream-K** 更進一步: 把所有 output tile 的 MAC 迭代攤平成一條連續的 work stream, 均勻切給固定數量的 CTA (通常 = SM 數)。 每個 CTA 領到的工作量幾乎完全相等, 天生解決 quantization 與負載不均; 一個 output tile 的計算可能橫跨兩個 CTA, 交界處用輕量的 fixup (旗標 + partial 合併) 處理。
 
 CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形狀不可預測」的 workload (例如 LLM serving 中隨 batch 變化的 GEMM) 特別有價值 — 它把「對每個形狀都要重新 tune tile/wave 配置」的問題, 換成一個對形狀不敏感的排程策略。
 
+<Callout variant="insight" title="落到真實場景: LLM serving 每個 batch 形狀都不一樣">
+線上 serving 的 GEMM 形狀隨 request 動態變化 (batch size、序列長度每個 step 都不同), 你不可能為每個形狀離線 tune 一組 tile/wave 配置。 Stream-K 把所有 output tile 的 MAC 迭代攤平成一條 work stream, 均分給固定數量 (= SM 數) 的 CTA, 每個 CTA 拿到的工作量幾乎相等 — 對「形狀不可預測」正中要害。 這就是為什麼 CUTLASS 3.x 把 Stream-K 做成內建 tile scheduler、而 vLLM / TensorRT-LLM 這類 serving 系統偏好它: 用一個對形狀不敏感的排程, 換掉「每個形狀都要重 tune」的維護惡夢。
+</Callout>
+
 ## Persistent Kernel 與 CTA Swizzling
 
 **Persistent kernel** 是 Stream-K 背後的執行形態: 只 launch 剛好填滿機器的 CTA 數, 每個 CTA 用迴圈從全域 work queue (通常就是一個 atomic counter) 領工作直到做完。 好處是完全避開 wave 邊界、launch overhead 只付一次, 也讓 CTA 可以跨 tile 保留狀態。 現代 library 的 GEMM 與 attention kernel 大量採用這個形態。
 
 **CTA swizzling** 解決另一個維度的問題: CTA 的 launch 順序影響哪些 tile 同時在跑, 進而影響它們共享的 A/B 資料是否還在 L2。 預設的 row-major CTA ordering 可能讓同時執行的 CTA 存取分散的 A/B 區塊; **swizzle** (重排 CTA 到 tile 的對映, 例如以 group 為單位 Z 字形) 讓相鄰執行的 CTA 共用更多 A/B row/column, 提高 L2 命中率。 這對大矩陣同樣有效, 是幾乎零成本的優化。
+
+<Callout variant="insight" title="落到真實場景: 一行 swizzle 換幾個百分點的 L2 命中率">
+大矩陣也吃得到 CTA swizzle。 預設 row-major 的 CTA 順序讓同時在跑的 CTA 各自存取分散的 A row / B column, L2 幫不上忙; 把 CTA→tile 的對映改成以 group 為單位 Z 字形 (常見的 swizzle stride 是 8), 相鄰執行的 CTA 就共用更多 A/B 資料, Nsight 的 L2 hit rate 上升、DRAM bytes 下降, 時間跟著降。 它幾乎零成本 (只改 index 計算, 不動 mainloop), 是 profiler 顯示「DRAM 偏高但 compute 沒滿」時該先試的一招。
+</Callout>
 
 ## cuBLAS / cuBLASLt / hipBLASLt 怎麼做這些決定
 
@@ -93,6 +109,10 @@ CUTLASS 從 3.x 起把 Stream-K 作為內建的 tile scheduler 之一, 對「形
 - **邊界 tile 慢**: 將 full tile 和 residue tile 分成兩個 kernel, 讓 hot path 無 branch。
 
 判斷標準不是哪個技巧最酷, 而是 profiler 中哪個浪費最大: achieved occupancy 低看 scheduler, DRAM bytes 高看 locality, launch gap 高看 graph/fusion。
+
+<Callout variant="insight" title="落到真實場景: 讓 profiler 而不是直覺選 scheduler 技巧">
+面對一支效能不如預期的 GEMM, 別憑「哪個技巧最酷」下手, 讓 profiler 指路。 achieved occupancy 遠低於 theoretical → CTA 不夠, 看 Split-K / batch / 降 tile; L2 hit rate 低但 DRAM bytes 高 → locality 問題, 先試 CTA swizzle; 兩次 launch 之間 gap 很大 (一堆小 GEMM) → 不是改 kernel 而是上 CUDA/HIP Graphs 或 grouped GEMM; 邊界 tile 特別慢 → 把 full tile 和 residue tile 拆成兩個無 branch 的 kernel。 每個症狀都對應一個明確的旋鈕, 這張對照表就是把它系統化。
+</Callout>
 
 <LabBox path="kernels/05-advanced-scheduling">
 `split_k_gemm` 對一個瘦長 (小 M、N, 大 K) 矩陣比較 plain GEMM 與 Split-K 的效能與 CTA 佔用;`cta_swizzle` 展示不同 swizzle 步幅對 L2 hit rate 的影響。 用 profiler 觀察 achieved occupancy 與 L2 hit rate 的變化, 對照本章的 quantization 公式。

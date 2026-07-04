@@ -19,6 +19,10 @@ sA[threadIdx.y][threadIdx.x * 4 + 3] = v.w;
 
 一次 128-bit transaction 取代四次 32-bit, memory 子系統的請求數少了 4 倍, 對已經 coalesced 的存取尤其有效。 代價是對齊要求變嚴: base pointer 與 K 都要能被 4 整除, 尾端 (第 6 章) 得特別處理。
 
+<Callout variant="warn" title="落到真實場景: K 不是 4 的倍數, float4 直接 misaligned">
+`float4` 向量化在方正的 shape (`K=4096`) 上很甜, 但真實模型常有不對齊的維度: 某個 projection 的 `K=2050`、或 vocab 相關的 GEMM `K=50257`。 一旦 base pointer 或 leading dimension 不是 16-byte 對齊, `reinterpret_cast<const float4*>` 的載入就是 `misaligned address` — 在 CUDA 上直接 kernel 崩掉、在 HIP 上可能讀到垃圾。 production kernel 的做法是: 主體走對齊的 float4 fast path, 對尾端不足 4 個的殘量 (第 6 章) 退回逐一 scalar load。 別假設輸入永遠對齊 — 那是 serving 時最常見的 crash 來源之一。
+</Callout>
+
 ## Double Buffering — 把 load 藏進 compute
 
 單 buffer 的主迴圈是「load tile → sync → compute → sync」, load 期間算術單元閒著。 Double buffering 配置兩組 shared memory buffer: 算 buffer 0 的同時, 預取下一個 k-tile 進 buffer 1, 每輪交換 — 這就是 software pipelining。
@@ -43,6 +47,10 @@ computeTile(sA[cur], sB[cur]);       // epilogue: last tile
 ```
 
 理想情況每個 k-tile 的成本從 `L + C` 變成 `max(L, C)` — 當 compute 足以覆蓋 load, memory latency 就被完全藏掉。
+
+<Callout variant="insight" title="落到真實場景: profiler 上 long-scoreboard stall 掉一半">
+double buffering 的效果在 `ncu` 上是看得見的具體數字: 單 buffer 版本的 warp state 會被 `stall_long_scoreboard` (等 global load 回來) 主導, 常佔總 stall 的 40–60%。 加上 double buffering 後, 因為下一個 k-tile 的 load 在算當前 tile 時就已發出去, 這個 stall 通常砍到剩一半以下, GFLOP/s 隨之往上跳。 這也是為什麼調 GEMM 時第一個要盯的 metric 就是 long-scoreboard 佔比 — 它直接告訴你 memory latency 有沒有被 compute 蓋住。
+</Callout>
 
 ## Multi-stage Async Copy — cp.async 與 TMA
 
@@ -77,6 +85,10 @@ sA[row][swizzledCol] = value;
 ```
 
 Padding 簡單但浪費 shared memory 且對 128-bit 存取不一定夠; swizzle 不浪費容量, 但 index 計算較複雜 — 這也是第 4 章手寫 MMA kernel 困難、CUTLASS/CK 有價值的原因之一。
+
+<Callout variant="warn" title="落到真實場景: 32-way bank conflict 把 shared 讀慢 32 倍">
+把 half tile 以 naive row-major 塞進 shared memory, 再用 `ldmatrix` 餵 Tensor Core, 一個 warp 的 32 個 lane 很可能全撞進同一組 bank — shared memory 讀取被 serialize 成 32 次, `ncu` 的 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared` 會爆高, mainloop 明明該是 compute-bound 卻卡在 shared load。 padding (每列多補幾個 element 把 stride 錯開) 是最快的止血, 但真正對齊 MMA fragment 佈局的是 XOR swizzle。 這正是手寫 MMA kernel 最惱人的一段, 也是 CUTLASS 的 CuTe 用 layout 代數幫你把 swizzle 算對的價值所在。
+</Callout>
 
 <LabBox path="kernels/03-gemm">
 `sgemm_step3_vectorized` 與 `sgemm_step4_double_buffer` 對應本章前兩節。 用 `scripts/profile_ncu.sh` 觀察: 向量化後看 load 指令數下降、double buffering 後看 stall (long scoreboard) 減少。 cp.async / 多 stage 版本屬進階練習, 可在 double buffering 之上改寫。

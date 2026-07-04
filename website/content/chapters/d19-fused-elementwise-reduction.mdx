@@ -16,6 +16,10 @@ def baseline(x, bias):
 
 先把帳算清楚 (第 17 章的紀律): 設 tensor 有 $R \times C$ 個 float。 Baseline 的 traffic ≈ 讀 x + 寫 h + 讀 h + 寫 h2 + 讀 h2 = 5 次全張量 ≈ $20RC$ bytes; fused 版只讀 x 一次 + 寫 R 個 scalar ≈ $4RC$ bytes。 理論上限約 5×, 這值得動手。
 
+<Callout variant="insight" title="落到真實場景: 這個 pattern 就是 MLP 的殘差前處理">
+別把這段 `bias → gelu → sum` 當成教科書玩具 — 它是 transformer MLP 的一個真實切片: `Linear` 之後接 bias、GELU, 而 attention 裡的 score 也常是 `QK^T + bias` 之後做 row-wise 的 softmax (同樣是 elementwise + row reduction 的骨架)。 你在真實模型的 profiler trace 裡看到的 `aten::add`、`elementwise_kernel`、`aten::sum` 三連, 就是這條鏈。 把它 fuse 掉, 省下的 `20RC → 4RC` 不是抽象數字: 對 `R=4096, C=4096` 的 fp32, 那是從 268 MB 的 HBM traffic 降到 67 MB, 在 memory-bound 區間直接對應約 4-5× 的 kernel 加速。 這也是為什麼 LayerNorm、softmax 這類 op 幾乎沒人用原生鏈跑 — 全都 fuse 了。
+</Callout>
+
 ## Fused Kernel: 讀一次、算完、Reduce 完
 
 把 bias、gelu、row reduction 合進一個 kernel: 每個 block 負責一個 row, 讀進 register/shared memory, 做完 bias + gelu 後直接 warp/block reduce, 只寫出一個 scalar。 Global memory 往返從 3 趟降到 1 趟。
@@ -57,6 +61,10 @@ compiled = torch.compile(baseline)
 
 常見結果: `torch.compile` 幾乎追平手寫、且零維護成本。 這正是本案例的誠實結論 — 手寫值得的時機, 是當 `torch.compile` 沒 fuse 好 (例如跨 op 的複雜相依、特殊 reduction 模式), 或你需要 online 演算法時。
 
+<Callout variant="insight" title="落到真實場景: 用 graph break log 判斷 compile 有沒有真的 fuse">
+量測時你發現手寫版比 `torch.compile` 快 3 倍 — 先別高興, 這通常不是你贏了, 而是 compile 根本沒 fuse 成功。 跑 `TORCH_LOGS="graph_breaks,inductor" python bench.py` 一看, 可能是 baseline 函式裡某個操作 (例如 `.sum(dim=-1)` 前有個 data-dependent 的 reshape) 造成了 graph break, Inductor 只好把鏈拆開、退回多個 kernel。 修掉 graph break 之後再比, compile 版往往就追上來了。 這是真實工作流的關鍵一步: 「手寫大勝 compile」在純 elementwise 鏈上幾乎總是可疑信號, 值得先確認對手是不是被自己的 graph break 綁住了手腳, 而不是宣稱抽象層的勝利。
+</Callout>
+
 ## 驗收清單
 
 一個 fused kernel 要「畢業」, 三關都要過:
@@ -64,6 +72,10 @@ compiled = torch.compile(baseline)
 1. **正確性**: 對 baseline 在多種 shape (含非對齊的 cols、極小與極大的 rows) 與 dtype 下比對, reduction 用相對誤差容忍 (第 10 章的浮點順序問題)。
 2. **效能**: end-to-end 計時 (warmup + events, 第 4 章), 對 baseline 與 `torch.compile` 三方比較; 再用 profiler 確認 fused 版的 DRAM traffic 真的降到估算值附近。
 3. **穩健性**: 邊界 shape (cols=1、rows=0)、非連續輸入、half 輸入 — 這些是上線後才爆的地方 (第 18 章)。
+
+<Callout variant="warn" title="落到真實場景: cols 不是 blockDim 整數倍時的尾端漏加">
+你的 fused row-reduction 在 `cols=4096` (剛好 `blockDim=256` 的整數倍) 測試全過, 上線遇到 `cols=4095` 的一層就結果偏小。 病因在 grid-stride 迴圈 `for (c = tid; c < cols; c += blockDim.x)`: 這行本身處理尾端是對的, 但如果你為了 `float4` 向量化改成一次讀 4 個而沒補 scalar 尾端迴圈, 最後那 1-3 個元素就被漏掉、沒進 reduction。 更隱蔽的是它「只錯一點點」— 相對誤差可能只有 0.02%, allclose 的預設 tolerance 剛好放它過關, 直到某個對數值敏感的下游才爆。 所以驗收清單第 3 關的「非對齊 cols」不是可選項: 測試矩陣一定要放幾個質數長度 (4093、4095), 專門打向量化路徑的尾端。
+</Callout>
 
 ## Fusion Patterns
 
@@ -76,6 +88,10 @@ compiled = torch.compile(baseline)
 - **Producer-consumer fusion**: op A 的輸出只被 op B 用一次, 且 B 不需要 library 黑盒, 可把 A 的中間值留在 register。
 
 不該 fuse 的訊號也要明確: 中間結果有多個 consumer、某段是高度優化 library kernel、fusion 後 register spill、或 fused kernel 破壞 copy/compute overlap。 Fusion 是 memory traffic trade, 不是宗教。
+
+<Callout variant="warn" title="落到真實場景: 硬 fuse 進 GEMM epilogue 反而 register spill">
+「GEMM epilogue fusion」聽起來永遠划算 — 把 bias+activation+quantize 塞進 accumulator 寫回前, 省一次讀 C。 但真實會踩的坑: 你的 GEMM 已經用大 register tile (每 thread 128 個 accumulator) 逼近 occupancy 上限, 這時再把一段需要額外暫存的 activation (例如帶查表的 SiLU) 塞進 epilogue, register 用量越過門檻、開始 spill 到 local memory。 結果 profiler 顯示你「省下的那次 C 讀取」被 spill 製造的新 traffic 完全吃掉, 淨效能還倒退。 這正是「fusion 後 register spill」這條紅旗的實況: fuse 前後都要看 `ncu` 的 register-per-thread 與 spill counter, 別假設少一次 memory round-trip 就一定賺。
+</Callout>
 
 <LabBox path="kernels/06-pytorch-integration/load_inline">
 `load_inline/fused_bias_gelu.py` 用 `load_inline` 內嵌 fused kernel, 對 baseline (三個原生 op)、`torch.compile` 版、以及 fused 版三者做正確性比對與 end-to-end 計時 (warmup + CUDA events), 印出各自時間與相對 speedup。 跑一次, 看看在你的硬體上手寫贏 torch.compile 多少 (或輸多少)。

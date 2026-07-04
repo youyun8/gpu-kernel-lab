@@ -12,6 +12,10 @@
 
 Pipeline parallel 的通訊量最小 (只傳 stage 邊界的 activation, 不像 tensor parallel 每層都 all-reduce), 代價是 pipeline bubble 與需要切 micro-batch。
 
+<Callout variant="insight" title="落到真實場景: Llama-70B 的 3D parallelism 擺法">
+落到真實叢集配置: 訓練 Llama-70B 級模型, 常見的擺法是節點內 8 顆 GPU 走 NVLink 開 tensor parallel (TP=8, 吃逐層 all-reduce 的高頻寬), 節點之間開 pipeline parallel (PP=4~8, 只在 stage 邊界傳 activation, 容忍較慢的 InfiniBand/以太網), 最外層再用 data parallel 複製。 這就是 Megatron-LM 的 TP×PP×DP 三維 parallelism。 選擇的原則永遠是: 通訊密集的維度往快互連放, 通訊稀疏的往慢互連放。
+</Callout>
+
 <Exercise id="sp5-e1" title="三種平行化選型" kind="paper" level="進階">
 一個 70B 模型, fp16 權重約 140 GB, 要放到每顆 80 GB 的 GPU 上訓練。 (a) 純 data parallel 可行嗎? (b) 若只有節點內 8 顆 GPU 走 NVLink, 節點間走較慢的網路, tensor parallel 與 pipeline parallel 各適合放在哪個維度? (c) 為什麼 pipeline parallel 特別適合跨節點?
 
@@ -52,6 +56,10 @@ else:
     schedule.step()                        # middle stages just relay
 ```
 
+<Callout variant="insight" title="落到真實場景: PP=8 的 GPipe bubble 有多痛">
+把數字放進真實訓練: PP=8 的 GPipe, 若只切 m=8 個 micro-batch, bubble = `(8−1)/(8+8−1)` ≈ 47% — 近一半的 GPU-time 在暖機/排空, 8 顆昂貴的 GPU 等於有將近 4 顆份的算力在空轉。 這就是為什麼實務上 micro-batch 數要遠大於 stage 數 (見 sp5-e2 的 `m ≥ 4p` 準則)。 但 GPipe 一加 m 就得存更多 activation, 很快撞記憶體牆 — 於是下一節的 1F1B 才登場。
+</Callout>
+
 <Exercise id="sp5-e2" title="GPipe bubble 計算" kind="paper" level="進階">
 p = 4 個 stage。 (a) m = 4 micro-batch 時 bubble 佔比? (b) m = 16 時? (c) 若把 micro-batch 從 4 加到 16, 每個 micro-batch 變小, 可能帶來什麼負面效果? (d) 給一個實務上挑 m 的準則。
 
@@ -86,6 +94,10 @@ schedule = Schedule1F1B(stage, n_microbatches=32, loss_fn=loss_fn)
 # driving code (schedule.step(...)) is identical to ScheduleGPipe above.
 ```
 
+<Callout variant="insight" title="落到真實場景: 為何框架預設 1F1B 而非 GPipe">
+這就是為什麼 Megatron-LM、DeepSpeed、TorchTitan 的預設 schedule 幾乎都是 1F1B 而非 GPipe: 在固定的 GPU 記憶體預算下, 1F1B 的 activation peak 只 ∝ p (pipeline 深度) 而非 ∝ m, 於是你能放心把 micro-batch 開到 32、64 去壓 bubble 而不 OOM。 一個 40 GB GPU、權重加 optimizer 已吃 20 GB 的場景, GPipe 用 m=16 就要 32 GB 直接爆, 1F1B 只要約 8 GB (見 sp5-e3) — 換 schedule 不改一行 kernel 就把記憶體問題解掉。
+</Callout>
+
 <Exercise id="sp5-e3" title="GPipe vs 1F1B 的記憶體" kind="paper" level="挑戰">
 p = 4 stage, 每個 micro-batch 在一個 stage 的 activation 約 2 GB。 (a) GPipe 用 m = 16 時, 第一個 stage 的 activation peak 約多少? (b) 1F1B 用同樣 m = 16 呢? (c) 若 GPU 只有 40 GB 而權重/optimizer 已用掉 20 GB, 哪個 schedule 能用 m = 16? (d) 這如何反過來影響能達到的 bubble?
 
@@ -105,6 +117,10 @@ p = 4 stage, 每個 micro-batch 在一個 stage 的 activation 約 2 GB。 (a) G
 想直接縮小 bubble (而非靠加 m), 要用 **interleaved 1F1B (virtual pipeline)**: 每顆 GPU 不只放連續的一段, 而是放**多個不連續的 virtual stage** (例如 GPU0 放第 1、5 段, GPU1 放第 2、6 段…)。 這讓 pipeline「更深」但 stage 更碎, bubble 縮到 `(p − 1)/(v·m + p − 1)`, v = 每 GPU 的 virtual stage 數。 代價是**通訊次數變 v 倍** (每個 micro-batch 要在 GPU 間多跑幾趟)。
 
 PyTorch 提供 `ScheduleInterleaved1F1B`、`ScheduleLoopedBFS` 等; TorchTitan、Megatron-LM 也各有 zero-bubble / PipeDream 變體。 選型是「bubble ↔ 通訊 ↔ 記憶體 ↔ 實作複雜度」的多維取捨。
+
+<Callout variant="insight" title="落到真實場景: interleaved 的通訊成本在跨節點會反咬">
+Interleaved 1F1B 的取捨在真實叢集很現實: Megatron 訓練大模型時常設 v=2 (每顆 GPU 放兩段不連續的 layer), 把 PP bubble 從二十幾 % 砍到十幾 %, 代價是 stage 邊界的 send/recv 次數變 2 倍。 若這些通訊走的是節點內 NVLink, 划算; 一旦 PP 跨到節點間的慢網路、activation 又大, 多出來的通訊可能比省下的 bubble 還貴, 這時寧可用普通 1F1B 加大 m。 DeepSeek-V3 的 DualPipe 更進一步, 連通訊本身都拿去和計算重疊來逼近 zero bubble。
+</Callout>
 
 <Exercise id="sp5-e4" title="Interleaved 的取捨" kind="paper" level="挑戰">
 p = 4, m = 8。 (a) 普通 1F1B 的 bubble 佔比? (b) 用 v = 2 的 interleaved 1F1B 呢? (c) interleaved 讓通訊量如何變化? (d) 什麼情況下 interleaved 不划算?

@@ -6,6 +6,10 @@
 
 同一個 warp 的 threads 是 lockstep 執行的, 硬體提供指令讓它們直接互相讀 register, 省掉 shared memory 的來回與 `__syncthreads()`。 這對 reduction、scan、broadcast 特別有用。
 
+<Callout variant="insight" title="落到真實場景: softmax 分母不必進 shared memory">
+attention 的每一個 row 算完 `exp(x - max)` 之後要除以總和。 若這個 row 剛好由一個 warp 處理 (常見的 warp-per-row softmax), 那 32/64 個 partial 完全不必寫進 shared memory 再 `__syncthreads()` — 直接用 warp shuffle 在 register 間 all-reduce 出總和即可。 少掉的那趟 LDS 寫入 + barrier + 讀出, 在 memory-bound 的 softmax 上就是實打實省下的時間。 這就是為什麼 fused softmax / FlashAttention 的 kernel 幾乎都以 warp 為 reduction 的基本單位。
+</Callout>
+
 ## Shuffle: threads 之間直接傳 register
 
 `__shfl_down_sync` 讓 lane 讀取另一個 lane 的 register 值, 是 warp reduce 的基礎:
@@ -56,9 +60,17 @@ __device__ float warpAllReduceSum(float val) {
 }
 ```
 
+<Callout variant="insight" title="落到真實場景: 每個 lane 都要拿到 mean 的 LayerNorm">
+`__shfl_down_sync` 版做完只有 lane 0 握有總和, 但 LayerNorm 第二步「每個元素減 mean 再除 std」需要**每個** lane 都拿到 mean 與 variance。 這時 butterfly (`__shfl_xor_sync`) 正好: 一輪 `log2(warpSize)` 步之後全 warp 同步持有結果, 省掉「lane 0 算完再 broadcast 回去」那一步。 GPU 上的 fused LayerNorm、RMSNorm kernel 幾乎都用這個 all-reduce 形態, 避免任何一次多餘的 shared memory 往返。
+</Callout>
+
 ## Ballot / vote: warp 層級的投票
 
 `__ballot_sync` 讓每個 lane 提交一個 predicate, 回傳一個 bitmask 代表哪些 lane 為真;`__any_sync` / `__all_sync` 則回傳布林。 常用於 stream compaction、動態決定分支、計算 active lane 數 (`__popc(__ballot_sync(...))`)。
+
+<Callout variant="insight" title="落到真實場景: 用 ballot 做 stream compaction">
+想像一支 filter kernel: 每個 lane 判斷自己的元素是否通過門檻 (例如 top-k 前處理、或 sparse attention 挑非零 block)。 `mask = __ballot_sync(0xffffffff, keep)` 一次收齊全 warp 的 predicate, `__popc(mask)` 就是這個 warp 通過的數量, 而 `__popc(mask & lanemask_lt)` 算出每個通過的 lane 在 compacted 輸出裡的 offset — 全程不碰 atomic、不碰 shared memory。 histogram、token routing、非零元素打包這類 workload 的核心都是這個手法。
+</Callout>
 
 ## `_sync` 後綴與 mask 的意義
 
@@ -66,6 +78,10 @@ Volta 之後, 同一個 warp 的 threads 可以獨立排程 (independent thread 
 
 - 一般情況直接用 `0xffffffff` (全 warp), 並確保呼叫點不在 divergent 分支內。
 - 不要用 `__activemask()` 的回傳值當 mask 傳回 `_sync` primitive — 它只告訴你「現在剛好誰活著」, 不構成同步保證, 是官方文件點名的反模式。
+
+<Callout variant="warn" title="落到真實場景: 在 if 分支裡用 __activemask() 當 mask">
+一個真的會 debug 到深夜的 bug: 你在 `if (idx < n)` 內做 warp reduce, 想「只讓活著的 lane 參與」就寫成 `__shfl_down_sync(__activemask(), v, offset)`。 在 Volta 之後的 independent thread scheduling 下, `__activemask()` 回傳的是「這個 cycle 剛好誰在跑」, 不同步、每次可能不同 — 結果時對時錯、隨 build 或輸入而變, 極難重現。 正解: 讓 reduce 呼叫點不落在 divergent 分支內 (先把出界 lane 的值設成單位元素, 再全 warp 用 `0xffffffff` 一起 reduce), 或改用 cooperative groups 的 `tiled_partition` 明確表達成員。
+</Callout>
 
 ## Cooperative groups: 更結構化的寫法
 
@@ -112,6 +128,10 @@ Warp primitive 不只用來 sum:
 - **Sub-warp tiling**: 將一個 warp 切成 4/8/16-lane groups 處理短 row。 要用 explicit mask 或 cooperative groups 表達 group membership。
 
 當資料交換範圍超過一個 warp, 才回到 shared memory + block barrier。 這條界線很重要: shared memory 是 block-level tool, shuffle 是 warp-level tool, 用錯層級就會付不必要的同步成本。
+
+<Callout variant="insight" title="落到真實場景: embedding gradient 的 grouped atomic">
+訓練時 embedding backward 要把梯度 scatter-add 回 vocab 表, 同一個 warp 內常有多個 token 命中同一個 row — 32 條 `atomicAdd` 打同一位址就是 serialize 的 contention。 用 `__match_any_sync` 找出 warp 內 key 相同的 lane 群, 讓每群推一個 leader、群內先用 shuffle 加總、leader 再做**一次** atomic, 就能把 atomic 次數從 32 降到「不同 key 的數量」。 histogram、sparse embedding、scatter 類 kernel 都吃這一招; 一旦資料交換超過一個 warp, 才退回 shared memory + block barrier。
+</Callout>
 
 <LabBox path="kernels/04-reductions-softmax">
 `warp_reduce` 這個 target 用 shuffle 實作 warp 層級加總, 並和 shared-memory 版本比較速度與正確性。 它用 `warpSize` 而非寫死常數, 因此在 CUDA (32) 與 HIP (64) 都正確。 跑跑看, 確認兩平台結果都通過 correctness check。

@@ -31,6 +31,10 @@ BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k,
 | 快速原型、可攜性優先、團隊用 Python | Triton |
 | 學習、教學、極端客製的研究 | 手寫 kernel |
 
+<Callout variant="insight" title="落到真實場景: 為一個 fp8 attention 選層次">
+假設你在做 LLM 推論, 要上 fp8 的 fused QKV projection + bias。 先問這張表: shape 固定嗎? serving 的 hidden size 通常固定, 所以 autotune 划算。 需要 fusion 嗎? 要把 bias 與 dequant 塞進 epilogue, 黑盒 `cublasSgemm` 立刻出局。 於是路徑很清楚: NVIDIA 上用 CUTLASS 的 epilogue visitor 把 bias/scale 融進 GEMM 收尾, ROCm 上先試 AITER/CK; 但若你只是想兩週內先跑起來、驗證數值正確, 先寫個 Triton 版拿到 correctness 與收益上限, 再決定要不要下探到 CUTLASS。 這就是「地圖」的實際用法 — 不是背 API, 而是用需求把選項砍到剩一兩個。
+</Callout>
+
 ## 這張地圖如何接到真實世界
 
 你平常用的框架, 底下全是這張地圖上的元件:
@@ -40,6 +44,10 @@ BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k,
 - **TensorRT-LLM**: NVIDIA 的推論引擎, 內部大量使用 CUTLASS 生成的 kernel 與手寫 attention。
 
 換句話說: 學會讀懂這些 library, 你就能讀懂 (並優化) 現代 AI infra 的底層。 Track E (第 22–25 章) 逐一拆解。
+
+<Callout variant="insight" title="落到真實場景: 從 profiler trace 反查是哪個 library">
+你 profiling 一個 Llama 推論的 decode step, Nsight Systems 的 timeline 上出現一個叫 `void cutlass::Kernel2<...>` 的熱點、旁邊是 `flash_fwd_kernel`, 再往下是幾個 `triton_poi_fused_*`。 這串名字直接告訴你底層是誰: `cutlass::` 前綴 = fp8/量化 GEMM 走 CUTLASS, `flash_` = attention 走 FlashAttention, `triton_..._fused_` = `torch.compile` 生成的 elementwise fusion。 認得出這些前綴, 你才知道某個熱點該去哪個 repo 找可調參數 (CUTLASS 換 tile config、Triton 看 Inductor 有沒有 fuse 好), 而不是盲目重寫。
+</Callout>
 
 ## 什麼時候該自己寫, 什麼時候該用 Library
 
@@ -55,6 +63,10 @@ BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k,
 
 Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次遇到新 shape 時實測所有候選 config (冷啟動慢), 之後快取命中; cuBLAS 的 heuristic 零冷啟動但可能次優; TunableOp/CUTLASS profiler 走離線搜索。 選哪種, 取決於你的 shape 分佈是否固定、能否接受首次延遲。
 
+<Callout variant="warn" title="落到真實場景: autotune 在動態 shape 下反覆冷啟動">
+一個常見翻車: 你在 LLM serving 開了 `torch.compile` 或 Triton autotune, 但 prefill 的 sequence length 每個 request 都不同 (37、512、1024...)。 如果 autotune 的 `key` 直接綁 seqlen, 每個新長度都觸發一次完整 config 搜索, 首個 request 的 latency 突然噴到數百 ms — 使用者看到的是「偶發卡頓」。 修法是把 shape bucket 化 (padding 到 128 的倍數再進 kernel), 或改用 PyTorch 的 `TORCH_CUDABLAS_TUNABLEOP` 做離線 tuning 把結果存檔, 上線時只讀不搜。 這也是為什麼 production 常寧可用 heuristic 型的 cuBLASLt: 犧牲幾 % peak 換掉尾端延遲的不可預測性。
+</Callout>
+
 ## Library Selection Playbook
 
 做選型時把需求寫成矩陣:
@@ -67,6 +79,10 @@ Autotune 的成本模型也值得理解: Triton 的 `@triton.autotune` 在首次
 - **Debuggability**: 手寫/Triton 最容易插入檢查; 黑盒最快但可觀測性最低。
 
 例子: 一個固定 shape 的 fp8 GEMM + custom dequant + activation, NVIDIA 上可用 CUTLASS epilogue visitor; ROCm 上先試 AITER/CK; 若兩邊都要快速交付, Triton prototype 先建立 correctness 和收益上限, 再決定是否下探。
+
+<Callout variant="insight" title="落到真實場景: 用 scorecard 擋掉一個「聽起來很酷」的重寫">
+團隊有人提議把某個 MoE 的 gating GEMM 用 CUTLASS 手刻。 套 playbook: portability — 這個服務同時上 H100 和 MI300, 手刻 CUTLASS 意味著要另外維護一份 CK 版本, 維護成本翻倍。 build constraints — CUTLASS template 會讓 CI 的編譯時間從 5 分鐘拉到 20 分鐘。 peak requirement — profiler 顯示這個 GEMM 只佔 end-to-end 的 6%, 就算榨到 peak 整體也才快不到 3%。 結論寫進 review: 先用 Triton 版跨兩平台交付, CUTLASS 留到這個 op 真的變成 top-3 熱點再說。 Scorecard 的價值不是選最快的, 而是把「值不值得」量化成能寫進 PR 描述的理由。
+</Callout>
 
 <LabBox path="kernels/03-gemm">
 `blas_baseline` 用 cuBLAS (CUDA) 或 hipBLAS (HIP) 跑同一個 2048³ SGEMM (CMake 找不到 BLAS library 時會自動略過這個 target)。 把它的 GFLOP/s 和你手寫的 `sgemm_step4_double_buffer` 並排比較, 誠實面對差距 — 然後想想: 剩下的差距是來自 autotune、還是某個你還沒做的 pipeline 技巧?

@@ -25,6 +25,10 @@ for x, y in loader:
 
 三個旋鈕對應第 1 章的概念: `num_workers` 決定 CPU stage 的**吞吐** (平行度), `prefetch_factor` 決定 pipeline 的**緩衝深度** (能容忍多久的 GPU/CPU 速率抖動), `pin_memory` 讓最後的 H2D copy 能 **async 重疊**。
 
+<Callout variant="warn" title="落到真實場景: ImageNet 訓練的 JPEG decode stall">
+真實訓練最常見的 input stall 長這樣: ImageNet ResNet 訓練, GPU step 只要 40ms, 但每張圖的 JPEG decode 加 resize 單核要 200ms, `num_workers=4` 時每 50ms 才出一個 batch, `nvidia-smi` 看到 GPU 使用率在 80% 上下鋸齒抖動 (見 sp4-e1)。 把 worker 加到 8、開 `pin_memory=True`, 或把 decode 換成 NVIDIA DALI 丟到 GPU, 才餵得飽。 反面教材: 盲目把 `num_workers` 開到 32, CPU/RAM 被 fork 出來的 worker 與 pinned buffer 吃爆, 反而 OOM 或 page cache 抖動。
+</Callout>
+
 <Exercise id="sp4-e1" title="要幾個 worker" kind="paper" level="進階">
 GPU 每個 training step 花 40ms。 CPU 端準備一個 batch (讀圖 + decode + augment) 單核花 200ms。 (a) 要幾個 worker 才能讓 CPU 不成為瓶頸? (b) 只用 4 個 worker 會怎樣? (c) 加到 32 個 worker 有什麼風險?
 
@@ -80,6 +84,10 @@ class CudaPrefetcher:
 
 關鍵是 `_preload()` 在回傳當前 batch **之前**就發出下一個 batch 的 copy — 於是 copy(n+1) 疊在 compute(n) 上。 `record_stream` 是正確性的細節: 防止 caching allocator 在 copy 還在途時就把 buffer 回收。
 
+<Callout variant="insight" title="落到真實場景: 什麼時候值得自己寫 prefetcher">
+什麼時候值得自己寫這個 prefetcher? 當 H2D 佔比不小時 — 例如大 batch 的高解析度影像, 或大 embedding table lookup 的結果, 每步要搬幾百 MB 上 GPU。 預設的 `non_blocking=True` 只重疊「這一步的 H2D」與「上一步的 compute」一層; 自寫 prefetcher 提前一整個 batch 發 copy, 能把下一 batch 的搬運也塞進當前 step。 但若你的資料很小 (H2D 只佔 step 的 2–3%), 這個 prefetcher 幾乎沒收益, 別為它增加複雜度 — 先用 profiler 確認 H2D 真的露在 timeline 上 (見 sp4-e4)。
+</Callout>
+
 <Exercise id="sp4-e2" title="為什麼需要 record_stream" kind="paper" level="挑戰">
 在上面的 prefetcher 裡, 若拿掉兩行 `record_stream`, 偶爾會出現數值錯誤或 race。 (a) 問題出在哪? (b) 為什麼「偶爾」而不是「每次」? (c) `wait_stream` 為什麼不足以解決?
 
@@ -104,6 +112,10 @@ for x, y in prefetcher:          # input pipeline (above) feeds the graphed step
 ```
 
 於是三層 pipeline 疊在一起: **worker 準備資料** ‖ **stream 搬資料上 GPU** ‖ **graph 化的 compute step** — 各用不同資源 (CPU core、DMA、SM), 理想情況 GPU 從頭到尾不空等。
+
+<Callout variant="insight" title="落到真實場景: 小模型被 Python 開銷卡住">
+這一層對「模型小、Python 開銷相對大」的訓練最有感: 例如小型 GNN 或 embedding 模型, 每步只有幾十個小 kernel、GPU 各跑幾 µs, 純 eager 模式下 CPU 發 kernel 的速度跟不上, GPU 使用率卡在 50–60% 且 kernel 間有固定空隙。 `torch.compile(mode="reduce-overhead")` 用 CUDA graph 把整步錄起來 replay, 空隙消失、吞吐常見 1.3–1.8×。 再配合前面的 worker 加 prefetcher, CPU 備資料、DMA 搬資料、graph 化的 GPU compute 三層各用不同資源同時跑, GPU 才真的不空等。
+</Callout>
 
 <Exercise id="sp4-e3" title="診斷: GPU 使用率只有 60%" kind="paper" level="挑戰">
 `nvidia-smi` 顯示訓練時 GPU 使用率在 60% 上下抖動。 你懷疑是輸入管線。 (a) 用 `torch.profiler` 該看哪些訊號來確認? (b) 若確認是 data loading bound, 依序有哪三個對策? (c) 若 profiler 顯示 GPU 忙但每個 kernel 之間有固定空隙, 又該怎麼辦?

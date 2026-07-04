@@ -22,6 +22,10 @@ rocprofv3 --stats ./sgemm_step0_naive
 omniperf profile -n step0 -- ./sgemm_step0_naive && omniperf analyze -p workloads/step0
 ```
 
+<Callout variant="insight" title="落到真實場景: 一個 attention kernel 卡在哪">
+你接手一個自製 fused attention kernel, 只知道「比 FlashAttention 慢 2 倍」但不知為何。 別急著看程式碼, 先跑 speed-of-light: 如果 Memory 78%、Compute 30%, 那它是 memory-bound, 問題多半在 Q/K/V 的載入沒 coalesce 或 softmax 的中間 tensor 進出 HBM 太多次 — 該往 tiling 和 online softmax 想。 反之若 Compute 高、Memory 低, 代表 MMA 已經餵飽, 慢是因為 tensor core 使用率不足或 pipeline 不夠深。 這一步花 30 秒, 卻能把「該調哪裡」的搜索空間砍掉一半 — 這正是為什麼老手 profiling 永遠從這兩個百分比開始, 而不是一頭栽進 source view。
+</Callout>
+
 ## 三個關鍵 section 怎麼讀
 
 **Memory Workload Analysis:** 看 L1/L2 hit rate、DRAM throughput、每個 request 的 sector 使用率。 Sector 使用率低 = coalescing 差 (回第 6 章); L2 hit 低 = locality 差 (考慮 swizzle, 第 13 章)。
@@ -29,6 +33,10 @@ omniperf profile -n step0 -- ./sgemm_step0_naive && omniperf analyze -p workload
 **Scheduler Statistics / Warp State:** 看每個 issue slot 的 stall 原因。 常見的 `Stall Long Scoreboard` = 在等 global memory, 代表 latency hiding 不足 (加 warp 或做 prefetch)。 `Stall MIO Throttle` = shared memory/特殊功能單元壅塞。 `Stall Barrier` = 在等 `__syncthreads()`, 常見於 block 內工作不均。 `Stall Wait` / `Stall Short Scoreboard` = 短相依鏈, 通常還好。
 
 **Occupancy Section:** 顯示 achieved vs. theoretical occupancy, 以及 limiter。 Achieved 遠低於 theoretical 通常是 load imbalance 或 tail effect (第 13 章)。
+
+<Callout variant="warn" title="落到真實場景: 追高 occupancy 反而變慢">
+一個真實的反直覺: 你看到 occupancy 只有 40%, 直覺是「太低, 加 block 數」, 於是縮小 per-thread 的 register 使用把 occupancy 拉到 75% — 結果 kernel 反而慢了 15%。 回頭看 Scheduler Statistics 才發現原本的 stall 主因是 `Stall Long Scoreboard` (等 global memory), 不是 occupancy 不足; 而縮 register 逼你把本來留在暫存器的 tile 值溢到 local memory, 製造了更多 memory traffic。 教訓: occupancy 是「限制器之一」不是目標函數。 只有當 limiter 明確是 occupancy、且 stall 是因為沒有足夠 warp 掩蓋 latency 時, 拉高它才有意義 — 否則你是在拿 ILP 換一個沒用的數字。
+</Callout>
 
 ## 常見「症狀 → 病因 → 章節」對照表
 
@@ -74,6 +82,10 @@ ncu --set full -k regex:sgemm --launch-skip 10 --launch-count 1 \
 ncu --import baseline.ncu-rep --import after_fix.ncu-rep
 ```
 
+<Callout variant="insight" title="落到真實場景: 用 diff 模式證明 swizzle 真的有效">
+你為一個 GEMM 加了 CTA swizzle 想改善 L2 locality, wall time 從 1.20 ms 降到 1.12 ms。 問題是: 這 7% 到底是 swizzle 的功勞, 還是量測噪音? 用 `ncu --set full` 各抓一份 baseline 與 after, 再 import 並排 diff, 直接看 `L2 Hit Rate` 這一列: 若它從 62% 跳到 84%、`DRAM Throughput` 同步下降, 因果就坐實了。 這在 PR review 時特別有用 — 你能貼出「metric X 動了 22 個百分點」而不是「我測起來比較快」。 反過來, 若 wall time 快了但 L2 hit 沒動, 那你改善的其實是別的東西, swizzle 可能只是碰巧, 值得再查。
+</Callout>
+
 ## Systematic workflow
 
 <Callout variant="insight" title="可反覆套用的六步驟">
@@ -100,6 +112,10 @@ ncu --import baseline.ncu-rep --import after_fix.ncu-rep
 - **Launch gap 高** → fuse、graph replay、persistent kernel 或把 framework graph break 消掉。
 
 每個 fix 都要有對應 metric 下降。 若 wall time 變快但 metric 沒變, 你可能改善的是別的瓶頸; 若 metric 變好但 wall time 不變, 瓶頸已轉移。
+
+<Callout variant="insight" title="落到真實場景: 一條 reduction kernel 的 atomic 熱點">
+你 profiling 一個統計 histogram 的 kernel, 發現 `Atomic throughput` 拉滿、對應的 stall 很高 — 對照表直接指向「privatize、warp aggregate 或兩階段 reduce」。 落地就是: 先讓每個 warp 用 `__shfl` 在暫存器內把同 bin 的更新合併成一次 `atomicAdd` (warp aggregation), 再不夠就每個 block 開一份 shared memory 的私有 histogram、block 結束才一次性 flush 到 global。 改完重跑, 你要看到的不是「感覺快了」, 而是 atomic 相關 counter 明顯下降、DRAM 沒有變成新瓶頸。 如果 atomic 降了但 wall time 沒動, 表示瓶頸早就轉移到別處 (可能是輸入的 load), 該回步驟 1 重新分類 — 這就是對照表和 workflow 合起來用的方式。
+</Callout>
 
 <LabBox path="kernels/05-advanced-scheduling">
 用 `scripts/profile_ncu.sh` 與 `scripts/profile_rocprof.sh` 對第 12 章的各個 GEMM step kernel 依序 profiling, 把每一步的 speed-of-light 與主要 stall 記下來。 你會看到 bound 類型隨優化階段遷移: naive 是 memory-bound, tiling 後轉向 latency/compute-bound, 最終 MMA 版逼近 compute roof。 這就是本章 workflow 的實戰演練。

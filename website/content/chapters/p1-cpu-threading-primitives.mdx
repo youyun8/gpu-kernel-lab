@@ -33,6 +33,10 @@ OpenMP 把 thread pool 與 work sharing 藏在 directive 後面:
 for (int i = 0; i < n; ++i) out[i] = f(in[i]);
 ```
 
+<Callout variant="warn" title="落到真實場景: 忘了 join 與每個 request 都開一條 thread">
+Thread lifecycle 的 bug 在 server 程式最致命。 忘了 `join()` (或 `detach()`) 而讓 `std::thread` 解構, C++ 直接呼叫 `std::terminate()` 把整個 process 幹掉 — 這在測試機不一定重現, 上線高併發時才炸。 另一個 lifecycle 反模式是「每個 inference request 都 `emplace_back` 一條新 thread」: 每次 create/join 都有 OS 成本 (數十微秒), QPS 一高, 光是建 thread 就吃滿 CPU。 正確做法是一次建好固定大小的 thread pool 常駐, request 進來丟進 queue, 讓已存在的 worker 拿去做 — GPU 端的對應直覺是「kernel launch 也不是免費, 別為每個小工作 launch 一次」。
+</Callout>
+
 ## Mutual Exclusion: Mutex / Critical
 
 當多個 threads 必須更新同一個 shared object, 最直接的修法是 **mutual exclusion**: 同一時間只允許一個 thread 進入 critical section。
@@ -63,6 +67,10 @@ pthread_mutex_unlock(&mu);
 
 Mutex 正確但會序列化 critical section。 如果每次 loop 都搶同一把 lock, 程式雖然平行啟動, 熱點實際上仍是單執行緒。
 
+<Callout variant="warn" title="落到真實場景: 一把粗鎖把 8 核心壓回 1 核心">
+這正是 Track 0 的 `openmp_reduction` 實測要示範的事: 16 條 thread 各做 8M 次累加, 用 `#pragma omp critical` (等同每次都搶同一把 mutex) 要 2988 ms, 換成 `reduction(+:sum)` 讓每條 thread 先在私有副本累加、最後合併一次, 只要 9.6 ms — 快了約 300 倍。 病徵是 profiler 顯示 CPU 使用率遠低於核心數、大量時間卡在 lock。 真實系統版本是「全域 metrics counter 用一把 mutex 保護, 每個 request 都去 `++`」, 高併發下這把鎖就是瓶頸。 修法方向: 縮小 critical section、改 per-thread 累加再 merge, 或換成 atomic — 這也是為什麼 GPU 幾乎不用 lock, 直接走 privatization。
+</Callout>
+
 ## Semaphore: Resource Counting
 
 **Semaphore** 是「有幾張通行證」的同步原語。 Mutex 是 binary ownership; semaphore 是 counted availability。 它常用在 bounded queue、producer/consumer pipeline、限制同時使用某資源的 worker 數量。
@@ -91,6 +99,10 @@ sem_post(&empty_slots);
 
 <ProducerConsumerDiagram />
 
+<Callout variant="insight" title="落到真實場景: 限制同時打 GPU 的 in-flight 請求數">
+Semaphore 的「counted permits」在 ML serving 裡最常見的用途是背壓 (backpressure)。 假設一張 GPU 的 KV cache 只夠同時容納 32 個 in-flight decode 請求, 你就開一個 `sem_init(&slots, 0, 32)`: 每個請求進 GPU 前 `sem_wait`, 完成後 `sem_post`, 第 33 個請求會自動被擋在 `sem_wait` 直到有名額釋出 — 這比讓請求全湧進去然後 OOM 好得多。 同樣的 pattern 也用在限制同時開啟的 CUDA stream 數、限制 host 端 pinned-memory staging buffer 的數量。 記住它和 mutex 的分工: semaphore 管「還有幾個名額」, 底下真正的 queue 資料結構一致性仍要 mutex 保護。
+</Callout>
+
 ## Condition Variable
 
 **Condition variable** 適合等待某個 predicate 變成 true, 例如 queue not empty 或 shutdown flag。 它必須搭配 mutex, 並用 `while` 或 predicate 版本處理 spurious wakeup。
@@ -110,6 +122,10 @@ void consumer() {
 
 Semaphore 通常用於 counted resource; condition variable 用於 arbitrary condition。 兩者都不是保護 shared data 的替代品, shared data 仍需要 mutex 或 lock-free protocol。
 
+<Callout variant="warn" title="落到真實場景: 用 if 而不是 while 等 predicate">
+Condition variable 最經典的線上事故是「醒來後沒重新檢查條件」。 一個 dataloader worker pool 用 `cv.wait(lock)` 等 batch queue 非空, 若寫成 `if (q.empty()) cv.wait(lock);` 而不是 `while` (或帶 predicate 的 `cv.wait(lock, [&]{ return !q.empty(); })`), 兩個問題會咬人: spurious wakeup 讓 thread 沒被 notify 也可能醒來、以及 notify 後另一條 consumer 搶先把唯一的 item 拿走 — 這條 thread 醒來卻對空 queue 做 `q.front()`, 直接 UB/crash。 規則很簡單: predicate 一定用迴圈重驗, 而且要在持有 mutex 時檢查。 這種「check-then-act 中間狀態被改掉」就是 Track 2 會講的廣義 race condition。
+</Callout>
+
 ## Barrier
 
 **Barrier** 是 phase boundary: 所有 workers 都到達後, 下一階段才開始。 Pthread 有 `pthread_barrier_wait`; OpenMP 有 `#pragma omp barrier`。
@@ -124,6 +140,10 @@ Semaphore 通常用於 counted resource; condition variable 用於 arbitrary con
 ```
 
 GPU 的 `__syncthreads()` 是 block-local barrier; 第 3 章會把這個限制講清楚。
+
+<Callout variant="insight" title="落到真實場景: 迭代式 solver 的 phase boundary">
+Barrier 就是「所有人做完這一階段, 才能開始下一階段」的地方, 迭代式數值計算幾乎每輪都需要。 以 Jacobi/stencil solver 為例: 每個 thread 用「上一輪的鄰居值」算自己的新值, 若 thread A 已經進到下一輪、開始覆寫還沒被 thread B 讀到的舊值, 結果就錯 — 所以每輪之間要 barrier 隔開 read phase 與 write phase。 這個模式直接對應到 GPU: block 內的 tree reduction 每一輪之間都要 `__syncthreads()`, 拿掉任何一個就是 shared memory 上的 data race。 唯一要小心的是 barrier 必須「所有 thread 都會抵達」, 放進 divergent branch 裡就會有人永遠等不到。
+</Callout>
 
 ## Atomics
 
@@ -143,6 +163,10 @@ ready.store(true, std::memory_order_release);
 while (!ready.load(std::memory_order_acquire)) {}
 use(payload);
 ```
+
+<Callout variant="warn" title="落到真實場景: relaxed 計數器很好, 但別用它做 handshake">
+記憶體順序選錯是效能與正確性的拉鋸。 純統計用途 (例如多條 thread 累加 `requests_served` counter) 用 `memory_order_relaxed` 就對又快, 因為你只在乎最後的總數、不在乎它和其他寫入的先後。 但只要 atomic 兼任「發布資料」的旗標, relaxed 就會出錯: 上面那段「先寫 `payload` 再舉 `ready` 旗」的 handshake, 若 store 用 relaxed, 別的 thread 可能看到 `ready == true` 卻讀到還沒寫進去的舊 `payload` — 因為 CPU/compiler 允許重排這兩個彼此無依賴的寫入。 這正對應 GPU 的 `__threadfence()`: single-pass reduction 裡, 最後一個 block 必須先 fence 確保 partial sum 發佈、才去領 atomic ticket, 少了 fence 就讀到 stale partial。
+</Callout>
 
 ## 經典同步問題
 
@@ -170,6 +194,10 @@ void writer() {
 
 <ReadersWritersDiagram />
 
+<Callout variant="insight" title="落到真實場景: 讀多寫少的 config / routing table">
+Readers/writers 就是「一份資料被大量讀、偶爾更新」的每一次。 最典型的是線上服務的 config 或 feature-flag table: 每個 request 都要讀它 (每秒上萬次), 但只有偶爾 hot-reload 才寫。 用普通 `std::mutex` 會讓所有 reader 也互斥、白白序列化; 換成 `std::shared_mutex` 讓 reader 走 `shared_lock` 併發、writer 走 `unique_lock` 獨佔, 讀吞吐量立刻放開。 但要小心 writer starvation: 若 reader 絡繹不絕又沒有 writer preference, 那個 hot-reload 可能等到天荒地老 — 對更新延遲敏感時, 改用 writer-preferred 鎖或乾脆 RCU / 換指標 (atomic swap 一個新的 immutable table) 的做法。
+</Callout>
+
 ### Dining Philosophers
 
 五位哲學家圍著圓桌, 每人左右各有一支叉子, 吃飯前要同時拿到兩支。 如果每個人都用同樣的順序去拿 (先左後右), 而且剛好同時伸手, 每個人都會拿到左手那支、卡在等右手那支 —— 右手那支正好是鄰居剛拿走的, 形成**環狀等待 (circular wait)**, deadlock 的四個必要條件全部成立, 沒有人能吃。
@@ -195,6 +223,14 @@ void philosopherFixed(int i) {
     eat();
 }
 ```
+
+<Callout variant="warn" title="落到真實場景: 兩把鎖、相反順序">
+哲學家問題不是謎題, 它就是「一個 thread 需要同時持有兩把鎖」的每一次。 最常見的版本是
+帳戶轉帳: `transfer(A, B)` 先鎖 A 再鎖 B, 另一條 thread 剛好在跑 `transfer(B, A)` 先鎖 B
+再鎖 A — 兩者各拿到一把、互等對方, 就是 circular wait。 修法和叉子完全一樣: 給鎖定一個
+全域順序 (照帳戶 id 由小到大鎖), 或用 `std::lock(mA, mB)` 一次拿兩把。 GPU/ML infra 裡同樣
+會遇到: 一條 stream 先搶 allocator lock 再搶 logger lock, 另一條反過來, 就死鎖。
+</Callout>
 
 打破環狀等待不需要每個人都改順序, 只要有一人反過來, 迴圈就永遠無法完整閉合 —— 底下的圖比較「全部先左後右」(會 deadlock) 跟「一人反向拿」(保證有人吃得到) 兩種情境。
 

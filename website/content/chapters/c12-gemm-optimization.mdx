@@ -52,6 +52,10 @@ __global__ void sgemmNaive(const float* A, const float* B, float* C, int m, int 
 
 問題: 每個 output 讀 $2K$ 個 float、只做 $2K$ 個 FLOP, arithmetic intensity ≈ 0.25 FLOP/byte, 牢牢卡在 bandwidth roof。 Profiler 會顯示 memory throughput 接近上限、compute 使用率個位數。
 
+<Callout variant="insight" title="落到真實場景: 你的第一版 SGEMM 為什麼只有 cuBLAS 的 2%">
+這不是假設 — 幾乎每個人第一次手寫 GEMM 都會撞到。 Profiler (Nsight Compute / rocprof) 會給你鐵證: DRAM throughput 接近 100%, 但 SM / compute 使用率個位數, Memory Workload Analysis 顯示同一條 A row、同一條 B column 被反覆從 global memory 讀進來。 arithmetic intensity 卡在 ~0.25 FLOP/byte, roofline 上的點死死貼在 bandwidth roof。 結論很清楚: 接下來每一步優化的目標都不是「算更快」, 而是「同一筆資料進來後多用幾次」。
+</Callout>
+
 ## Step 1: Shared Memory Tiling — 讓資料被重複使用
 
 把 $A$、$B$ 切成 tile, 一個 block 協力把 tile 載入 shared memory, 再從 shared memory 反覆讀。 每筆 global load 被同一個 block 內的多個 thread 共用, arithmetic intensity 隨 tile size 線性上升。
@@ -83,6 +87,10 @@ __global__ void sgemmTiled(const float* A, const float* B, float* C, int m, int 
 
 Profiler 觀察: global memory transactions 大幅下降, DRAM throughput 不再是瓶頸, performance 通常跳到 naive 的 5–10 倍。
 
+<Callout variant="insight" title="落到真實場景: tile 尺寸選錯讓 shared memory 變成新瓶頸">
+把 tile 開進 shared memory 後別急著慶祝 — profiler 的瓶頸只是從 DRAM 搬到了別處。 常見的下一個症狀: tile 開太大 (例如 48×48 fp32 兩塊各 9 KB) 讓每個 SM 只塞得下一兩個 block, occupancy 崩掉; 或 `sA[ty][p]` 這種存取型態在 32-bank 上撞出 bank conflict, Nsight 的 shared memory 分析會直接標出 conflict 次數。 這一步的驗收是「global memory transactions 明顯下降、且沒有製造新的 shared memory stall」, 而不是單看總時間變快就收工。
+</Callout>
+
 ## Step 2: register tiling — 一個 thread 算一小塊 C
 
 光靠 shared memory 還不夠: shared memory 的 bandwidth 也有限。 下一步讓每個 thread 算一個 $TM \times TN$ 的 micro-tile, 把 $A$、$B$ 的片段放進 registers 反覆用, 把 shared memory 的存取次數再攤薄。 這一步通常帶來最大的單步跳躍。
@@ -108,6 +116,10 @@ for (int p = 0; p < kTile; ++p) {
 ```
 
 注意 micro-tile 的 outer-product 結構: 每一步從 shared memory 讀 `TM + TN` 個值, 做 `TM × TN` 次 FMA — shared memory 存取相對 FLOP 的比例又下降了一階。 這也是第 8 章「低 occupancy + 高 ILP」路線的實例: `acc[TM][TN]` 吃掉大量 register, 但 4×4 = 16 條獨立 FMA 鏈本身就是絕佳的 latency hiding。
+
+<Callout variant="insight" title="落到真實場景: register tiling 通常是整條階梯裡最大的一跳">
+在 2048³ fp32 上實測這條階梯, step1 → step2 往往是單步最大的躍升 (常見 2–3 倍), 原因就在這個 outer-product: 每步從 shared memory 讀 `TM + TN` 個值卻做 `TM × TN` 次 FMA, 4×4 tile 就是讀 8 個值做 16 次 FMA, shared memory 存取相對 FLOP 又降一階。 代價是 `acc[4][4]` = 16 個 register (8×8 就 64 個), occupancy 會掉 — 但這正是第 8 章的「低 occupancy + 高 ILP」路線, 16 條獨立 FMA 鏈自己就把 pipeline 餵飽了。 若你這步只看到小幅提升, 先查 `-Xptxas=-v` 有沒有 spill 把 register tile 的好處吃掉。
+</Callout>
 
 ## Step 3: vectorized loads
 
@@ -147,6 +159,10 @@ computeTile(sA[cur], sB[cur]);       // epilogue: last tile
 
 理想情況下每個 k-tile 的成本從 `L + C` 變成 `max(L, C)` — 當 compute 時間足以覆蓋 load, memory latency 就完全被藏掉。 Ampere 之後的 `cp.async` (第 14 章) 讓 prefetch 不再佔用 register, pipeline 可以疊到 3–5 個 stage。
 
+<Callout variant="insight" title="落到真實場景: double buffering 消掉的是哪一種 stall">
+做完 register tiling 後再 profile, 你多半會看到 stall 原因集中在 `long scoreboard` (warp 在等 global memory 的 tile 到齊) — 主迴圈的「load → sync → compute → sync」讓算術單元在 load 期間乾等。 Double buffering 把每個 k-tile 的成本從 `L + C` 壓到 `max(L, C)`: 一旦 compute 時間蓋得住 load, 那個 long scoreboard stall 就消失。 這是「用 shared memory 換 latency hiding」的交易 — buffer 變兩份、佔用加倍, 所以 tile 太大時要重新確認 occupancy 沒被 shared memory 壓垮。
+</Callout>
+
 ## Step 5: Tensor Core (WMMA) / AMD MFMA
 
 最後一步換引擎: 用矩陣乘加硬體單元取代 FMA pipe。 NVIDIA 走 `wmma` API (或 PTX `mma` 指令), AMD 走 MFMA intrinsic — 兩者都以「warp/wavefront 共同持有一塊小矩陣」為單位運算:
@@ -169,9 +185,17 @@ store_matrix_sync(&C[row * n + col], facc, n, mem_row_major);
 
 對 half/bf16, MMA 單元提供相對 fp32 FMA 數量級的吞吐提升; fp32 輸入也可透過 TF32 (NVIDIA) 或 xf32 模式吃到部分加速。 代價是資料佈局被指令規定死了 — fragment 在 register 的擺放由硬體決定, shared memory layout 必須配合 (swizzle, 第 7 章), 這正是手寫 MMA kernel 困難、而 CUTLASS/CK (第 15、22 章) 價值所在的原因。
 
+<Callout variant="warn" title="落到真實場景: WMMA 換上去反而變慢或算錯">
+第一次接 `wmma` / MFMA 常見兩種翻車。 一是「更快的 compute pipe 在等 memory」: 你還沒爬過 ridge point 就上 MMA, Nsight 顯示 Tensor pipe 使用率高但整體沒變快 — MMA 單元大半時間在等 shared memory 餵 fragment。 二是 layout 錯: fragment 在 register 的擺放由指令寫死, shared memory 沒配合做 swizzle (第 7 章), 輕則 bank conflict 拖慢、重則 `load_matrix_sync` 讀錯位址直接算出錯誤結果。 這兩個坑正是 CUTLASS / CK 存在的理由 — 先確認 memory 已經餵得上、再處理 layout, 別想一步到位。
+</Callout>
+
 ## Epilogue: 別忘了輸出端
 
 完整的 GEMM 是 $C = \alpha AB + \beta C$, 尾端還常掛 bias、activation、dtype 轉換。 這段「算完 accumulator 之後、寫回 global memory 之前」的程式叫 **epilogue**。 把 bias + GELU 這類 elementwise 融進 epilogue, 省掉一次完整的 C 讀寫 — 這是 library (cuBLASLt 的 epilogue 選項、CUTLASS 的 epilogue visitor tree) 提供 fused GEMM 的機制, 也是第 19 章 fusion 思想在 GEMM 上的體現。
+
+<Callout variant="insight" title="落到真實場景: 把 bias + GELU 融進 epilogue 省一次 C 的往返">
+Transformer 的 FFN 是 `GELU(X @ W1 + b1)` 這種 GEMM 後面緊跟 bias + activation。 若分成兩個 kernel, 你要把整個 C (可能上百 MB) 寫回 global memory、再讀回來做 elementwise — 對這個 memory-bound 的尾巴是純浪費。 把 bias + GELU 寫進 epilogue, 在 accumulator 還在 register 時就地算完再寫出, 直接省掉一次 C 的讀 + 寫。 這正是 cuBLASLt 的 epilogue 選項 (`CUBLASLT_EPILOGUE_GELU_BIAS`)、CUTLASS 的 epilogue visitor tree 在做的事, 也是第 19 章 fusion 思想落在 GEMM 上的樣子。
+</Callout>
 
 ## 每一步的效果 (示意數據)
 

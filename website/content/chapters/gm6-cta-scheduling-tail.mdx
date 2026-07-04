@@ -2,6 +2,10 @@
 
 第 5 章處理「tile 數**不夠**」的情況。 這一章相反: 當 tile 數**夠多**時, 它們被排上 SM 的**順序**會大幅影響 L2 cache 的命中率與尾端行為。 同一組 tile、同樣的 compute, 只是換個排程順序, 就能差 10–30%。
 
+<Callout variant="insight" title="落到真實場景: 只改排程就多 20% 的那次 commit">
+「換排程差 10–30%」聽起來抽象, 但在 CUTLASS/Triton 的 issue 與 changelog 裡這是實打實的 commit: 對一個大方陣 GEMM, 把 threadblock 的 rasterization 從 row-major 改成 grouped swizzle, L2 hit rate 從約 50% 拉到約 75%, end-to-end 快 20% — 沒動任何一行 compute。 對正在調 LLM 訓練 GEMM 的人, 這是「幾乎免費」的一檔: 先試 swizzle 與 persistent 這類排程旋鈕, 再去碰更難的 mainloop。 本章就是這兩個旋鈕。
+</Callout>
+
 ## CTA Swizzle — 換 launch 順序換 L2 命中
 
 GEMM 的每個 output tile 都要讀一整條 A 的 row-band 與一整條 B 的 column-band。 相鄰的 output tile 共享這些 band。 問題是: **哪些 tile 同時在跑**, 決定了它們共享的 band 能不能留在 L2 被重複命中。
@@ -52,6 +56,10 @@ __global__ void sgemmPersistent(/* ... */, int numTiles, int* nextTile) {
 
 代價是要自己管 work queue 的 atomic counter, 且 occupancy 要抓準 (launch 太多會回到被換上換下的老問題, 太少則填不滿)。 這是第 9 章 track「persistent kernels 與 work queues」的核心, 也是現代 library GEMM 的預設結構。
 
+<Callout variant="insight" title="落到真實場景: Hopper 上的 persistent warp-specialized GEMM">
+persistent kernel 不是學術玩具 — 它就是 CUTLASS 3.x 在 Hopper 上 GEMM 的預設骨架: launch 剛好塞滿 GPU 的 CTA, 讓一部分 warp 專門用 TMA 搬資料 (producer)、另一部分專門跑 MMA (consumer), tile 之間從 work queue 連續領, prologue 只付一次。 對「同一個 kernel 要連算幾百個中小 GEMM」的 MoE 或 batched 場景, persistent 省下的反覆 launch/teardown overhead 特別明顯。 代價是那個 atomic `nextTile` counter 在 tile 很小時會變成 contention 熱點, 所以 library 常改用每個 CTA 自己算 index 的無 atomic 方案。
+</Callout>
+
 ## 把第 5、6 章接起來
 
 | 問題 | 症狀 | 工具 |
@@ -61,6 +69,10 @@ __global__ void sgemmPersistent(/* ... */, int numTiles, int* nextTile) {
 | 很多小 tile, launch overhead 高 / tail | 排程開銷、尾端不平衡 | persistent kernel (本章) |
 
 這三者可以疊加: 一個 production GEMM 常常是「persistent kernel + swizzle 排程 + 在 skinny shape 時切到 Stream-K」的組合 — 而選哪個組合、參數設多少, 就交給第 7 章的 autotuning。
+
+<Callout variant="insight" title="落到真實場景: 拆一個 production GEMM 的組合拳">
+把這張表對到一次真實的 profiler session: 你在跑一個 GPT 訓練 step, 發現某個 attention output projection 的 GEMM 慢。 先看 tile 數 vs SM 數 — 夠多, 排除 Split-K; 再看 L2 hit rate 偏低 — 開 swizzle; 又看到很多小 tile 讓 launch 佔比高 — 換 persistent。 三個症狀對三個工具, 疊起來就是這一格。 真正的 library (cuBLASLt/CUTLASS) 把這整套組合連同參數丟給第 7 章的 autotuner 去搜, 但你得先看得懂每格在解什麼, 才知道它搜出來的組合合不合理。
+</Callout>
 
 <LabBox path="kernels/05-advanced-scheduling">
 `kernels/05-advanced-scheduling` 內含 CTA swizzle 與 persistent scheduler 的範例。 拿一個大方陣 (tile 數遠多於 SM), 對比 row-major 與 swizzled 排程的 L2 hit rate (profiler 的 `lts__t_sector_hit_rate` 或 omniperf 對應 metric), 感受純排程改動帶來的差異。

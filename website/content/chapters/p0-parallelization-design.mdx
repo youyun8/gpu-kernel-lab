@@ -35,6 +35,10 @@ __global__ void saxpyGpu(int n, float a, const float* x, float* y) {
 
 **Task parallelism** 是把不同工作交給不同 worker: 一個 thread 讀 input, 一個 thread decode, 一個 thread 做 compute, 一個 thread 寫 output。 CPU 很常這樣設計; GPU 也能用 streams/pipelines 表達, 但單一 kernel 內通常更偏 data parallel。
 
+<Callout variant="insight" title="落到真實場景: LLM 推論的兩種 decomposition 疊在一起">
+一個線上 LLM serving stack 同時用到兩種切法。 Data parallelism 在 attention/MLP 這種 per-token 計算裡: batch 內幾千個 token 對同一組 weight 做同一件事, 直接一個 device thread 處理一小塊, 這是 GPU 吃得最飽的部分。 Task parallelism 則在 host 端 pipeline: 一條 stream 做 tokenize, 一條做 prefill kernel, 一條做 decode, 一條把結果 stream 回 client, 各自忙不同階段。 判斷一段程式該用哪種, 就看「每個 worker 做的是同一件事 (data) 還是不同的事 (task)」, serving 系統幾乎一定兩者都有。
+</Callout>
+
 ## Granularity
 
 **Granularity** 是每個 worker 拿到的工作量。 CPU thread 建立、OS scheduling、cache warmup 都不便宜, 所以 CPU 常用 coarse-grained chunks: 每個 thread 做數千到數百萬個元素。 GPU thread 很便宜, 但單一 thread 很弱, 所以 GPU 常用 fine-grained mapping: 一個 thread 做 1 到 8 個元素, 讓 blocks/warps 數量夠多。
@@ -43,6 +47,10 @@ __global__ void saxpyGpu(int n, float a, const float* x, float* y) {
 | --- | --- | --- |
 | CPU | cores 沒吃滿、tail thread 拖住整體 | thread 管理與同步成本太高 |
 | GPU | blocks 太少, SM/CU 閒置 | index overhead 大、global atomic contention 高 |
+
+<Callout variant="warn" title="落到真實場景: batch size 太小, GPU 只用了一角">
+粒度太粗在 GPU 上最常見的形式是「launch 的 block 數量比 SM/CU 還少」。 舉例: 在一張有 108 個 SM 的 A100 上跑一個 batch=4、每個 sample 一個 block 的 kernel, 等於只叫醒 4 個 SM, 其他 104 個閒置, profiler 會看到 achieved occupancy 個位數百分比。 修法就是提高平行度: 拉大 batch、把每個 sample 再切成多個 tile/block, 或改用 grid-stride loop 讓 block 數量獨立於資料大小。 反過來, 若在 CPU 上開了幾萬個各只做 100 個元素的 `std::thread`, thread 建立與排程成本會遠超過工作本身 — 這是粒度太細。
+</Callout>
 
 ## Load Balancing
 
@@ -60,6 +68,10 @@ for (int row = 0; row < num_rows; ++row) processRow(row);
 
 GPU 上的對應手段是 grid-stride loop、persistent kernels、work queues、split-K、以及把大 row 再切成多個 tiles。 這些都是同一件事: 把長尾工作拆開, 讓 idle worker 可以拿下一個 chunk。
 
+<Callout variant="insight" title="落到真實場景: variable-length sequence 的 padding 浪費">
+Transformer 訓練最典型的 load imbalance 來自 sequence 長度不齊。 一個 batch 裡有的句子 32 個 token、有的 2048 個, 若 naive 地 pad 到最長並「一個 sequence 一個 block」, 短句那些 block 大半時間在算 padding, 等於整個 batch 被最長的那條拖住。 業界修法正是上述的長尾拆解: length-based bucketing 把長度相近的放一起、sequence packing 把多條短句塞進同一段連續空間、或改用 variable-length attention kernel (例如 FlashAttention 的 varlen API) 只算真實 token。 判斷起點都一樣: 先量每個 worker 的實際工作量差多少, 再決定要 bucketing 還是 dynamic dispatch。
+</Callout>
+
 ## Mapping To Hardware
 
 | 概念 | C++ / OpenMP / Pthread | CUDA / ROCm |
@@ -72,6 +84,10 @@ GPU 上的對應手段是 grid-stride loop、persistent kernels、work queues、
 | synchronization | mutex, semaphore, barrier, condition variable, atomic | `atomicAdd`, `__syncthreads()`, cooperative groups, fences |
 
 GPU 偏好 **massive data parallelism**: 它不是靠一條 thread 很快, 而是靠大量 resident warps/wavefronts 隱藏 memory latency。 當一個 warp 等 global memory, scheduler 切到另一個 ready warp; 要讓這招有效, kernel 必須提供足夠多獨立小工作。
+
+<Callout variant="insight" title="落到真實場景: 把這張表當成移植 checklist">
+這張對照表在實務上就是「CPU prototype 移植到 GPU」的逐列檢查清單。 你把 CPU 上一段用 thread pool + `std::mutex` 保護 shared histogram 的程式搬到 CUDA 時, 對著表逐格問: worker 從 OS thread 變成 device thread (數量從 8 變成數十萬)、shared histogram 從「heap 物件 + lock」變成「global memory + `atomicAdd` 或每個 block 先在 shared memory 私有累積」、barrier 從 `pthread_barrier` 變成 block 內的 `__syncthreads()`。 最容易踩雷的是 synchronization 那一列: 在 CPU 能用的 blocking lock, 到 GPU 上因為數十萬 thread 排隊而必須換成 atomic 或 privatization, 這正是 Track 0 後面幾章要展開的主題。
+</Callout>
 
 ## 設計流程
 

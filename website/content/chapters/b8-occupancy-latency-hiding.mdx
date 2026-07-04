@@ -41,6 +41,10 @@ $$
 
 切換架構時注意 AMD 的 wavefront = 64 threads: 同樣 256 threads 的 block 在 CDNA 上只有 4 個 waves, 每 wave 的 register 配置粒度也不同。
 
+<Callout variant="insight" title="落到真實場景: 加三個中間變數, occupancy 掉一級">
+你在一支 attention kernel 裡多寫了幾個中間變數存 partial max / sum, `-Xptxas=-v` 顯示每 thread register 從 40 爬到 56。 套上面這張表: 每 block 需要的 register 從 256×40 重算成 256×56 = 14,336, 塞得下的 block 從 6 掉到 4, Nsight Compute 的 Occupancy section 立刻把 theoretical 從 75% 標成 50%, 而且 limiter 欄位寫著 Registers。 這就是「階梯狀」的真面目 — 不是線性變差, 而是跨過某個整數除法的門檻突然掉一級。 想救, 要嘛把那幾個變數併回既有的 register、要嘛接受這一級、要嘛用 `__launch_bounds__` 逼編譯器省下來。
+</Callout>
+
 ## 多少 warps 才「夠」? 用 Little's Law 估
 
 Occupancy 不需要 100%, 只需要「夠把 latency 藏滿」。 需要多少可以粗估: 要填滿一條 latency 為 $L$ cycles、每 cycle 能收 $T$ 筆請求的 pipeline, 需要同時在飛 (in-flight) 的請求約 $L \times T$ 筆。
@@ -55,6 +59,10 @@ $$
 - 每個 warp 一次發 4 筆**互相獨立**的 loads → 需要的 warps 直接除以 4。
 
 第二個因子就是 **ILP (instruction-level parallelism)** — 這是本章最重要的概念: **occupancy 和 ILP 是同一件事的兩種買法**。
+
+<Callout variant="insight" title="落到真實場景: 用 Little's Law 反推「該開幾個 warp」">
+調一支 elementwise kernel (例如 `y = gelu(x)`) 時, 別再憑感覺把 occupancy 往 100% 推。 先量: HBM latency 約 500 cycles, 你希望每個 cycle 都發得出一筆 load。 若每個 thread 只發 1 筆 load、等它回來才發下一筆, 就需要 ~500 個 warp 的量級 in-flight — 硬體給不了。 所以真正救你的是「每 thread 一次讀 `float4` (4 筆獨立 load)」把需求直接除以 4。 這條反推明確告訴你: memory-bound kernel 上, vectorized load + 適度 occupancy 通常勝過死命堆 warp。
+</Callout>
 
 ## ILP: 同一個 warp 內的平行
 
@@ -87,6 +95,10 @@ float sum = (sum0 + sum1) + (sum2 + sum3);
 Version A 的每條 FMA 都要等上一條的結果 (`sum` 是依賴鏈), 一個 warp 每 ~4 cycles 才能發一條指令 — 要靠**別的 warps** 填滿中間的空檔, 也就是需要高 occupancy。 Version B 有 4 條互不依賴的鏈, 單一 warp 自己就能連續發射, 對 occupancy 的需求直接砍到約 1/4。 代價是 4 個 accumulators 佔 4 個 registers — **你用 register 買了 ILP, 用 ILP 省了 occupancy**。
 
 Memory 端同理: 連續發出 4 筆獨立的 load (例如讀 `float4`, 或一次讀 4 個不同位址到不同暫存變數), 一個 warp 就有 4 筆請求同時在飛。 這正是第 11、12 章 GEMM register tiling 的底層邏輯。
+
+<Callout variant="insight" title="落到真實場景: reduction 迴圈的 4 個 accumulator">
+LayerNorm / RMSNorm 要對 hidden dim 做一條長 dot-product 或 sum-of-squares, 天真寫法就是 Version A 的單一 `sum` 依賴鏈, 每 ~4 cycles 才發得出一條 FMA。 把它改成 `sum0..sum3` 四路 accumulator (Version B), 只多花 3 個 register, 單一 warp 的發射密度就接近 4 倍 — 在 hidden=4096、每個 SM 只跑得動少數 warp 的長 row 情境下, 這是不動 occupancy 就把 pipeline 餵飽的最省成本改法。 這也是第 12 章 register tiling 把 `acc[TM][TN]` 攤成多條獨立 FMA 鏈的同一招。
+</Callout>
 
 ## 用工具查, 不要猜
 
@@ -129,6 +141,10 @@ __global__ void __launch_bounds__(256, 2) myKernel(/* ... */) {
 
 加上之後重新編譯, 用 `-Xptxas=-v` 驗證兩件事: register 是否真的降到目標以下、以及**有沒有付出 spill 的代價**。 若出現 spill, 退回或放寬第二個參數。 HIP 寫法相同; CDNA 上另有 `__attribute__((amdgpu_waves_per_eu(n)))` 可更直接指定每個 execution unit 的 waves 數。
 
+<Callout variant="warn" title="落到真實場景: __launch_bounds__ 壓過頭, 換來 spill">
+你為了多塞一個 block, 給一支 fused kernel 加上 `__launch_bounds__(256, 6)`, occupancy 報告確實從 50% 變 66%, 但整體反而變慢。 重編一看 `-Xptxas=-v`, 多了一行 `128 bytes spill stores` — 編譯器為了達標把 accumulator 踢到 local memory, 每次「register 存取」變成幾百 cycle 的 global 往返。 這筆交易是虧的: 你用「多一個 block 的 latency hiding」換來「每個 thread 熱路徑上的 memory 往返」。 對策就是放寬第二個參數 (6 降回 4) 或退掉, 讓 spill 歸零優先於好看的 occupancy 數字。
+</Callout>
+
 ## 為什麼 higher occupancy 不一定更快
 
 現在可以把整章串起來了。 Latency hiding 需要的是「足夠的 in-flight 工作」, 而它有兩種買法:
@@ -150,6 +166,10 @@ Profiler 報兩個 occupancy:
 - **Achieved**: 執行期實際的平均活躍 warps — 「實際跑到多少」。
 
 兩者差距大時, 問題通常不在資源, 而在**工作的形狀**。 具體例子: 你的 grid 只有 8 個 blocks, 但 GPU 有 108 個 SM — 就算 theoretical 100%, 有 100 個 SM 完全沒事做, achieved 慘不忍睹。 這時候降 register、調 block size 全都無效, 你需要的是**製造更多 blocks** (見下方 Grid size)。
+
+<Callout variant="insight" title="落到真實場景: batch=1 的 decode, grid 填不滿 108 個 SM">
+LLM 推論的 decode 階段一次只算一個 token, GEMV 形狀 (M=1) 產生的 block 數可能只有個位數, 但 A100 有 108 個 SM。 Nsight 會出現最典型的症狀: theoretical occupancy 100%, achieved 卻只有幾 %。 這時候降 register、調 block size 全是白費工 — 問題在「工作的形狀」不在資源。 解法在第 13 章: Split-K 把 K 維切給更多 block、或把多個 request batch 起來, 先製造出足夠的 block 填滿 SM, achieved 才拉得起來。
+</Callout>
 
 ## 調參手冊: 五個旋鈕, 每個都有數字
 

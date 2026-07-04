@@ -25,9 +25,17 @@ prof.export_chrome_trace("trace.json")  # open in chrome://tracing or Perfetto
 
 進一步的技巧: 用 `record_function("block_name")` 在程式碼裡放標記, trace 上就能對應到模型結構;`with_stack=True` 能把 kernel 對回 Python 行號;`profile_memory=True` 順便抓記憶體配置熱點。 模型很大時, 用 `schedule=torch.profiler.schedule(wait=1, warmup=2, active=3)` 只錄幾個 step, 避免 trace 檔爆炸。
 
+<Callout variant="insight" title="落到真實場景: 讀一張真實的 transformer top-op 表">
+你對一個 GPT 訓練 step 跑上面的程式, `sort_by="cuda_time_total"` 印出來的第一名往往不是你以為的 attention, 而是 `aten::native_layer_norm` 加一堆 `aten::add`、`aten::mul`、`elementwise_kernel` — 因為每層都有兩個 LayerNorm、殘差加法、GELU, 累加起來吃掉 20% 以上的 CUDA time。 這時 `record_function("block.mlp")` 就派上用場: 把 marker 包在 MLP 前後, trace 上立刻看出是 MLP 的 elementwise 鏈還是 attention 佔多。 真實優化的第一個發現通常長這樣 — 時間散在一堆便宜 op 上, 而不是集中在單一貴 kernel。 這直接決定了你下一步是 fuse (第 19 章) 還是換 attention 實作。
+</Callout>
+
 ## 先看整體: GPU 到底忙不忙
 
 在深入單一 op 之前, 先回答一個更基本的問題: GPU 使用率高嗎? Timeline 上如果 GPU 軌道大段留白, 瓶頸根本不在 kernel — 可能是 dataloader (CPU 前處理跟不上)、host↔device 傳輸、或 Python overhead。 這種情況先修 pipeline (更多 dataloader workers、pinned memory、prefetch), 任何 kernel 優化都是白工。 GPU 軌道塞滿了, 才輪到本章接下來的分析。
+
+<Callout variant="warn" title="落到真實場景: 花一週優化 kernel, 瓶頸卻在 dataloader">
+一個真實會發生的悲劇: 有人 nvidia-smi 看到 GPU 利用率只有 40%, 直覺是 kernel 太慢, 埋頭 fuse 了兩個 op — 上線後 step time 幾乎沒動。 打開 Perfetto trace 才發現 GPU 軌道每個 step 之間有一大塊留白, 對齊 CPU 軌道正好是 `enumerate(dataloader)` 在做 JPEG decode 與 resize。 真正的修法是 `num_workers=8` + `pin_memory=True` + `prefetch_factor`, step time 直接掉 35% — 一行 kernel 都沒改。 教訓: 先確認 GPU 真的是瓶頸再動 kernel, 否則你優化的是一個根本不在關鍵路徑上的東西。 `nvidia-smi` 的利用率會騙人, timeline 的留白不會。
+</Callout>
 
 ## 兩種典型病徵
 
@@ -56,6 +64,10 @@ g.replay()   # hundreds of launches collapse into one
 
 找到候選後, 先用第 5 章的方法估收益上限: 這條鏈的總 memory traffic 是多少? Fuse 後剩多少? 比值就是理論加速上限。 如果上限只有 1.15×, 而這條鏈只佔模型 10% 的時間, 整體收益 1.5% — 不值得寫 custom kernel。 Amdahl 定律先算, 再決定投入。
 
+<Callout variant="insight" title="落到真實場景: 兩個候選, 算完帳只有一個值得做">
+你 profiler 找到兩個候選。 候選 A: 一條 bias+gelu+dropout 鏈, 佔 end-to-end 18%, fuse 後 traffic 從 5 趟降到 1 趟 (上限約 5×) — 整體收益上限 `18% * (1 - 1/5)` ≈ 14%, 明顯值得。 候選 B: 一個已經走 cuBLAS 的 GEMM, 佔 25%, 但它已在 roofline 附近, 你頂多擠出 5% — 整體收益 `25% * 5%` ≈ 1.25%, 而且要跟 CUTLASS 硬碰硬。 帳一算完, 該投入的是佔比較小的 A 而不是看起來「更大」的 B。 這就是為什麼要先估上限: 佔比大不等於收益大, 真正決定投報率的是「佔比 × 可壓縮空間」。
+</Callout>
+
 ## 別忘了先用內建工具
 
 在動手寫 custom kernel 前, 先試 `torch.compile` — 它會自動 fuse 很多 elementwise 鏈成 Triton kernel, 常常不費力就拿到大半好處。 Custom kernel 留給 `torch.compile` 沒 fuse 好、或需要特殊演算法 (如 online softmax) 的地方。
@@ -74,6 +86,10 @@ g.replay()   # hundreds of launches collapse into one
 | 維護 | op 穩定、業務常用 | 模型下版可能移除 |
 
 只有「佔比高 + 上限高 + 可驗證」同時成立, custom kernel 才通常值得。 否則先調 pipeline、compile、batching 或 library config。
+
+<Callout variant="insight" title="落到真實場景: scorecard 上的紅旗 — 動態 shape">
+你用 scorecard 評估一個看起來很誘人的候選: 某個 RoPE + attention 前處理, 佔比 12%、上限 3×、有簡單 reference。 三格都綠, 差點就開工 — 但「形狀」那格是紅的: 這是變長序列的推論, seqlen 從 16 到 8192 都有。 這個紅旗的實際後果是: 你的 custom kernel 要嘛為每種長度 autotune (冷啟動地獄), 要嘛用一個對所有長度都不是最優的 config。 更務實的路是先 shape bucketing 或直接讓 `torch.compile` 處理 dynamic shape。 Scorecard 的價值就在這裡: 它逼你在寫第一行 kernel 前, 看到那個「佔比和上限都漂亮、卻會在 production 的 shape 分佈上崩掉」的陷阱。
+</Callout>
 
 <LabBox path="kernels/06-pytorch-integration">
 `kernels/06-pytorch-integration/profile_model.py` 提供一個含 elementwise 鏈的小模型與 `torch.profiler` 樣板, 印出 top kernel 表並匯出 trace。 跑一次, 找出佔時最多的 op, 作為後續章節要 fuse 的目標。

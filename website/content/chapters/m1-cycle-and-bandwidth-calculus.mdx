@@ -19,6 +19,10 @@ cycles = time_seconds * clock_hz
 
 單次 DRAM access latency 看起來很可怕, 但 GPU 不是靠降低單 thread latency 贏, 而是靠很多 warps/wavefronts overlap latency。
 
+<Callout variant="insight" title="落到真實場景: 500 ns 換算成「浪費了幾次 FMA」">
+把 latency 換成 cycle 的真正用途, 是估「一次 cache miss 有多貴」。 承上例, 1.5 GHz 下一次 HBM 存取約 800 cycle / 533 ns; 同一段時間, 一個 SM 若每 cycle 能發數十條 FMA, 這一次 miss 等於白白放掉上萬次浮點運算的機會。 這解釋了兩件實務上的事: 為什麼 memory-bound kernel 再怎麼優化算術也沒用 (瓶頸在等資料), 以及為什麼 GPU 要靠幾十個 resident warp 把這 500 ns 用別的 warp 的計算填滿。 下次看到 profiler 報 "long scoreboard stall" 或高 memory latency, 就把它換算成 cycle, 你會立刻知道值不值得花力氣去藏它。
+</Callout>
+
 ## Bandwidth
 
 Bandwidth 是每秒搬多少 bytes:
@@ -43,6 +47,10 @@ best_possible_time = 201,326,592 / (1,555e9) = 0.129 ms
 ```text
 201,326,592 / 0.00075 / 1e9 = 268 GB/s
 ```
+
+<Callout variant="insight" title="落到真實場景: 先算理論下限, 再決定要不要繼續調">
+這個「best possible time」計算是每次優化前該做的第一件事, 它給你一把尺。 假設實測 vector add 是 0.75 ms、理論下限 0.129 ms, 你立刻知道: achieved bandwidth 只有 peak 的約 17% (268 / 1555), 還有 5 倍空間, 值得查 coalescing、alignment、occupancy。 但若實測已經是 0.15 ms (約 86% peak), 那它幾乎貼著 bandwidth roof, 再花一週優化也頂多再快 15%, 該收手了。 沒有這條紙上下限, 你根本不知道「0.75 ms 到底是快還是慢」。 這也是為什麼 review kernel PR 時, 大家會先問「你的 achieved bandwidth 是 peak 的百分之幾」而不是只看絕對毫秒數。
+</Callout>
 
 ## Arithmetic Intensity
 
@@ -73,6 +81,10 @@ ridge = 19,500 GFLOP/s / 1,555 GB/s = 12.5 FLOP/byte
 1,555 GB/s * 0.25 FLOP/byte = 389 GFLOP/s
 ```
 
+<Callout variant="insight" title="落到真實場景: 為什麼 GEMM 快而 vector add 慢">
+Arithmetic intensity 一算, 就解釋了深度學習裡「哪些 op 有救、哪些沒救」。 vector add / activation / elementwise 這類 AI 約 0.25 FLOP/byte, 遠低於 ridge 12.5, 死死被 bandwidth 綁住, 再強的 tensor core 也用不上 — 唯一出路是減少 traffic (fusion)。 反觀大矩陣乘法 GEMM, 每個從 DRAM 載入的元素被 O(N) 個 multiply-add 重用, AI 高達數十甚至上百 FLOP/byte, 落在 ridge 右邊的 compute-bound 區, 這才是 tensor core 與 FP16/TF32 能大顯身手、逼近 peak TFLOP 的地方。 所以拿到一個新 op, 先算它的 AI 落在 ridge 哪一邊: 左邊就去省頻寬, 右邊才去堆算力。 而 tiling 的本質, 就是把一個 op 從 ridge 左邊往右推。
+</Callout>
+
 ## Cache Line / Transaction Counting
 
 CPU cache line 常見 64 bytes。 如果每個 thread 讀 4-byte float, contiguous 16 floats 剛好一條 cache line。 Stride = 16 時, 每次只用一條 cache line 的 4 bytes, 有效 bandwidth 最多只剩 1/16。
@@ -89,6 +101,10 @@ GPU memory transaction 常以 32/64/128 bytes 為單位。 一個 warp 32 lanes 
 每 lane 落在不同 128-byte segment -> 最多 32 transactions
 ```
 
+<Callout variant="warn" title="落到真實場景: 一個 warp 32 次 transaction 的 SoA/AoS 抉擇">
+「同一個 warp 觸發幾次 transaction」是 coalescing 好壞的量化指標, 直接對應真實的 layout 決策。 粒子模擬用 `struct Particle { float x, y, z, w; }` (AoS) 存, kernel 只想讀每個粒子的 `x`: 32 個 lane 讀的 `x` 彼此相隔 16 bytes, 分散在多個 128-byte segment, 可能要 4 次以上 transaction, 每次還大半 bytes 用不到。 換成 SoA (`float* x; float* y; ...`), 32 個 lane 讀連續的 `x[i]` 剛好填滿一個 128-byte segment, 1 次 transaction 搞定, 有效 bandwidth 提升數倍。 判斷法就是把你的存取 pattern 套進上面這個「32 lanes 落在幾個 segment」的算式; 落在越多 segment, 就越該重排 layout 或改走訪順序。
+</Callout>
+
 ## Occupancy Needed To Hide Latency
 
 粗估需要多少 independent work:
@@ -98,6 +114,10 @@ warps_needed ~= memory_latency_cycles / issue_gap_cycles
 ```
 
 若 DRAM latency 600 cycles, scheduler 每 cycle 可 issue 一個 ready warp, 那要數十個 ready warps 才能把 latency 蓋住。 這不是精確公式, 但能解釋為什麼 GPU kernel 太少 blocks 時 latency 會暴露出來。
+
+<Callout variant="warn" title="落到真實場景: register 開太兇, occupancy 掉到藏不住 latency">
+這個「要幾十個 ready warp」的估算, 在調 kernel 時就是 occupancy 的下限。 常見翻車情境: 你為了提高 arithmetic intensity 而做 register blocking, 每個 thread 用到 128 個 register, 但一個 SM 的 register file 是固定的 (例如 64K 個), 於是同時能 resident 的 warp 數被壓到剩幾個 — 不夠蓋住 600 cycle 的 HBM latency, kernel 變成 latency-bound, 明明算術變多了卻更慢。 這就是 memory optimization 的側效應: tiling/register blocking 一定要回頭檢查 occupancy 有沒有掉到「藏不住 latency」的線以下。 Nsight Compute 的 occupancy 與 stall reason 就是拿來看這件事的; 有時故意少用點 register、換更多 resident warp 反而整體更快。
+</Callout>
 
 <LabBox path="kernels/02-memory">
 用 `bandwidth_probe` 和 `roofline_probe` 的輸出練習反推 `bytes_moved`, `GB/s`, `AI`, `roofline upper bound`。 不要只看 runtime; 要把 runtime 拆成 bytes 與 FLOP 的限制。
