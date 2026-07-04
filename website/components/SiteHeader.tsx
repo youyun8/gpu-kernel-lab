@@ -4,6 +4,7 @@ import { AppWidthContainer } from '@/components/AppWidthContainer';
 import { SettingsNavButton } from '@/components/SettingsModal';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { MobileNav } from '@/components/MobileNav';
+import { SiteSearch } from '@/components/SiteSearch';
 
 const navItems = [
   { href: '/', label: '首頁' },
@@ -14,12 +15,13 @@ const navItems = [
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur">
-      <AppWidthContainer className="flex h-14 items-center justify-between px-4">
-        <Link href="/" className="flex items-center gap-2 font-semibold text-foreground">
+      <AppWidthContainer className="flex h-14 items-center gap-2 px-4 sm:gap-4">
+        <Link href="/" className="flex shrink-0 items-center gap-2 font-semibold text-foreground">
           <span aria-hidden className="text-primary">▍</span>
-          <span>{siteConfig.name}</span>
+          <span className="hidden sm:inline">{siteConfig.name}</span>
         </Link>
-        <nav aria-label="主要導覽" className="hidden items-center gap-1 text-sm md:flex">
+        <SiteSearch />
+        <nav aria-label="主要導覽" className="ml-auto hidden items-center gap-1 text-sm md:flex">
           {navItems.map((item) => (
             <Link
               key={item.href}
