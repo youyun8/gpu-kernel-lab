@@ -11,7 +11,7 @@ gpu-kernel-lab/
 ├── website/                 # Next.js 14 + TypeScript + Tailwind + MDX 學習網站
 │   ├── app/                 # App Router 頁面 (首頁、roadmap、chapters/[slug])
 │   ├── components/          # 互動元件 (7 個 widgets) 與版面
-│   ├── content/chapters/    # 54 章 MDX 內容 (Track 1–11, 含 GEMM 優化深入與 Software Pipelining)
+│   ├── content/chapters/    # 55 章 MDX 內容 (Track 1–11, 含 GEMM 優化深入與 Software Pipelining)
 │   ├── content/exercises/   # 8 組練習與完整解答 (Track 1–8, 11)
 │   └── content/data/        # benchmark 示意數據 JSON
 ├── kernels/                 # 可執行 kernel, 對應網站章節

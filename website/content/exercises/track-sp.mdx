@@ -1,6 +1,6 @@
 # Track 11 練習: Software Pipelining
 
-對應第 1–6 章。 Pipeline 深度記為 `k` (或 stage 數 `p`)、工作項/micro-batch 記為 `N`/`m`。 Bubble 佔比通式: `(k−1)/(N+k−1)`。
+對應第 1–7 章。 Pipeline 深度記為 `k` (或 stage 數 `p`)、工作項/micro-batch 記為 `N`/`m`。 Bubble 佔比通式: `(k−1)/(N+k−1)`。
 
 <Exercise id="SP1" title="Pipeline 步數與加速上限" kind="paper" level="入門">
 一個 5-stage pipeline, 每 stage 1 單位時間, 處理 N 項 (各 stage 用不同資源)。 (a) 序列與 pipeline 各要幾步? (b) N=20 的加速比? (c) 加速的理論上限與達到它的條件?
@@ -95,5 +95,13 @@ GPipe timeline 的 forward 集中前段、backward 集中後段、中間大 bubb
 
 <Solution>
 (a) **kernel 內**: multistage pipeline 的 prefetch 深度 (= 第 2 章多 stage cp.async 的 stage 數); 決定多少 tile 的 load 同時在途。 (b) **kernel 內**: warp specialization — producer 用 TMA 搬、consumer 用 WGMMA 算, 對應第 2 章的 producer/consumer ring buffer。 (c) **kernel 內**: Intrawave = wave 內指令級重疊, Interwave = wave 間 producer/consumer 輪流 (AMD 版 ping-pong); 對應 CUTLASS 的編譯器排程 vs. warp specialization。 (d) **serving**: continuous batching 的 NVIDIA 命名 (第 6 章)。 (e) **host–device**: 把大量小 kernel launch 收成一次 replay 消 launch overhead (第 3 章); hipGraph 是 ROCm 對應物。 重點: 同一個 overlap idea 在不同廠牌、不同層級被包成不同 API, 但骨架相同。
+</Solution>
+</Exercise>
+
+<Exercise id="SP13" title="AITER 的兩層 pipeline" kind="paper" level="挑戰">
+一個 SGLang 服務跑在 MI300X 上, 用 AITER 當 backend。 (a) AITER 的一個 fused MoE kernel 內部, software pipeline 主要藏什麼 latency? 靠什麼機制? (b) 引擎的 overlap scheduler 又藏什麼? (c) 這兩層是取代還是疊加? (d) 若某 workload 每個 GPU forward 很長 (大 batch prefill), 哪一層的收益會變小?
+
+<Solution>
+(a) AITER 的 MoE/GEMM kernel (多半建在 CK 上) 藏的是 **global memory / LDS 的存取 latency**, 靠 prefetch (buffer_load→LDS→VGPR 多 stage) + MFMA 重疊, 以及 intra/interwave 排程。 (b) overlap scheduler 藏的是 **CPU 排程 (batch 組裝、radix cache、sampling metadata)**, 讓它與 GPU forward 重疊 (sp6)。 (c) **疊加**: 一個是 kernel 內/間的重疊, 一個是 CPU↔GPU 的重疊, 兩層不同粒度同時運作。 (d) 大 batch prefill 時 GPU forward 很長, **overlap scheduler** 那層 (藏 CPU 開銷) 收益變小 (CPU 佔比小); kernel 內的 pipeline 仍然重要, 因為那決定 GPU forward 本身多快。
 </Solution>
 </Exercise>

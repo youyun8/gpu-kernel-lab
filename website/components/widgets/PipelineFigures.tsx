@@ -368,3 +368,58 @@ export function WarpSpecializationFigure() {
     </Fig>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* 6. NVIDIA vs AMD library pipeline stack                             */
+/* ------------------------------------------------------------------ */
+
+const kNv = '#76b900'; // NVIDIA green
+const kAmd = '#ed1c24'; // AMD red
+
+export function VendorPipelineFigure() {
+  // Each layer of the software-pipeline stack and how each vendor implements it.
+  const layers: { role: string; nv: string; amd: string }[] = [
+    { role: '非同步載入', nv: 'cp.async / TMA', amd: 'buffer_load → LDS · local prefetch' },
+    { role: 'pipeline 抽象', nv: 'cutlass::Pipeline (mbarrier full/empty)', amd: 'CK BlockwiseGemmPipeline' },
+    { role: 'warp/wave 排程', nv: 'warp-specialized (producer/consumer)', amd: 'intrawave / interwave scheduling' },
+    { role: 'matrix engine', nv: 'WGMMA · Tensor Core', amd: 'MFMA · Matrix Core' },
+    { role: 'tuned GEMM 庫', nv: 'cuBLASLt (Tensile)', amd: 'hipBLASLt (Tensile)' },
+    { role: '推論 op 庫', nv: 'CUTLASS · FlashInfer · TRT-LLM', amd: 'AITER (CK / Triton / ASM)' },
+  ];
+  return (
+    <Fig
+      title="同一套 pipeline 概念, 兩家的實作對照"
+      scroll
+      caption={
+        <>
+          由下 (最靠硬體) 到上 (serving): 兩家用不同名字實作<em>同一套</em> software-pipeline 機制。
+          NVIDIA 走 <span style={{ color: kNv }}>cp.async/TMA + cutlass::Pipeline + warp specialization</span>;
+          AMD 走 <span style={{ color: kAmd }}>local prefetch + CK BlockwiseGemmPipeline + intra/interwave 排程</span>。
+          最上層的 <strong>AITER</strong> 把這些 CK/Triton/assembly kernel 打包成算子庫, 當 vLLM/SGLang 在 MI300X 上的
+          預設 backend — 對應 NVIDIA 側的 CUTLASS/FlashInfer。
+        </>
+      }
+    >
+      <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 6, minWidth: 560 }}>
+        <div />
+        <div className="rounded-md px-2 py-1.5 text-center text-sm font-semibold" style={{ backgroundColor: `${kNv}22`, color: kNv }}>
+          NVIDIA (CUDA)
+        </div>
+        <div className="rounded-md px-2 py-1.5 text-center text-sm font-semibold" style={{ backgroundColor: `${kAmd}22`, color: kAmd }}>
+          AMD (ROCm)
+        </div>
+        {layers.map((l) => (
+          <div key={l.role} style={{ display: 'contents' }}>
+            <div className="flex items-center justify-end pr-1 text-right text-[11px] font-medium text-muted-foreground">{l.role}</div>
+            <div className="rounded-md border px-2 py-2 text-center text-[11px] text-foreground" style={{ borderColor: kNv }}>
+              <span className="font-mono">{l.nv}</span>
+            </div>
+            <div className="rounded-md border px-2 py-2 text-center text-[11px] text-foreground" style={{ borderColor: kAmd }}>
+              <span className="font-mono">{l.amd}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Fig>
+  );
+}

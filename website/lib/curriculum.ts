@@ -481,7 +481,7 @@ export const tracks: TrackMeta[] = [
     level: 'Advanced',
     color: '#e3b341',
     description:
-      '同一個「重疊」idea 貫穿六個層級: kernel 內的 double buffering、host–device stream/graph、PyTorch data prefetch、跨 GPU 的 pipeline parallelism (GPipe/1F1B), 到 SGLang 推論服務的 overlap scheduler。 每章附視覺化 schedule 圖、可執行的 programming 範例與逐節 paper-and-pencil 練習。',
+      '同一個「重疊」idea 貫穿七個層級: kernel 內的 double buffering、host–device stream/graph、PyTorch data prefetch、跨 GPU 的 pipeline parallelism (GPipe/1F1B)、SGLang 推論服務的 overlap scheduler, 到 NVIDIA/AMD library (CUTLASS、Composable Kernel、AITER) 怎麼把 pipeline 實作出來。 每章附視覺化 schedule 圖、可執行的 programming 範例與逐節 paper-and-pencil 練習。',
     chapters: [
       {
         slug: 'sp1-what-is-software-pipelining',
@@ -530,6 +530,14 @@ export const tracks: TrackMeta[] = [
         summary:
           'Continuous batching、SGLang overlap (zero-overhead) scheduler、chunked prefill 與 prefill/decode disaggregation, 以及 NVIDIA TensorRT-LLM (in-flight batching/chunked context/CUDA Graph) 與 AMD 生態 (AITER + vLLM/SGLang on ROCm + hipGraph) 怎麼實作 overlap。',
         lab: 'kernels/06-pytorch-integration',
+      },
+      {
+        slug: 'sp7-library-pipelines-cutlass-ck-aiter',
+        num: 7,
+        title: 'Library 怎麼實作 Software Pipeline: CUTLASS、CK、AITER',
+        summary:
+          'NVIDIA cutlass::Pipeline/mbarrier 與 warp specialization、cuBLASLt/FlashInfer, AMD Composable Kernel 的 intra/interwave 與 local prefetch、hipBLASLt, 以及 AITER 算子庫如何當 vLLM/SGLang 的 backend。 把 sp2/sp6 的函式庫段落收攏成一張 NVIDIA↔AMD 對照。',
+        lab: 'kernels/03-gemm',
       },
     ],
   },
@@ -654,8 +662,8 @@ export const exerciseSets: ExerciseSetMeta[] = [
     trackColor: '#e3b341',
     title: 'Track 11 練習: Software Pipelining',
     summary:
-      'Pipeline 步數/加速上限、bubble 佔比、瓶頸 stage、latency hiding stage 數、GPipe vs 1F1B 記憶體、overlap scheduler 與 chunked prefill, 以及 stream/prefetcher/pipeline programming labs。',
-    count: 11,
+      'Pipeline 步數/加速上限、bubble 佔比、瓶頸 stage、latency hiding stage 數、GPipe vs 1F1B 記憶體、overlap scheduler、chunked prefill、CUTLASS↔CK↔AITER 對照, 以及 stream/prefetcher/pipeline programming labs。',
+    count: 13,
   },
 ];
 
