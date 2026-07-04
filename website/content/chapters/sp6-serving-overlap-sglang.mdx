@@ -97,6 +97,52 @@ LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt
 </Solution>
 </Exercise>
 
+## 產業推論引擎怎麼實作 overlap: TensorRT-LLM 與 AMD 生態
+
+前面的 continuous batching、overlap scheduler、chunked prefill 不是 SGLang 專屬 — 它們是現代推論引擎的共同語言。 NVIDIA 與 AMD 各自把這套 idea 包進自己的生產堆疊。
+
+### NVIDIA TensorRT-LLM
+
+TensorRT-LLM 是 NVIDIA 的 LLM 推論函式庫, 把同一套重疊思路落在幾個地方:
+
+- **In-flight batching (IFB)**: 就是 continuous batching 的 NVIDIA 命名 — 由 executor / batch manager 以 token step 為單位動態進出 request, 讓已完成的立刻離開、等待的立刻補進 (對應本章第一節)。
+- **Chunked context (chunked prefill)**: 把長 prompt 的 context 階段切塊, 與 generation (decode) 混批, 避免長 prefill 卡住 decode — 與 SGLang 的 `--enable-mixed-chunk` 同構。
+- **Overlap + CUDA Graph**: scheduler / sampling 等 CPU 工作與 GPU forward 重疊 (對應 overlap scheduler), 並用 **CUDA Graph** 把 decode step 的大量小 kernel launch 收成一次 replay, 消掉 launch overhead (呼應第 3 章的 host–device pipeline)。 底層 GEMM/attention kernel 大量來自 **CUTLASS** — 也就是說 sp2 的 kernel pipeline 就活在這裡面。
+
+### AMD 生態: AITER + vLLM/SGLang on ROCm
+
+AMD 這邊不是單一引擎, 而是**同一批開源引擎跑在 ROCm 上、換上 AMD 的 kernel**:
+
+- **引擎層**: vLLM 與 SGLang 都有 ROCm 支援, continuous batching、overlap scheduler、chunked prefill 這些 serving 層邏輯**不變** — 因為它們是框架邏輯, 與廠牌無關。
+- **kernel 層**: 把底下的 attention / GEMM / MoE 算子換成 **AITER** 提供的 ROCm 版本 (backend 是 sp2 提到的 CK / Triton / 手調 ASM), 在 MI300X 等硬體上取得高吞吐。
+- **graph 層**: 用 **hipGraph** (CUDA Graph 的 ROCm 對應) 消 decode 的 launch overhead。
+
+<Callout variant="insight" title="serving 層與廠牌無關, kernel 層才分家">
+Continuous batching / overlap scheduler / chunked prefill 是**排程層**的 idea, NVIDIA 與 AMD 完全共用 — TensorRT-LLM、vLLM、SGLang 講的是同一件事。 真正分家的是**底層 kernel** (CUTLASS vs. AITER/CK) 與 **graph API** (CUDA Graph vs. hipGraph)。 換平台時 serving 邏輯照搬, 換掉的是 kernel 後端。
+</Callout>
+
+| 層級 | NVIDIA | AMD (ROCm) |
+| --- | --- | --- |
+| 推論引擎 | TensorRT-LLM / vLLM / SGLang | vLLM / SGLang on ROCm |
+| Continuous batching | in-flight batching (IFB) | 同 (框架邏輯共用) |
+| Chunked prefill | chunked context | 同 (框架邏輯共用) |
+| 消 launch overhead | CUDA Graph | hipGraph |
+| 底層 kernel | CUTLASS / cuBLAS / TRT plugins | AITER (CK / Triton / ASM) |
+
+<Exercise id="sp6-e5" title="哪些東西換平台要重寫, 哪些不用" kind="paper" level="進階">
+你要把一套跑在 NVIDIA 上、用了 continuous batching + overlap scheduler + chunked prefill + CUDA Graph 的推論服務移植到 AMD MI300X。 (a) 上述四項哪些屬於「排程層」邏輯、可以直接沿用? (b) 哪些需要換成 AMD 對應物? (c) 底層 attention/GEMM kernel 怎麼辦? (d) 為什麼這種「排程層共用、kernel 層分家」的切分是好的工程設計?
+
+<Solution>
+(a) **Continuous batching、overlap scheduler、chunked prefill** 都是排程層邏輯 (決定哪些 request 進 batch、CPU/GPU 如何重疊、prefill 怎麼切), 與硬體無關, 可直接沿用 — vLLM/SGLang 的 ROCm 版正是如此。
+
+(b) **CUDA Graph → hipGraph** (消 launch overhead 的 API 對應)。
+
+(c) 底層 attention/GEMM/MoE kernel 換成 **AITER** 提供的 ROCm 版本 (backend 為 CK/Triton/ASM), 由框架的 kernel 抽象層在 ROCm 上選用。
+
+(d) 排程層是 latency/throughput 的「策略」, kernel 層是「執行」。 把兩者解耦後, 高階優化 (batching、overlap) 一次寫、跨平台重用; 低階優化 (kernel pipeline、MFMA vs WGMMA) 各平台獨立最佳化。 這正是本 track 的核心觀點: 同一個 overlap idea 在不同層級各自實作, 彼此不綁死。
+</Solution>
+</Exercise>
+
 <Quiz
   questions={[
     {
@@ -117,6 +163,18 @@ LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt
       answer: 1,
       explanation: '把長 prefill 切成小塊並與 decode 混批, 避免 decode inter-token latency 被長 prefill 拖垮。',
     },
+    {
+      question: 'TensorRT-LLM 的 "in-flight batching" 對應本章的哪個概念?',
+      options: ['pipeline parallelism', 'continuous batching (以 token step 動態進出 request)', 'tensor parallelism', 'KV cache 量化'],
+      answer: 1,
+      explanation: 'in-flight batching 是 continuous batching 的 NVIDIA 命名, 兩者是同一件事。',
+    },
+    {
+      question: '把 NVIDIA 推論服務移植到 AMD ROCm 時, 通常「不需要重寫」的是?',
+      options: ['底層 attention/GEMM kernel', 'CUDA Graph 呼叫', 'continuous batching / overlap scheduler 等排程層邏輯', 'MFMA 指令'],
+      answer: 2,
+      explanation: '排程層邏輯與硬體無關可沿用; 換掉的是底層 kernel (→AITER/CK) 與 graph API (CUDA Graph→hipGraph)。',
+    },
   ]}
 />
 
@@ -130,5 +188,8 @@ LLM 推論有兩個性質迥異的階段: **prefill** (一次處理整個 prompt
     { citation: 'LMSYS Org, "SGLang v0.4: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer," 2024.', href: 'https://lmsys.org/blog/2024-12-04-sglang-v0-4/' },
     { citation: 'W. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention (vLLM)," SOSP 2023.', href: 'https://arxiv.org/abs/2309.06180' },
     { citation: 'A. Agrawal et al., "Sarathi-Serve: Taming Throughput-Latency Tradeoff in LLM Inference with Chunked Prefills," OSDI 2024.', href: 'https://arxiv.org/abs/2403.02310' },
+    { citation: 'NVIDIA Corporation, "TensorRT-LLM: In-flight Batching and Chunked Context," 2024.', href: 'https://nvidia.github.io/TensorRT-LLM/' },
+    { citation: 'AMD ROCm, "AITER: AI Tensor Engine for ROCm," 2025.', href: 'https://github.com/ROCm/aiter' },
+    { citation: 'AMD ROCm, "ROCm Becomes a First-Class Platform in the vLLM Ecosystem," 2026.', href: 'https://rocm.blogs.amd.com/software-tools-optimization/vllm-omni/README.html' },
   ]}
 />

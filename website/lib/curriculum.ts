@@ -496,7 +496,7 @@ export const tracks: TrackMeta[] = [
         num: 2,
         title: 'Kernel 內的 Pipelining',
         summary:
-          'Double buffering 回顧、多 stage cp.async pipeline、warp specialization (producer/consumer) 與 shared-memory ring buffer。',
+          'Double buffering 回顧、多 stage cp.async pipeline、warp specialization (producer/consumer) 與 shared-memory ring buffer, 以及 NVIDIA CUTLASS (Stages/TMA+WGMMA/Cooperative/Pingpong) 與 AMD AITER/CK (pipeline version、Intrawave/Interwave) 怎麼把這些做成函式庫參數。',
         lab: 'kernels/03-gemm',
       },
       {
@@ -528,7 +528,7 @@ export const tracks: TrackMeta[] = [
         num: 6,
         title: '推論服務的 Pipelining: SGLang、vLLM',
         summary:
-          'Continuous batching、SGLang overlap (zero-overhead) scheduler、chunked prefill 與 prefill/decode disaggregation。',
+          'Continuous batching、SGLang overlap (zero-overhead) scheduler、chunked prefill 與 prefill/decode disaggregation, 以及 NVIDIA TensorRT-LLM (in-flight batching/chunked context/CUDA Graph) 與 AMD 生態 (AITER + vLLM/SGLang on ROCm + hipGraph) 怎麼實作 overlap。',
         lab: 'kernels/06-pytorch-integration',
       },
     ],

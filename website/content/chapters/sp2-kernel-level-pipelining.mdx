@@ -126,6 +126,55 @@ if (warpRole == kProducer) {
 </Solution>
 </Exercise>
 
+## 產業函式庫怎麼實作 kernel pipeline: CUTLASS 與 AITER/CK
+
+前面手寫的 double buffering、cp.async 與 warp specialization, 在 NVIDIA 與 AMD 的生產級函式庫裡都被抽象成**可組態的 pipeline 元件**。 兩邊的硬體不同、命名不同, 但骨架都是同一套「prefetch 深度 × producer/consumer 分工 × 指令排程」。
+
+### NVIDIA CUTLASS
+
+CUTLASS 把 mainloop 的 pipeline 拆成三個可調的維度:
+
+- **Multistage (prefetch 深度)**: template 參數 `Stages` 直接對應本章的多 stage cp.async — 開 `Stages` 份 shared memory buffer, 讓 `Stages−1` 個 k-tile 的 TMA/`cp.async` load 同時在途, 藏住 global memory latency。 這就是 sp2-e2 的「要幾個 stage」被寫成一個編譯期常數。
+- **Warp specialization (producer/consumer 分工)**: Hopper 起 CUTLASS 3.x 把 thread block 切成 **producer warp group** (用 TMA 把 tile 搬進 shared memory) 與 **consumer warp group** (用 WGMMA/Tensor Core 算)。 兩者靠 `PipelineTmaAsync` 這個 async pipeline 類別上的 mbarrier 交握: producer `acquire`→`commit` 標記 buffer *full*, consumer `wait`→`release` 標記 *empty* — 正是上一節 ring buffer 的 `wait_full`/`arrive_empty`, 只是包成了函式庫 API。
+- **Kernel schedule (排程風格)**: 除了基本 warp-specialized, 還有 **Persistent Cooperative** (兩個 consumer warp group 沿 M 維切一塊 tile 合作, 降 register 壓力、能開更大 tile) 與 **Pingpong** (兩個 consumer warp group 交錯, 一組算 MMA 時另一組跑 epilogue, 把 epilogue 藏進 MMA)。
+
+<Callout variant="info" title="對應關係">
+CUTLASS 的 `Stages` = 本章的 pipeline 深度; producer/consumer warp group = warp specialization; `PipelineTmaAsync` 的 mbarrier = ring buffer 的 full/empty barrier。 手寫 kernel 教你原理, CUTLASS 讓你用 template 參數掃這些設計點。
+</Callout>
+
+### AMD AITER 與 Composable Kernel (CK)
+
+**AITER** (AI Tensor Engine for ROCm) 是 AMD 的算子庫, 底下混用三種 backend: **Triton、Composable Kernel (CK)、與手調 ASM**, 對外給 vLLM、SGLang 等框架直接呼叫。 kernel-level 的 pipeline 主要落在 CK 這層:
+
+- **Pipeline version (prefetch 深度與資源配置)**: CK 的 GEMM 用 `BlockGemmPipelineVersion` v1–v4 選不同的 prefetch schedule (例如 v3 是 "compute optimized", global prefetch 2 stage、LDS buffer 1 份)。 這對應 CUTLASS 的 `Stages` — 決定多少 tile 的 global→LDS load 在途。
+- **Pipeline scheduler (指令排程)**: `BlockGemmPipelineScheduler` 有兩種 — **Intrawave** (在**同一個 wavefront 內**交錯 MFMA 與 memory 指令, 靠指令級重疊藏 latency) 與 **Interwave** (在**不同 wavefront 之間**輪流, 一組 wave 算 MFMA 時另一組搬資料 — AMD 版的 ping-pong)。
+- **硬體對應**: MFMA (XDLOPS) 當 Tensor Core, **LDS** (local data share) 當 shared memory, 用 LDS double buffer + `s_waitcnt` 管非同步 load 的完成 — 對應 NVIDIA 的 shared memory + mbarrier。
+
+<Callout variant="insight" title="兩邊其實是同一張設計圖">
+prefetch 深度 (CUTLASS `Stages` ↔ CK pipeline version)、producer/consumer 分工 (CUTLASS warp group ↔ CK Interwave)、指令級重疊 (CUTLASS 編譯器排程 ↔ CK Intrawave) — 命名不同, 但都是本章三個 idea 的產品化。 換平台時, 先問「深度多少、誰當 producer、指令怎麼排」就能對上。
+</Callout>
+
+| 概念 | NVIDIA CUTLASS | AMD CK / AITER |
+| --- | --- | --- |
+| prefetch 深度 | `Stages` (multistage) | `BlockGemmPipelineVersion` v1–v4 |
+| producer/consumer 分工 | warp specialization (TMA vs WGMMA warp group) | Interwave scheduler (wave 間輪流) |
+| 指令級重疊 | 編譯器 + async pipeline | Intrawave scheduler (wave 內交錯) |
+| 非同步搬運 | TMA / `cp.async` | LDS direct load + `s_waitcnt` |
+| 同步機制 | mbarrier (`PipelineTmaAsync`) | LDS barrier / `s_barrier` |
+| Tensor 引擎 / 暫存 | Tensor Core (WGMMA) / shared mem | MFMA (XDLOPS) / LDS |
+
+<Exercise id="sp2-e5" title="把手寫 kernel 對應到函式庫參數" kind="paper" level="進階">
+你手寫的 GEMM 用了 3 個 shared memory stage、把 2 個 warp 當 producer 搬資料、6 個 warp 當 consumer 算 Tensor Core。 (a) 對應到 CUTLASS, 哪個 template 參數控制「3 個 stage」? producer/consumer 分工對應 CUTLASS 的什麼概念? (b) 對應到 AMD CK, prefetch 深度與「兩組 wave 輪流」分別由哪兩個東西控制? (c) 為什麼「函式庫把這些做成參數」比手寫更實用?
+
+<Solution>
+(a) CUTLASS 的 `Stages` template 參數控制 pipeline 深度 (= 3); producer/consumer 分工對應 Hopper 的 **warp specialization** — producer warp group 用 TMA 搬、consumer warp group 用 WGMMA 算, 靠 `PipelineTmaAsync` 的 mbarrier 交握。
+
+(b) CK 用 `BlockGemmPipelineVersion` (v1–v4) 選 prefetch 深度/資源配置; 「兩組 wave 輪流」對應 `BlockGemmPipelineScheduler::Interwave` (wave 間 ping-pong), 而 wave 內指令交錯則是 `Intrawave`。
+
+(c) 深度、分工、排程的最佳值高度依賴 shape、dtype 與 GPU 型號 (見 sp2-e2/e3 的 trade-off)。 做成編譯期參數後, autotuner 能自動掃這些組合挑最快的, 不必為每個 shape 重寫 kernel — 這也是為什麼 CUTLASS/CK 常配 autotuning 一起用。
+</Solution>
+</Exercise>
+
 <Quiz
   questions={[
     {
@@ -146,6 +195,18 @@ if (warpRole == kProducer) {
       answer: 1,
       explanation: '分工後 memory 引擎與 compute 引擎真正並行, consumer 指令流更純, Tensor Core 使用率更高。',
     },
+    {
+      question: 'CUTLASS 的 `Stages` 參數與 AMD CK 的 `BlockGemmPipelineVersion` 對應本章的哪個概念?',
+      options: ['epilogue 融合', 'pipeline 的 prefetch 深度 (多少 tile 的 load 同時在途)', '量化位元數', 'thread block 大小'],
+      answer: 1,
+      explanation: '兩者都控制 multistage pipeline 的深度 — 決定有多少 k-tile 的 global→shared/LDS load 同時在途來藏 latency。',
+    },
+    {
+      question: 'AMD CK 的 `Intrawave` 與 `Interwave` scheduler 差在哪?',
+      options: ['精度不同', 'Intrawave 在同一 wavefront 內交錯指令, Interwave 在不同 wavefront 間輪流 (ping-pong)', '一個用 LDS 一個不用', 'Interwave 只支援 fp32'],
+      answer: 1,
+      explanation: 'Intrawave 是指令級重疊 (wave 內), Interwave 是 wave 間的 producer/consumer 輪流 — 對應 CUTLASS 的編譯器排程 vs. warp specialization。',
+    },
   ]}
 />
 
@@ -157,6 +218,9 @@ if (warpRole == kProducer) {
   links={[
     { citation: 'NVIDIA Corporation, "Controlling Data Movement to Boost Performance on the NVIDIA Ampere Architecture," 2020.', href: 'https://developer.nvidia.com/blog/controlling-data-movement-to-boost-performance-on-ampere-architecture/' },
     { citation: 'T. Dao et al., "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision," 2024.', href: 'https://arxiv.org/abs/2407.08608' },
-    { citation: 'NVIDIA Corporation, "CUTLASS: Efficient GEMM (pipelining, warp specialization)," 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md' },
+    { citation: 'NVIDIA Corporation, "CUTLASS: Efficient GEMM (pipelining, warp specialization)," 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md' },
+    { citation: 'NVIDIA Corporation, "CUTLASS Asynchronous Pipeline Classes (PipelineTmaAsync)," 2024.', href: 'https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/pipeline.md' },
+    { citation: 'AMD ROCm, "AITER: AI Tensor Engine for ROCm," 2025.', href: 'https://github.com/ROCm/aiter' },
+    { citation: 'AMD ROCm, "Composable Kernel (CK): device GEMM pipelines and schedulers," 2024.', href: 'https://github.com/ROCm/composable_kernel' },
   ]}
 />

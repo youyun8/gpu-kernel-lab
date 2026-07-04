@@ -89,3 +89,11 @@ Batch 內 1 個長 prompt prefill 整包要 100ms, 同批 20 個 decode request 
 GPipe timeline 的 forward 集中前段、backward 集中後段、中間大 bubble; 1F1B 在 steady state 交錯 F/B、backward 明顯提早。 `max_memory_allocated` 應顯示 1F1B < GPipe, 差距隨 m 拉大。 若總時間差很多, 檢查 micro-batch 是否太小或通訊成瓶頸。
 </Solution>
 </Exercise>
+
+<Exercise id="SP12" title="把 pipeline 概念對應到 NVIDIA / AMD 函式庫" kind="paper" level="進階">
+對下列每個函式庫機制, 說出它對應本 track 的哪個概念、屬於哪個層級 (kernel 內 / serving): (a) CUTLASS 的 `Stages` 參數; (b) CUTLASS 的 producer/consumer warp group; (c) AMD CK 的 `Intrawave` vs `Interwave` scheduler; (d) TensorRT-LLM 的 in-flight batching; (e) CUDA Graph → hipGraph。
+
+<Solution>
+(a) **kernel 內**: multistage pipeline 的 prefetch 深度 (= 第 2 章多 stage cp.async 的 stage 數); 決定多少 tile 的 load 同時在途。 (b) **kernel 內**: warp specialization — producer 用 TMA 搬、consumer 用 WGMMA 算, 對應第 2 章的 producer/consumer ring buffer。 (c) **kernel 內**: Intrawave = wave 內指令級重疊, Interwave = wave 間 producer/consumer 輪流 (AMD 版 ping-pong); 對應 CUTLASS 的編譯器排程 vs. warp specialization。 (d) **serving**: continuous batching 的 NVIDIA 命名 (第 6 章)。 (e) **host–device**: 把大量小 kernel launch 收成一次 replay 消 launch overhead (第 3 章); hipGraph 是 ROCm 對應物。 重點: 同一個 overlap idea 在不同廠牌、不同層級被包成不同 API, 但骨架相同。
+</Solution>
+</Exercise>
