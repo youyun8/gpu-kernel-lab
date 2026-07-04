@@ -37,6 +37,11 @@ import {
   OverlapSchedulerFigure,
   WarpSpecializationFigure,
 } from '@/components/widgets/PipelineFigures';
+import {
+  ReleaseAcquireFigure,
+  CudaFenceScopeFigure,
+  CrossBlockFenceProtocolFigure,
+} from '@/components/widgets/MemoryFenceFigures';
 
 // Route internal markdown links through next/link so the static-export
 // basePath is applied; external links open in a new tab.
@@ -94,6 +99,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     PipelineParallelFigure,
     OverlapSchedulerFigure,
     WarpSpecializationFigure,
+    ReleaseAcquireFigure,
+    CudaFenceScopeFigure,
+    CrossBlockFenceProtocolFigure,
     ...components,
   };
 }

@@ -176,6 +176,69 @@ Barrier 回答「大家都做完第一階段了嗎?」:
 最常見的 barrier 誤用是「以為 `__syncthreads()` 能等整個 grid」。 有人在 kernel 中間想讓所有 block 都算完 phase 1 再一起做 phase 2, 於是加了 `__syncthreads()` — 但它只等自己 block 內的 thread, 其他 block 根本不管, 得到的是難以重現的錯誤結果。 GPU 沒有便宜的 grid-wide barrier: 標準做法是把 phase 1 和 phase 2 拆成兩個 kernel launch, kernel 邊界天然就是全域同步點; 或在明確支援時用 cooperative groups 的 grid `sync()` (需要 cooperative launch 且 occupancy 受限)。 記住這個分工: block 內用 `__syncthreads()`, block 間用 kernel 邊界或 `__threadfence()` + atomic ticket。
 </Callout>
 
+「Fence 到底在保證什麼」是新手最容易含糊帶過的地方 — 它**不是**「等別人」, 而是「排序我自己的記憶體操作、並讓排序結果對特定範圍內的其他 threads 可見」。 下面先從 C++ 標準的 `memory_order` 講清楚這個排序語意, 再對回 CUDA 的三種 fence。
+
+#### C++ 標準: `std::memory_order` 的六個選項
+
+C++11 的 `<atomic>` 定義了六種 memory order, 但實務上只需要記住三組:
+
+| Memory order | 保證 | 何時用 |
+| --- | --- | --- |
+| `memory_order_relaxed` | 只保證這個 atomic 操作本身不可分割 (不撕裂、不 lost update); **不**限制它與其他記憶體操作的先後順序 | 純統計 counter, 只在乎最終值 |
+| `memory_order_release` (store) / `memory_order_acquire` (load) | release 之前的所有寫入, 對讀到該值的 acquire 之後全部可見 (`synchronizes-with` → `happens-before`) | publish/subscribe: 「先把資料寫好, 再舉旗通知」 |
+| `memory_order_acq_rel` | 用在同時讀寫的 RMW 操作 (如 `fetch_add`) 上, 該次操作對讀的部分是 acquire、對寫的部分是 release | 需要在同一個 RMW 上同時扮演「消費前一個 release」與「發布給下一個 acquire」的角色, 例如 ticket lock 的 `fetch_add` |
+| `memory_order_seq_cst` (預設值) | 除了 acq_rel 的保證外, **所有** seq_cst 操作在所有 threads 眼中排成同一條全域順序 | 不確定該用什麼順序時的安全預設; 多個 flag 互相影響、需要「大家看到的操作順序一致」時才真正需要 |
+
+（`memory_order_consume` 理論上比 acquire 更精細, 但因為極難正確實作, 主流編譯器 (GCC/Clang/MSVC) 都直接把它當 acquire 處理, 實務上可以忽略。）
+
+`relaxed` 與 `seq_cst` 是兩個極端: 前者什麼順序都不保證, 後者保證最多但成本最高 (在 ARM/POWER 這類弱記憶體模型的機器上, `seq_cst` store 需要多一道完整的記憶體屏障; x86 因為硬體本身就接近 sequentially consistent, 三者的組譯結果差異較小)。 `acquire`/`release` 是精準工具: 只在「這個 atomic 兼任 publish/subscribe 旗標」時才需要, 效果與 `seq_cst` 一樣能建立 happens-before, 但不用付「全域總順序」這個通常用不到的保證。 下圖把 p1 章 `payload`/`ready` 的 handshake 攤開成時間軸, 對照拿掉 release/acquire 之後可能發生什麼事:
+
+<ReleaseAcquireFigure />
+
+「synchronizes-with」是理解一切的關鍵字: 它是**一條連接兩個 thread 的邊**, 只在「release store 寫入的值, 恰好被某次 acquire load 讀到」時才成立。 沒有這條邊, C++ 標準完全不保證 A 寫的東西 B 看得到 — 即使 A 的 store 發生在物理時間上早於 B 的 load, 也一樣; 記憶體順序談的是「邏輯上的可見性」而不是「時鐘上的先後」。
+
+#### CUDA 的 fence: 把「範圍」換成硬體的可見範圍
+
+CUDA 沒有直接照搬 `std::memory_order` API (傳統 CUDA C 只有 `__threadfence_block()` / `__threadfence()` / `__threadfence_system()` 三個內建函式), 但語意是同一套 happens-before 邏輯, 只是把「哪些 thread 看得到」換成硬體概念的三層 scope:
+
+<CudaFenceScopeFigure />
+
+三者的行為都一樣 — 「呼叫這個 fence 的 thread, 保證 fence *之前*對 global/shared memory 的所有寫入, 在 fence *之後*對 scope 內的其他 thread 可見」 — 差別只在 scope 多大、硬體要把資料推多遠 (SM 內的 L1/shared → 跨 SM 的 device 端一致點 → 跨 PCIe/NVLink 到 host)。 這個「先發佈寫入、再讓可見性生效」的雙向排序, 概念上對應 C++ 的 `std::atomic_thread_fence(std::memory_order_acq_rel)`, 而不只是單純的 release — 這也是為什麼它可以同時保護「我寫的東西別人看得到」與「我要看的東西別人已經寫完」兩個方向。
+
+如果覺得三個內建函式記不住對應關係, NVIDIA 的 libcu++ (`<cuda/atomic>`) 其實把這套 scope 直接做成了標準 `std::atomic` 的延伸: `cuda::atomic<T, Scope>` 用同一套 `memory_order_relaxed/acquire/release/acq_rel/seq_cst` API, 只是多一個 `cuda::thread_scope` 模板參數:
+
+| C++ 標準概念 | CUDA scope | 對應的傳統內建函式 |
+| --- | --- | --- |
+| （單一 thread, 不需要 atomic） | `cuda::thread_scope_thread` | — |
+| synchronizes-with 一個 block 內的 threads | `cuda::thread_scope_block` | `__threadfence_block()`, `atomicAdd_block` |
+| synchronizes-with 同一 device 上所有 threads (預設) | `cuda::thread_scope_device` | `__threadfence()`, `atomicAdd` |
+| synchronizes-with host + 所有 device | `cuda::thread_scope_system` | `__threadfence_system()`, `atomicAdd_system` |
+
+換句話說, `__threadfence()` 就是「scope 訂在 device 層級的 `atomic_thread_fence`」— 學過 C++ 的 memory order, CUDA 這三個函式就只是「同一個概念換了個 scope 旋鈕」。
+
+#### 走一遍完整協議: single-pass reduction 為什麼需要 fence
+
+把上面兩節接起來看最清楚的例子, 就是本章前面 `blockReduceSum` 之後、想在同一個 kernel 裡把所有 block 的 partial sum 再合併成一個總和 (不想多開一個 kernel):
+
+```cpp
+// gpu_threadfence.cpp 的核心協議
+__shared__ float partials[]; // 每個 block 的 partial sum，寫在 global memory
+partials[blockIdx.x] = block_sum;
+__threadfence();                              // 1. 先確保 partial 對其他 block 可見
+unsigned ticket = atomicAdd(&done_count, 1);  // 2. 才去登記「我做完了」
+if (ticket == gridDim.x - 1) {                // 3. 最後一個抵達的 block 收尾
+    float total = 0;
+    for (int b = 0; b < gridDim.x; ++b) total += partials[b];
+    *result = total;
+}
+```
+
+順序不能顛倒: `__threadfence()` 必須在 `atomicAdd` **之前**。 直覺上 `atomicAdd` 已經是「跨 block 都看得到」的操作, 很容易誤以為它順便也保護了前一行的 `partials[blockIdx.x] = block_sum`, 但傳統 CUDA 的 `atomicAdd` 本身不帶 C++ 那種 acquire/release 標籤 — 它只保證這個 counter 自己的讀寫不可分割, 不保證「counter 完成的順序」與「其他普通寫入完成的順序」綁在一起。 少了 `__threadfence()`, 硬體有可能先讓 `done_count` 的新值對其他 SM 可見, `partials[blockIdx.x]` 卻還在飛行中 — 最後一個 block 這時候讀到的就是 stale 值:
+
+<CrossBlockFenceProtocolFigure />
+
+這正是「barrier 救不了、必須用 fence」的教科書案例: 問題不是「有沒有人等到」(atomic ticket 數字完全正確, 三個 block 都確實到齊了), 而是「等到的當下, 該看到的資料是不是真的看得到」— 前者是同步 (synchronization), 後者是可見性 (visibility), 這正是 fence 存在的理由。
+
 ## 常見陷阱
 
 - **Race condition**: 廣義的「結果依賴時序」。 Data race 是其中最常見的一種, 但就算全用 atomic (沒有 data race), 邏輯上仍可能有 race condition — 例如 check-then-act 之間狀態被別人改掉。
