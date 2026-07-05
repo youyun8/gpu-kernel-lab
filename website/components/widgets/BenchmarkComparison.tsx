@@ -9,7 +9,7 @@ type Platform = 'cuda' | 'rocm';
 export function BenchmarkComparison() {
   const [platform, setPlatform] = useState<Platform>('cuda');
   const dataset = benchmarks.gemm[platform];
-  const chartData = dataset.steps.map((s) => ({ ...s, shortName: s.name.replace(/^Step \d+: /, '') }));
+  const chart_data = dataset.steps.map((s) => ({ ...s, short_name: s.name.replace(/^Step \d+: /, '') }));
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -22,14 +22,14 @@ export function BenchmarkComparison() {
       </p>
       <div className="h-80" aria-hidden>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} margin={{ top: 16, right: 8, bottom: 60, left: -8 }}>
+          <BarChart data={chart_data} margin={{ top: 16, right: 8, bottom: 60, left: -8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-            <XAxis dataKey="shortName" stroke="#8b949e" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" interval={0} height={70} />
+            <XAxis dataKey="short_name" stroke="#8b949e" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" interval={0} height={70} />
             <YAxis stroke="#8b949e" tick={{ fontSize: 11 }} domain={[0, 100]} />
             <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', color: '#fff' }} formatter={(v: number, _n, p) => [`${v}% · ${p.payload.gflops} GFLOP/s`, 'performance']} />
             <Bar dataKey="pctOfRef" radius={[4, 4, 0, 0]}>
               <LabelList dataKey="pctOfRef" position="top" fill="#c9d1d9" fontSize={10} formatter={(v: number) => `${v}%`} />
-              {chartData.map((_, i) => (
+              {chart_data.map((_, i) => (
                 <Cell key={i} fill={`hsl(${135 + i * 8}, 55%, ${45 + i * 2}%)`} />
               ))}
             </Bar>

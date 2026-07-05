@@ -15,7 +15,7 @@ export interface TrackMeta {
   chapters: ChapterMeta[];
 }
 
-export const tracks: TrackMeta[] = [
+export const kTracks: TrackMeta[] = [
   {
     id: 'p-parallelization',
     label: 'Track 1 — 平行化基礎',
@@ -544,17 +544,17 @@ export const tracks: TrackMeta[] = [
 ];
 
 export interface FlatChapter extends ChapterMeta {
-  trackId: string;
-  trackLabel: string;
-  trackColor: string;
+  track_id: string;
+  track_label: string;
+  track_color: string;
 }
 
-export const flatChapters: FlatChapter[] = tracks.flatMap((track) =>
+export const kFlatChapters: FlatChapter[] = kTracks.flatMap((track) =>
   track.chapters.map((chapter) => ({
     ...chapter,
-    trackId: track.id,
-    trackLabel: track.label,
-    trackColor: track.color,
+    track_id: track.id,
+    track_label: track.label,
+    track_color: track.color,
   })),
 );
 
@@ -563,38 +563,38 @@ export function getChapterNav(slug: string): {
   prev?: FlatChapter;
   next?: FlatChapter;
 } {
-  const index = flatChapters.findIndex((chapter) => chapter.slug === slug);
+  const index = kFlatChapters.findIndex((chapter) => chapter.slug === slug);
   if (index === -1) return {};
   return {
-    current: flatChapters[index],
-    prev: index > 0 ? flatChapters[index - 1] : undefined,
-    next: index < flatChapters.length - 1 ? flatChapters[index + 1] : undefined,
+    current: kFlatChapters[index],
+    prev: index > 0 ? kFlatChapters[index - 1] : undefined,
+    next: index < kFlatChapters.length - 1 ? kFlatChapters[index + 1] : undefined,
   };
 }
 
-const repoBase = 'https://github.com/youyun8/gpu-kernel-lab/tree/main/';
+const kRepoBase = 'https://github.com/youyun8/gpu-kernel-lab/tree/main/';
 
 export function labUrl(lab: string): string {
-  return `${repoBase}${lab}`;
+  return `${kRepoBase}${lab}`;
 }
 
 export interface ExerciseSetMeta {
   slug: string;
-  trackId: string;
-  trackLabel: string;
-  trackColor: string;
+  track_id: string;
+  track_label: string;
+  track_color: string;
   title: string;
   summary: string;
   count: number;
 }
 
 // One exercise set per track. Slugs map to MDX files in content/exercises/.
-export const exerciseSets: ExerciseSetMeta[] = [
+export const kExerciseSets: ExerciseSetMeta[] = [
   {
     slug: 'track-p',
-    trackId: 'p-parallelization',
-    trackLabel: 'Track 1 — 平行化基礎',
-    trackColor: '#d29922',
+    track_id: 'p-parallelization',
+    track_label: 'Track 1 — 平行化基礎',
+    track_color: '#d29922',
     title: 'Track 1 練習: Parallelization Foundations',
     summary:
       'Decomposition、lost update interleaving、mutex/atomic/reduction/semaphore 選型、barrier 正確性、Amdahl/granularity/privatization, 以及 CPU/GPU race demos。',
@@ -602,9 +602,9 @@ export const exerciseSets: ExerciseSetMeta[] = [
   },
   {
     slug: 'track-m',
-    trackId: 'm-memory-hierarchy',
-    trackLabel: 'Track 2 — Memory Hierarchy',
-    trackColor: '#6e7681',
+    track_id: 'm-memory-hierarchy',
+    track_label: 'Track 2 — Memory Hierarchy',
+    track_color: '#6e7681',
     title: 'Track 2 練習: Memory Hierarchy',
     summary:
       'Latency cycle 換算、bandwidth/roofline 計算、cache-line/transaction counting、tile 容量估算、latency hiding、stencil AI, 以及 stride/transpose/roofline programming labs。',
@@ -612,54 +612,54 @@ export const exerciseSets: ExerciseSetMeta[] = [
   },
   {
     slug: 'track-a',
-    trackId: 'a-basics',
-    trackLabel: 'Track 3 — 入門',
-    trackColor: '#39d353',
+    track_id: 'a-basics',
+    track_label: 'Track 3 — 入門',
+    track_color: '#39d353',
     title: 'Track 3 練習: GPU 基礎與效能測量',
     summary: 'SIMT、thread indexing、memory hierarchy latency、warp divergence、bandwidth 計算、roofline 判讀。',
     count: 11,
   },
   {
     slug: 'track-b',
-    trackId: 'b-intermediate',
-    trackLabel: 'Track 4 — 進階',
-    trackColor: '#58a6ff',
+    track_id: 'b-intermediate',
+    track_label: 'Track 4 — 進階',
+    track_color: '#58a6ff',
     title: 'Track 4 練習: Coalescing、Bank Conflict、Occupancy、Reduction',
     summary: 'transaction 計數、bank conflict/padding、occupancy limiter、warp reduce、online softmax。',
     count: 12,
   },
   {
     slug: 'track-c',
-    trackId: 'c-expert',
-    trackLabel: 'Track 5 — 專家',
-    trackColor: '#f778ba',
+    track_id: 'c-expert',
+    track_label: 'Track 5 — 專家',
+    track_color: '#f778ba',
     title: 'Track 5 練習: GEMM、Tail Effect、Pipeline、Profiling',
     summary: 'arithmetic intensity、tile reuse、wave quantization、Split-K/Stream-K、epilogue fusion、bottleneck 診斷。',
     count: 11,
   },
   {
     slug: 'track-d',
-    trackId: 'd-pytorch',
-    trackLabel: 'Track 7 — PyTorch 實戰',
-    trackColor: '#ffa657',
+    track_id: 'd-pytorch',
+    track_label: 'Track 7 — PyTorch 實戰',
+    track_color: '#ffa657',
     title: 'Track 7 練習: Profiling、Custom Extension、Fusion、Triton',
     summary: 'launch overhead 估算、tensor 檢查、fused speedup、autograd、custom op 註冊、torch.compile 診斷。',
     count: 10,
   },
   {
     slug: 'track-e',
-    trackId: 'e-libraries',
-    trackLabel: 'Track 8 — 生產級 library',
-    trackColor: '#a371f7',
+    track_id: 'e-libraries',
+    track_label: 'Track 8 — 生產級 library',
+    track_color: '#a371f7',
     title: 'Track 8 練習: CUTLASS、AMD 生態、Attention、推論引擎',
     summary: 'CUTLASS 分層與 CuTe layout、CK/hipBLASLt/AITER 對照、FlashAttention 推導、prefill/decode AI、continuous batching 判讀。',
     count: 11,
   },
   {
     slug: 'track-sp',
-    trackId: 'sp-software-pipelining',
-    trackLabel: 'Track 11 — Software Pipelining',
-    trackColor: '#e3b341',
+    track_id: 'sp-software-pipelining',
+    track_label: 'Track 11 — Software Pipelining',
+    track_color: '#e3b341',
     title: 'Track 11 練習: Software Pipelining',
     summary:
       'Pipeline 步數/加速上限、bubble 佔比、瓶頸 stage、latency hiding stage 數、GPipe vs 1F1B 記憶體、overlap scheduler、chunked prefill、CUTLASS↔CK↔AITER 對照, 以及 stream/prefetcher/pipeline programming labs。',
@@ -668,5 +668,5 @@ export const exerciseSets: ExerciseSetMeta[] = [
 ];
 
 export function getExerciseSet(slug: string): ExerciseSetMeta | undefined {
-  return exerciseSets.find((s) => s.slug === slug);
+  return kExerciseSets.find((s) => s.slug === slug);
 }

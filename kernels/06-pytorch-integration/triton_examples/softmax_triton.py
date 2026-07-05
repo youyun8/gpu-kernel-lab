@@ -10,17 +10,17 @@ try:
     import triton
     import triton.language as tl
 
-    _HAS_TRITON = True
+    kHasTriton = True
 except ImportError:
-    _HAS_TRITON = False
+    kHasTriton = False
 
 
-if _HAS_TRITON:
+if kHasTriton:
 
     @triton.jit
-    def _softmax_kernel(x_ptr, y_ptr, row_stride, n_cols, BLOCK: tl.constexpr):
+    def softmaxKernel(x_ptr, y_ptr, row_stride, n_cols, block_size: tl.constexpr):
         row = tl.program_id(0)
-        cols = tl.arange(0, BLOCK)
+        cols = tl.arange(0, block_size)
         mask = cols < n_cols
         offs = row * row_stride + cols
         x = tl.load(x_ptr + offs, mask=mask, other=-float("inf"))
@@ -29,16 +29,16 @@ if _HAS_TRITON:
         y = num / tl.sum(num, axis=0)
         tl.store(y_ptr + offs, y, mask=mask)
 
-    def softmax_triton(x: torch.Tensor) -> torch.Tensor:
+    def softmaxTriton(x: torch.Tensor) -> torch.Tensor:
         rows, cols = x.shape
         y = torch.empty_like(x)
         block = triton.next_power_of_2(cols)
-        _softmax_kernel[(rows,)](x, y, x.stride(0), cols, BLOCK=block)
+        softmaxKernel[(rows,)](x, y, x.stride(0), cols, block_size=block)
         return y
 
 
 def main() -> None:
-    if not _HAS_TRITON:
+    if not kHasTriton:
         print("Triton is not installed; skipping. Install with `pip install triton`.")
         return
     if not torch.cuda.is_available():
@@ -47,7 +47,7 @@ def main() -> None:
 
     device = torch.device("cuda")
     x = torch.randn(4096, 2048, device=device, dtype=torch.float32)
-    got = softmax_triton(x)
+    got = softmaxTriton(x)
     want = torch.softmax(x, dim=-1)
     max_err = (got - want).abs().max().item()
     assert max_err < 1e-3, f"softmax mismatch: {max_err}"

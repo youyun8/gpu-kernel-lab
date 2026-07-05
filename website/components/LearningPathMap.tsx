@@ -1,10 +1,10 @@
 import Link from 'next/link';
-import { tracks } from '@/lib/curriculum';
+import { kTracks } from '@/lib/curriculum';
 
 export function LearningPathMap() {
   return (
     <div className="space-y-6">
-      {tracks.map((track) => (
+      {kTracks.map((track) => (
         <div key={track.id} className="rounded-lg border border-border bg-card/40 p-5">
           <div className="mb-3 flex items-center gap-3">
             <span aria-hidden className="h-3 w-3 rounded-full" style={{ backgroundColor: track.color }} />

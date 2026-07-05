@@ -13,7 +13,7 @@
 namespace {
 
 constexpr int kBlockSize = 256;
-constexpr float kA = 1.75f;
+constexpr float kScaleA = 1.75f;
 
 __global__ void saxpyGridStride(const float* x, float* y, float a, int n) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
@@ -29,21 +29,21 @@ bool runCase(int n) {
   for (int i = 0; i < std::max(1, n); ++i) {
     x[i] = static_cast<float>((i % 17) - 8) * 0.5f;
     y[i] = static_cast<float>((i % 13) - 6) * 0.25f;
-    reference[i] = (i < n) ? (kA * x[i] + y[i]) : y[i];
+    reference[i] = (i < n) ? (kScaleA * x[i] + y[i]) : y[i];
   }
 
-  float* devX = nullptr;
-  float* devY = nullptr;
+  float* dev_x = nullptr;
+  float* dev_y = nullptr;
   const size_t bytes = static_cast<size_t>(std::max(1, n)) * sizeof(float);
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devX), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devY), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devX, x.data(), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devY, y.data(), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_x), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_y), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_x, x.data(), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_y, y.data(), bytes));
 
   int grid = std::max(1, (n + kBlockSize - 1) / kBlockSize);
-  GPU_LAUNCH(saxpyGridStride, grid, kBlockSize, 0, devX, devY, kA, n);
+  GPU_LAUNCH(saxpyGridStride, grid, kBlockSize, 0, dev_x, dev_y, kScaleA, n);
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devY, bytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_y, bytes));
 
   bool ok = true;
   for (int i = 0; i < n; ++i) {
@@ -55,8 +55,8 @@ bool runCase(int n) {
     }
   }
 
-  GPU_CHECK(gpuFree(devX));
-  GPU_CHECK(gpuFree(devY));
+  GPU_CHECK(gpuFree(dev_x));
+  GPU_CHECK(gpuFree(dev_y));
   return ok;
 }
 
@@ -69,32 +69,32 @@ int main() {
   }
   std::printf("tail-shape correctness OK (%zu cases)\n", sizeof(sizes) / sizeof(sizes[0]));
 
-  constexpr int kN = 1 << 24;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
-  std::vector<float> x(kN);
-  std::vector<float> y(kN);
-  for (int i = 0; i < kN; ++i) {
+  constexpr int kSizeN = 1 << 24;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
+  std::vector<float> x(kSizeN);
+  std::vector<float> y(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
     x[i] = static_cast<float>(i % 97) * 0.125f;
     y[i] = static_cast<float>(i % 53) * 0.25f;
   }
 
-  float* devX = nullptr;
-  float* devY = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devX), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devY), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devX, x.data(), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devY, y.data(), bytes));
+  float* dev_x = nullptr;
+  float* dev_y = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_x), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_y), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_x, x.data(), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_y, y.data(), bytes));
 
-  int grid = (kN + kBlockSize - 1) / kBlockSize;
-  auto launch = [&]() { GPU_LAUNCH(saxpyGridStride, grid, kBlockSize, 0, devX, devY, kA, kN); };
-  const size_t bytesMoved = 3 * bytes;
-  const double flops = 2.0 * kN;
+  int grid = (kSizeN + kBlockSize - 1) / kBlockSize;
+  auto launch = [&]() { GPU_LAUNCH(saxpyGridStride, grid, kBlockSize, 0, dev_x, dev_y, kScaleA, kSizeN); };
+  const size_t bytes_moved = 3 * bytes;
+  const double flops = 2.0 * kSizeN;
   constexpr double kPeakGbPerSec = 1555.0;
   constexpr double kPeakGflopPerSec = 19500.0;
-  gklab::report("ex_c_tail_saxpy", gklab::benchmarkKernel(launch, bytesMoved, flops), kPeakGbPerSec,
+  gklab::report("ex_c_tail_saxpy", gklab::benchmarkKernel(launch, bytes_moved, flops), kPeakGbPerSec,
                 kPeakGflopPerSec);
 
-  GPU_CHECK(gpuFree(devX));
-  GPU_CHECK(gpuFree(devY));
+  GPU_CHECK(gpuFree(dev_x));
+  GPU_CHECK(gpuFree(dev_y));
   return EXIT_SUCCESS;
 }

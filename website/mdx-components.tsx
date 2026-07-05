@@ -45,7 +45,7 @@ import {
 } from '@/components/widgets/MemoryFenceFigures';
 
 // Route internal markdown links through next/link so the static-export
-// basePath is applied; external links open in a new tab.
+// The configured base path is applied; external links open in a new tab.
 function MdxAnchor({ href = '', children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement>) {
   if (href.startsWith('/')) {
     return (

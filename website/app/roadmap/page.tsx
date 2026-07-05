@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { LearningPathMap } from '@/components/LearningPathMap';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
-import { flatChapters, tracks } from '@/lib/curriculum';
+import { kFlatChapters, kTracks } from '@/lib/curriculum';
 
 export const metadata: Metadata = {
   title: '學習路線圖',
@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 export default function RoadmapPage() {
-  const firstChapter = flatChapters[0];
+  const first_chapter = kFlatChapters[0];
   return (
     <AppWidthContainer as="main" className="px-4 py-12">
       <h1 className="text-3xl font-bold text-foreground">學習路線圖</h1>
@@ -19,7 +19,7 @@ export default function RoadmapPage() {
       </p>
       <div className="mt-5 flex flex-wrap items-center gap-3">
         <Link
-          href={`/chapters/${firstChapter.slug}`}
+          href={`/chapters/${first_chapter.slug}`}
           className="rounded-lg bg-primary px-5 py-2.5 font-medium text-primary-foreground transition hover:bg-primary/90"
         >
           從第一章開始 →
@@ -31,7 +31,7 @@ export default function RoadmapPage() {
           練習與解答
         </Link>
         <span className="text-sm text-muted-foreground">
-          共 {tracks.length} 個 Track、{flatChapters.length} 章
+          共 {kTracks.length} 個 Track、{kFlatChapters.length} 章
         </span>
       </div>
       <div className="mt-8">

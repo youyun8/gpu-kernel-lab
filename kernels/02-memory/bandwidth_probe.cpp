@@ -30,26 +30,26 @@ int main() {
     std::vector<float> host(n, 1.0f);
     std::vector<float> result(n);
 
-    float* devIn = nullptr;
-    float* devOut = nullptr;
-    GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-    GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-    GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+    float* dev_in = nullptr;
+    float* dev_out = nullptr;
+    GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+    GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+    GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
     const int grid = (n + kBlockSize - 1) / kBlockSize;
-    auto launch = [&]() { GPU_LAUNCH(copyKernel, grid, kBlockSize, 0, devIn, devOut, n); };
+    auto launch = [&]() { GPU_LAUNCH(copyKernel, grid, kBlockSize, 0, dev_in, dev_out, n); };
 
     launch();
     GPU_CHECK(gpuDeviceSynchronize());
-    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
     if (!gklab::verifyClose(result, host)) return EXIT_FAILURE;
 
     char label[64];
     std::snprintf(label, sizeof(label), "copy n=2^%d", static_cast<int>(std::log2(static_cast<double>(n))));
     gklab::report(label, gklab::benchmarkKernel(launch, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
 
-    GPU_CHECK(gpuFree(devIn));
-    GPU_CHECK(gpuFree(devOut));
+    GPU_CHECK(gpuFree(dev_in));
+    GPU_CHECK(gpuFree(dev_out));
   }
   return EXIT_SUCCESS;
 }

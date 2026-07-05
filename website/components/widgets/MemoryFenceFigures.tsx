@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 // Static, self-contained figures for the C++ memory-order / CUDA memory-fence
-// deep dive (Track 2, "Barrier 與 memory fence"). Same visual language as
+// deep dive (Track 2, "Barriers and memory fences"). Same visual language as
 // GemmFigures / PipelineFigures: presentational only (no hooks / client JS).
 
 const kWrite = '#58a6ff'; // ordinary (non-atomic) write
@@ -46,7 +46,7 @@ function Step({ color, dim, children }: { color: string; dim?: boolean; children
 }
 
 /* ------------------------------------------------------------------ */
-/* 1. C++ release/acquire: synchronizes-with 建立 happens-before        */
+/* 1. C++ release/acquire: synchronizes-with establishes happens-before */
 /* ------------------------------------------------------------------ */
 
 export function ReleaseAcquireFigure() {
@@ -91,7 +91,7 @@ export function ReleaseAcquireFigure() {
           </div>
           <div className="grid grid-cols-2 gap-x-6">
             <div />
-            <Step color={kRelease}>use(payload); // 保證看到新值 ✓</Step>
+            <Step color={kRelease}>use(payload); // guaranteed to see the new value</Step>
           </div>
         </div>
         <div>
@@ -117,7 +117,7 @@ export function ReleaseAcquireFigure() {
           </div>
           <div className="grid grid-cols-2 gap-x-6">
             <div />
-            <Step color={kBad}>use(payload); // 可能讀到舊值 ✗</Step>
+            <Step color={kBad}>use(payload); // may read a stale value</Step>
           </div>
         </div>
       </div>

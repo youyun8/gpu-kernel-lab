@@ -9,7 +9,7 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 
-def build_inputs(device: torch.device):
+def buildInputs(device: torch.device):
     x = torch.randn(4096, 4096, device=device)
     bias = torch.randn(4096, device=device)
     return x, bias
@@ -28,7 +28,7 @@ def main() -> None:
         return
 
     device = torch.device("cuda")
-    x, bias = build_inputs(device)
+    x, bias = buildInputs(device)
 
     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
     with profile(activities=activities, record_shapes=True) as prof:

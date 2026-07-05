@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 
 type Variant = 'info' | 'warn' | 'insight';
 
-const styles: Record<Variant, { border: string; label: string; icon: string }> = {
+const kStyles: Record<Variant, { border: string; label: string; icon: string }> = {
   info: { border: 'border-accent', label: '說明', icon: 'ℹ' },
   warn: { border: 'border-[#ffa657]', label: '注意', icon: '⚠' },
   insight: { border: 'border-primary', label: '直覺', icon: '★' },
@@ -17,7 +17,7 @@ export function Callout({
   title?: string;
   children: ReactNode;
 }) {
-  const style = styles[variant];
+  const style = kStyles[variant];
   return (
     <div className={`my-6 rounded-lg border-l-4 ${style.border} bg-card/60 p-4`}>
       <p className="mb-1 flex items-center gap-2 text-sm font-semibold text-foreground">

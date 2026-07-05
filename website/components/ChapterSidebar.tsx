@@ -3,11 +3,11 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BookText, ChevronRight, PanelLeft, PanelLeftClose, X } from 'lucide-react';
-import { tracks } from '@/lib/curriculum';
+import { kTracks } from '@/lib/curriculum';
 
 /** Which track owns a given chapter slug — used to auto-expand the active track. */
 function trackIdForSlug(slug: string): string | undefined {
-  return tracks.find((track) => track.chapters.some((chapter) => chapter.slug === slug))?.id;
+  return kTracks.find((track) => track.chapters.some((chapter) => chapter.slug === slug))?.id;
 }
 
 const kSidebarWidthKey = 'chapter-sidebar-width';
@@ -28,43 +28,43 @@ interface PageAnchor {
  * expanded by default (and re-expanded whenever navigation changes it), so the
  * reader always sees where they are without hunting through a long flat list. */
 function SidebarLists({
-  activeSlug,
+  active_slug,
   anchors,
   onNavigate,
 }: {
-  activeSlug: string;
+  active_slug: string;
   anchors: PageAnchor[];
   onNavigate?: () => void;
 }) {
-  const activeTrackId = trackIdForSlug(activeSlug);
+  const active_track_id = trackIdForSlug(active_slug);
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
-    activeTrackId ? { [activeTrackId]: true } : {},
+    active_track_id ? { [active_track_id]: true } : {},
   );
 
   // Keep the active track open as the reader navigates between chapters. Other
-  // tracks retain whatever open/closed state the reader last chose.
+  // Tracks retain whatever open/closed state the reader last chose.
   useEffect(() => {
-    if (activeTrackId) setExpanded((prev) => (prev[activeTrackId] ? prev : { ...prev, [activeTrackId]: true }));
-  }, [activeTrackId]);
+    if (active_track_id) setExpanded((prev) => (prev[active_track_id] ? prev : { ...prev, [active_track_id]: true }));
+  }, [active_track_id]);
 
   const toggle = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
   return (
     <>
       <nav aria-label="章節目錄" className="space-y-1 text-sm">
-        {tracks.map((track) => {
+        {kTracks.map((track) => {
           const open = expanded[track.id] ?? false;
-          const hasActive = track.id === activeTrackId;
-          const panelId = `track-panel-${track.id}`;
+          const has_active = track.id === active_track_id;
+          const panel_id = `track-panel-${track.id}`;
           return (
             <div key={track.id}>
               <button
                 type="button"
                 onClick={() => toggle(track.id)}
                 aria-expanded={open}
-                aria-controls={panelId}
+                aria-controls={panel_id}
                 className={`group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wide transition hover:bg-card ${
-                  hasActive ? 'text-foreground' : 'text-muted-foreground'
+                  has_active ? 'text-foreground' : 'text-muted-foreground'
                 }`}
               >
                 <ChevronRight
@@ -80,12 +80,12 @@ function SidebarLists({
 
               {open && (
                 <ul
-                  id={panelId}
+                  id={panel_id}
                   className="mb-1 ml-[15px] space-y-0.5 border-l border-border pl-2"
-                  style={{ borderColor: hasActive ? track.color : undefined }}
+                  style={{ borderColor: has_active ? track.color : undefined }}
                 >
                   {track.chapters.map((chapter) => {
-                    const active = chapter.slug === activeSlug;
+                    const active = chapter.slug === active_slug;
                     return (
                       <li key={chapter.slug}>
                         <Link
@@ -129,9 +129,9 @@ function SidebarLists({
   );
 }
 
-export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
+export function ChapterSidebar({ active_slug }: { active_slug: string }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobile_open, setMobileOpen] = useState(false);
   const [width, setWidth] = useState<number>(() => {
     if (typeof window === 'undefined') return kDefaultWidth;
     const saved = window.localStorage.getItem(kSidebarWidthKey);
@@ -141,8 +141,8 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
   const [anchors, setAnchors] = useState<PageAnchor[]>([]);
 
   const dragging = useRef(false);
-  const startX = useRef(0);
-  const startWidth = useRef(0);
+  const start_x = useRef(0);
+  const start_width = useRef(0);
 
   // Collect "On This Page" anchors from the rendered chapter body. rehype-slug
   // gives every heading an id, so scanning the DOM after mount stays in sync
@@ -155,27 +155,27 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
         label: heading.textContent ?? heading.id,
       })),
     );
-  }, [activeSlug]);
+  }, [active_slug]);
 
   // Lock body scroll and wire Escape while the mobile drawer is open.
   useEffect(() => {
-    if (!mobileOpen) return;
-    const previousOverflow = document.body.style.overflow;
+    if (!mobile_open) return;
+    const previous_overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape') setMobileOpen(false);
     }
     document.addEventListener('keydown', onKey);
     return () => {
-      document.body.style.overflow = previousOverflow;
+      document.body.style.overflow = previous_overflow;
       document.removeEventListener('keydown', onKey);
     };
-  }, [mobileOpen]);
+  }, [mobile_open]);
 
   const onMouseMove = useCallback((e: MouseEvent) => {
     if (!dragging.current) return;
-    const delta = e.clientX - startX.current;
-    const next = Math.min(kMaxWidth, Math.max(kMinWidth, startWidth.current + delta));
+    const delta = e.clientX - start_x.current;
+    const next = Math.min(kMaxWidth, Math.max(kMinWidth, start_width.current + delta));
     setWidth(next);
   }, []);
 
@@ -202,8 +202,8 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
   const onResizeMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     dragging.current = true;
-    startX.current = e.clientX;
-    startWidth.current = width;
+    start_x.current = e.clientX;
+    start_width.current = width;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
   };
@@ -223,7 +223,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
       </button>
 
       {/* Mobile drawer */}
-      {mobileOpen && (
+      {mobile_open && (
         <div className="fixed inset-0 z-50 lg:hidden">
           <div className="absolute inset-0 bg-background/60 backdrop-blur-sm" onClick={() => setMobileOpen(false)} aria-hidden />
           <div className="absolute inset-y-0 left-0 flex w-[85%] max-w-sm flex-col border-r border-border bg-background shadow-2xl">
@@ -239,7 +239,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
               </button>
             </div>
             <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-4">
-              <SidebarLists activeSlug={activeSlug} anchors={anchors} onNavigate={() => setMobileOpen(false)} />
+              <SidebarLists active_slug={active_slug} anchors={anchors} onNavigate={() => setMobileOpen(false)} />
             </div>
           </div>
         </div>
@@ -268,7 +268,7 @@ export function ChapterSidebar({ activeSlug }: { activeSlug: string }) {
 
         {!collapsed && (
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto pr-2">
-            <SidebarLists activeSlug={activeSlug} anchors={anchors} />
+            <SidebarLists active_slug={active_slug} anchors={anchors} />
           </div>
         )}
 

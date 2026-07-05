@@ -18,7 +18,7 @@
 namespace {
 
 constexpr int kWarpSize = 32;
-constexpr int kDim = 64;             // embedding width: 64 floats = 256 bytes
+constexpr int kDimension = 64;             // embedding width: 64 floats = 256 bytes
 constexpr int kVocab = 1 << 18;      // 262,144 rows x 256 B = 64 MiB table
 constexpr int kBatch = 1 << 20;      // 1M lookups
 constexpr int kWarpsPerBlock = 8;
@@ -32,10 +32,10 @@ __global__ void embeddingGather(const float* table, const int* idx, const int* o
   int warp = (blockIdx.x * blockDim.x + threadIdx.x) / kWarpSize;
   int lane = threadIdx.x % kWarpSize;
   if (warp >= batch) return;
-  const float* src = table + static_cast<size_t>(idx[warp]) * kDim;
+  const float* src = table + static_cast<size_t>(idx[warp]) * kDimension;
   // out_pos maps the (possibly sorted) processing order back to batch order.
-  float* dst = out + static_cast<size_t>(out_pos[warp]) * kDim;
-  for (int d = lane; d < kDim; d += kWarpSize) dst[d] = src[d];
+  float* dst = out + static_cast<size_t>(out_pos[warp]) * kDimension;
+  for (int d = lane; d < kDimension; d += kWarpSize) dst[d] = src[d];
 }
 
 }  // namespace
@@ -65,14 +65,14 @@ int main() {
   std::vector<int> identity(kBatch);
   std::iota(identity.begin(), identity.end(), 0);
 
-  std::vector<float> table(static_cast<size_t>(kVocab) * kDim);
+  std::vector<float> table(static_cast<size_t>(kVocab) * kDimension);
   for (size_t i = 0; i < table.size(); ++i) table[i] = static_cast<float>(i % 997);
 
   float* dev_table = nullptr;
   float* dev_out = nullptr;
   int* dev_idx = nullptr;
   int* dev_pos = nullptr;
-  const size_t out_bytes = static_cast<size_t>(kBatch) * kDim * sizeof(float);
+  const size_t out_bytes = static_cast<size_t>(kBatch) * kDimension * sizeof(float);
   GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_table), table.size() * sizeof(float)));
   GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), out_bytes));
   GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_idx), kBatch * sizeof(int)));
@@ -84,8 +84,8 @@ int main() {
   // Useful traffic: one row read + one row written per lookup.
   const size_t moved = 2 * out_bytes;
 
-  std::vector<float> out_random(static_cast<size_t>(kBatch) * kDim);
-  std::vector<float> out_sorted(static_cast<size_t>(kBatch) * kDim);
+  std::vector<float> out_random(static_cast<size_t>(kBatch) * kDimension);
+  std::vector<float> out_sorted(static_cast<size_t>(kBatch) * kDimension);
 
   // Random (original batch) order.
   GPU_CHECK(gpuMemcpyHostToDevice(dev_idx, idx.data(), kBatch * sizeof(int)));

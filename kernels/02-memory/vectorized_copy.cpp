@@ -27,42 +27,42 @@ __global__ void copyVec4(const float4* in, float4* out, int n4) {
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 24;  // divisible by 4
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = 1 << 24;  // divisible by 4
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
 
-  std::vector<float> host(kN);
-  for (int i = 0; i < kN; ++i) host[i] = static_cast<float>(i % 97);
-  std::vector<float> result(kN);
+  std::vector<float> host(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) host[i] = static_cast<float>(i % 97);
+  std::vector<float> result(kSizeN);
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
 
-  const int gridScalar = (kN + kBlockSize - 1) / kBlockSize;
-  auto launchScalar = [&]() { GPU_LAUNCH(copyScalar, gridScalar, kBlockSize, 0, devIn, devOut, kN); };
-  launchScalar();
+  const int grid_scalar = (kSizeN + kBlockSize - 1) / kBlockSize;
+  auto launch_scalar = [&]() { GPU_LAUNCH(copyScalar, grid_scalar, kBlockSize, 0, dev_in, dev_out, kSizeN); };
+  launch_scalar();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
   if (!gklab::verifyClose(result, host)) return EXIT_FAILURE;
-  gklab::report("copy_scalar", gklab::benchmarkKernel(launchScalar, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
+  gklab::report("copy_scalar", gklab::benchmarkKernel(launch_scalar, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
 
-  const int n4 = kN / 4;
-  const int gridVec = (n4 + kBlockSize - 1) / kBlockSize;
-  auto launchVec = [&]() {
-    GPU_LAUNCH(copyVec4, gridVec, kBlockSize, 0, reinterpret_cast<const float4*>(devIn),
-               reinterpret_cast<float4*>(devOut), n4);
+  const int n4 = kSizeN / 4;
+  const int grid_vec = (n4 + kBlockSize - 1) / kBlockSize;
+  auto launch_vec = [&]() {
+    GPU_LAUNCH(copyVec4, grid_vec, kBlockSize, 0, reinterpret_cast<const float4*>(dev_in),
+               reinterpret_cast<float4*>(dev_out), n4);
   };
-  launchVec();
+  launch_vec();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
   if (!gklab::verifyClose(result, host)) return EXIT_FAILURE;
-  gklab::report("copy_float4", gklab::benchmarkKernel(launchVec, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
+  gklab::report("copy_float4", gklab::benchmarkKernel(launch_vec, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { exerciseSets } from '@/lib/curriculum';
+import { kExerciseSets } from '@/lib/curriculum';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
 
 export const metadata: Metadata = {
@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 };
 
 export default function ExercisesIndexPage() {
-  const total = exerciseSets.reduce((sum, s) => sum + s.count, 0);
+  const total = kExerciseSets.reduce((sum, s) => sum + s.count, 0);
   return (
     <AppWidthContainer as="main" className="px-4 py-12">
       <h1 className="text-3xl font-bold text-foreground">練習與解答</h1>
@@ -17,16 +17,16 @@ export default function ExercisesIndexPage() {
         每個 track 都有一組練習, 混合 paper-and-pencil (計算與推理) 與 programming (改寫 / 實作 kernel) 兩類, 共 {total} 題。 每題附完整解答 (點開 <span className="text-primary">顯示解答</span> 展開); programming 題的參考解位於 <code>kernels/exercises/</code>, 可直接編譯執行。
       </p>
       <div className="mt-8 grid gap-4 sm:grid-cols-2">
-        {exerciseSets.map((set) => (
+        {kExerciseSets.map((set) => (
           <Link
             key={set.slug}
             href={`/exercises/${set.slug}`}
             className="rounded-lg border border-border bg-card/40 p-5 transition hover:border-primary"
           >
             <div className="mb-2 flex items-center gap-2">
-              <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: set.trackColor }} />
-              <span className="text-sm font-medium" style={{ color: set.trackColor }}>
-                {set.trackLabel}
+              <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: set.track_color }} />
+              <span className="text-sm font-medium" style={{ color: set.track_color }}>
+                {set.track_label}
               </span>
               <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                 {set.count} 題

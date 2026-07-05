@@ -7,35 +7,35 @@ import rehypePrettyCode from 'rehype-pretty-code';
 
 /**
  * GitHub Pages project sites are served from /<repo>. Allow overriding the
- * basePath via an environment variable so local dev can run at the root.
+ * base path via an environment variable so local dev can run at the root.
  */
-const isProd = process.env.NODE_ENV === 'production';
-const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? (isProd ? '/gpu-kernel-lab' : '');
+const kIsProd = process.env.NODE_ENV === 'production';
+const kBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? (kIsProd ? '/gpu-kernel-lab' : '');
 
-const prettyCodeOptions = {
+const kPrettyCodeOptions = {
   theme: 'github-dark-dimmed',
   keepBackground: true,
 };
 
-const withMDX = createMDX({
+const withMdx = createMDX({
   extension: /\.mdx?$/,
   options: {
     remarkPlugins: [remarkGfm, remarkMath],
-    rehypePlugins: [rehypeSlug, [rehypePrettyCode, prettyCodeOptions], rehypeKatex],
+    rehypePlugins: [rehypeSlug, [rehypePrettyCode, kPrettyCodeOptions], rehypeKatex],
   },
 });
 
 /** @type {import('next').NextConfig} */
-const nextConfig = {
+const kNextConfig = {
   output: 'export',
   reactStrictMode: true,
   pageExtensions: ['ts', 'tsx', 'md', 'mdx'],
-  basePath,
+  basePath: kBasePath,
   images: { unoptimized: true },
   trailingSlash: true,
   env: {
-    NEXT_PUBLIC_BASE_PATH: basePath,
+    NEXT_PUBLIC_BASE_PATH: kBasePath,
   },
 };
 
-export default withMDX(nextConfig);
+export default withMdx(kNextConfig);

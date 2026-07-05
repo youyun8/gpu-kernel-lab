@@ -28,17 +28,17 @@ export function SiteSearch() {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [active_index, setActiveIndex] = useState(0);
   const [index, setIndex] = useState<SearchDoc[] | null>(null);
-  const [indexError, setIndexError] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const resultRefs = useRef<(HTMLAnchorElement | null)[]>([]);
+  const [index_error, setIndexError] = useState(false);
+  const input_ref = useRef<HTMLInputElement>(null);
+  const result_refs = useRef<(HTMLAnchorElement | null)[]>([]);
 
   useEffect(() => setMounted(true), []);
 
   // Lazily fetch the pre-built search index the first time the dialog opens.
   useEffect(() => {
-    if (!open || index || indexError) return;
+    if (!open || index || index_error) return;
     let cancelled = false;
     fetch(asset('/search-index.json'))
       .then((res) => {
@@ -54,7 +54,7 @@ export function SiteSearch() {
     return () => {
       cancelled = true;
     };
-  }, [open, index, indexError]);
+  }, [open, index, index_error]);
 
   const hits = useMemo<SearchHit[]>(() => (index ? search(index, query) : []), [index, query]);
 
@@ -76,12 +76,12 @@ export function SiteSearch() {
 
   useEffect(() => {
     if (!open) return;
-    const previousOverflow = document.body.style.overflow;
+    const previous_overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const focusTimer = setTimeout(() => inputRef.current?.focus(), 0);
+    const focus_timer = setTimeout(() => input_ref.current?.focus(), 0);
     return () => {
-      document.body.style.overflow = previousOverflow;
-      clearTimeout(focusTimer);
+      document.body.style.overflow = previous_overflow;
+      clearTimeout(focus_timer);
     };
   }, [open]);
 
@@ -106,14 +106,14 @@ export function SiteSearch() {
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      const hit = hits[activeIndex];
+      const hit = hits[active_index];
       if (hit) go(hit.doc.url);
     }
   }
 
   useEffect(() => {
-    resultRefs.current[activeIndex]?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex]);
+    result_refs.current[active_index]?.scrollIntoView({ block: 'nearest' });
+  }, [active_index]);
 
   return (
     <>
@@ -139,7 +139,7 @@ export function SiteSearch() {
               <div className="flex items-center gap-2 border-b border-border px-4 py-3">
                 <Search className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                 <input
-                  ref={inputRef}
+                  ref={input_ref}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={onInputKeyDown}
@@ -163,9 +163,9 @@ export function SiteSearch() {
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
                     輸入關鍵字搜尋所有章節與練習的標題、段落標題與內文。
                   </p>
-                ) : !index && !indexError ? (
+                ) : !index && !index_error ? (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">載入搜尋索引中…</p>
-                ) : indexError ? (
+                ) : index_error ? (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">搜尋索引載入失敗, 請重新整理頁面再試一次。</p>
                 ) : hits.length === 0 ? (
                   <p className="px-3 py-6 text-center text-sm text-muted-foreground">
@@ -177,7 +177,7 @@ export function SiteSearch() {
                       <li key={hit.doc.id}>
                         <a
                           ref={(el) => {
-                            resultRefs.current[i] = el;
+                            result_refs.current[i] = el;
                           }}
                           href={asset(hit.doc.url)}
                           onMouseEnter={() => setActiveIndex(i)}
@@ -185,10 +185,10 @@ export function SiteSearch() {
                             e.preventDefault();
                             go(hit.doc.url);
                           }}
-                          className={`block rounded-lg px-3 py-2.5 transition ${i === activeIndex ? 'bg-primary/10' : 'hover:bg-background'}`}
+                          className={`block rounded-lg px-3 py-2.5 transition ${i === active_index ? 'bg-primary/10' : 'hover:bg-background'}`}
                         >
                           <div className="flex items-center gap-2">
-                            <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: hit.doc.trackColor }} />
+                            <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: hit.doc.track_color }} />
                             <span className="truncate text-sm font-medium text-foreground">
                               <Highlighted text={hit.doc.title} query={query} />
                             </span>

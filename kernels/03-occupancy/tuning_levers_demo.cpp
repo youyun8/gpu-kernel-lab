@@ -1,6 +1,6 @@
 // tuning_levers_demo.cpp
 //
-// Companion to chapter b8 ("Occupancy 與 Latency Hiding"). It turns the tuning
+// Companion to chapter b8 ("Occupancy and Latency Hiding"). It turns the tuning
 // levers from that chapter into one runnable experiment so the reader can see
 // the numbers behind each knob on their own GPU instead of trusting the prose:
 //
@@ -92,26 +92,26 @@ void reportOccupancy(const char* label, KernelFn kernel, int block_size, int max
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 22;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = 1 << 22;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
 
   int max_threads_per_sm = 0;
   GPU_CHECK(gpuGetMaxThreadsPerMultiprocessor(&max_threads_per_sm));
 
-  std::vector<float> hostIn(kN), hostOut(kN), reference(kN);
-  for (int i = 0; i < kN; ++i) {
-    hostIn[i] = static_cast<float>(i % 7) * 0.25f;
-    reference[i] = cpuReference(hostIn[i]);
+  std::vector<float> host_in(kSizeN), host_out(kSizeN), reference(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
+    host_in[i] = static_cast<float>(i % 7) * 0.25f;
+    reference[i] = cpuReference(host_in[i]);
   }
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, hostIn.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host_in.data(), bytes));
 
-  const double flops = static_cast<double>(kN) * kInnerIters * 2.0;
-  const size_t bytesMoved = 2 * bytes;
+  const double flops = static_cast<double>(kSizeN) * kInnerIters * 2.0;
+  const size_t bytes_moved = 2 * bytes;
 
   std::printf("tuning_levers_demo: %d threads/SM max, warp/wave = %d\n\n", max_threads_per_sm,
               kWarpSize);
@@ -132,31 +132,31 @@ int main() {
 
   // --- Timed comparison: high occupancy vs low occupancy + high ILP. ----------
   constexpr int kBlock = 256;
-  const int gridScalar = (kN + kBlock - 1) / kBlock;
-  const int gridTiled = (kN / kTile + kBlock - 1) / kBlock;
-  auto launchScalar = [&]() { GPU_LAUNCH(computeScalar, gridScalar, kBlock, 0, devIn, devOut, kN); };
-  auto launchTiled = [&]() { GPU_LAUNCH(computeTiled, gridTiled, kBlock, 0, devIn, devOut, kN); };
+  const int grid_scalar = (kSizeN + kBlock - 1) / kBlock;
+  const int grid_tiled = (kSizeN / kTile + kBlock - 1) / kBlock;
+  auto launch_scalar = [&]() { GPU_LAUNCH(computeScalar, grid_scalar, kBlock, 0, dev_in, dev_out, kSizeN); };
+  auto launch_tiled = [&]() { GPU_LAUNCH(computeTiled, grid_tiled, kBlock, 0, dev_in, dev_out, kSizeN); };
 
-  launchScalar();
+  launch_scalar();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(hostOut.data(), devOut, bytes));
-  if (!gklab::verifyClose(hostOut, reference, 1.0e-2f)) return EXIT_FAILURE;
+  GPU_CHECK(gpuMemcpyDeviceToHost(host_out.data(), dev_out, bytes));
+  if (!gklab::verifyClose(host_out, reference, 1.0e-2f)) return EXIT_FAILURE;
 
-  launchTiled();
+  launch_tiled();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(hostOut.data(), devOut, bytes));
-  if (!gklab::verifyClose(hostOut, reference, 1.0e-2f)) return EXIT_FAILURE;
+  GPU_CHECK(gpuMemcpyDeviceToHost(host_out.data(), dev_out, bytes));
+  if (!gklab::verifyClose(host_out, reference, 1.0e-2f)) return EXIT_FAILURE;
 
   // Illustrative peaks; replace with your GPU's numbers for real % of peak.
   constexpr double kPeakGbPerSec = 1555.0;
   constexpr double kPeakGflopPerSec = 19500.0;
   std::printf("\n[timing] does lower occupancy + higher ILP win here?\n");
-  gklab::report("high_occupancy_scalar", gklab::benchmarkKernel(launchScalar, bytesMoved, flops),
+  gklab::report("high_occupancy_scalar", gklab::benchmarkKernel(launch_scalar, bytes_moved, flops),
                 kPeakGbPerSec, kPeakGflopPerSec);
-  gklab::report("low_occ_high_ilp_tiled", gklab::benchmarkKernel(launchTiled, bytesMoved, flops),
+  gklab::report("low_occ_high_ilp_tiled", gklab::benchmarkKernel(launch_tiled, bytes_moved, flops),
                 kPeakGbPerSec, kPeakGflopPerSec);
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

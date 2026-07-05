@@ -61,49 +61,49 @@ float cpuReference(float x) {
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 22;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = 1 << 22;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
 
-  std::vector<float> hostIn(kN);
-  std::vector<float> hostOut(kN);
-  std::vector<float> reference(kN);
-  for (int i = 0; i < kN; ++i) {
-    hostIn[i] = static_cast<float>(i % 7) * 0.25f;
-    reference[i] = cpuReference(hostIn[i]);
+  std::vector<float> host_in(kSizeN);
+  std::vector<float> host_out(kSizeN);
+  std::vector<float> reference(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
+    host_in[i] = static_cast<float>(i % 7) * 0.25f;
+    reference[i] = cpuReference(host_in[i]);
   }
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, hostIn.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host_in.data(), bytes));
 
-  const int gridHigh = (kN + kBlockSize - 1) / kBlockSize;
-  const int gridIlp = (kN / kIlpFactor + kBlockSize - 1) / kBlockSize;
+  const int grid_high = (kSizeN + kBlockSize - 1) / kBlockSize;
+  const int grid_ilp = (kSizeN / kIlpFactor + kBlockSize - 1) / kBlockSize;
 
-  auto launchHigh = [&]() { GPU_LAUNCH(computeHighOccupancy, gridHigh, kBlockSize, 0, devIn, devOut, kN); };
-  auto launchIlp = [&]() { GPU_LAUNCH(computeHighIlp, gridIlp, kBlockSize, 0, devIn, devOut, kN); };
+  auto launch_high = [&]() { GPU_LAUNCH(computeHighOccupancy, grid_high, kBlockSize, 0, dev_in, dev_out, kSizeN); };
+  auto launch_ilp = [&]() { GPU_LAUNCH(computeHighIlp, grid_ilp, kBlockSize, 0, dev_in, dev_out, kSizeN); };
 
   // Each element runs kInnerIters iterations of 2 FLOP (one FMA).
-  const double flops = static_cast<double>(kN) * kInnerIters * 2.0;
-  const size_t bytesMoved = 2 * bytes;
+  const double flops = static_cast<double>(kSizeN) * kInnerIters * 2.0;
+  const size_t bytes_moved = 2 * bytes;
 
-  launchHigh();
+  launch_high();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(hostOut.data(), devOut, bytes));
-  if (!gklab::verifyClose(hostOut, reference, 1.0e-2f)) return EXIT_FAILURE;
+  GPU_CHECK(gpuMemcpyDeviceToHost(host_out.data(), dev_out, bytes));
+  if (!gklab::verifyClose(host_out, reference, 1.0e-2f)) return EXIT_FAILURE;
 
-  launchIlp();
+  launch_ilp();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(hostOut.data(), devOut, bytes));
-  if (!gklab::verifyClose(hostOut, reference, 1.0e-2f)) return EXIT_FAILURE;
+  GPU_CHECK(gpuMemcpyDeviceToHost(host_out.data(), dev_out, bytes));
+  if (!gklab::verifyClose(host_out, reference, 1.0e-2f)) return EXIT_FAILURE;
 
   constexpr double kPeakGbPerSec = 1555.0;
   constexpr double kPeakGflopPerSec = 19500.0;
-  gklab::report("high_occupancy", gklab::benchmarkKernel(launchHigh, bytesMoved, flops), kPeakGbPerSec, kPeakGflopPerSec);
-  gklab::report("low_occ_high_ilp", gklab::benchmarkKernel(launchIlp, bytesMoved, flops), kPeakGbPerSec, kPeakGflopPerSec);
+  gklab::report("high_occupancy", gklab::benchmarkKernel(launch_high, bytes_moved, flops), kPeakGbPerSec, kPeakGflopPerSec);
+  gklab::report("low_occ_high_ilp", gklab::benchmarkKernel(launch_ilp, bytes_moved, flops), kPeakGbPerSec, kPeakGflopPerSec);
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

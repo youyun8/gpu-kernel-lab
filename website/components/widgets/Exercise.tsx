@@ -3,12 +3,12 @@ import type { ReactNode } from 'react';
 type Kind = 'paper' | 'code';
 type Level = '入門' | '進階' | '挑戰';
 
-const kindMeta: Record<Kind, { label: string; icon: string }> = {
+const kKindMeta: Record<Kind, { label: string; icon: string }> = {
   paper: { label: 'paper-and-pencil', icon: '✎' },
   code: { label: 'programming', icon: '⌨' },
 };
 
-const levelColor: Record<Level, string> = {
+const kLevelColor: Record<Level, string> = {
   入門: '#39d353',
   進階: '#58a6ff',
   挑戰: '#f778ba',
@@ -27,7 +27,7 @@ export function Exercise({
   level?: Level;
   children: ReactNode;
 }) {
-  const meta = kindMeta[kind];
+  const meta = kKindMeta[kind];
   return (
     <section
       id={id}
@@ -39,7 +39,7 @@ export function Exercise({
         <h3 className="text-base font-semibold text-foreground">{title}</h3>
         <span
           className="rounded-full border px-2 py-0.5 text-xs"
-          style={{ borderColor: levelColor[level], color: levelColor[level] }}
+          style={{ borderColor: kLevelColor[level], color: kLevelColor[level] }}
         >
           {level}
         </span>

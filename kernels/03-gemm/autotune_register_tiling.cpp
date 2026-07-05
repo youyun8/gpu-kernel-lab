@@ -8,52 +8,52 @@
 
 namespace {
 
-constexpr int kBM = 32;
-constexpr int kBN = 32;
-constexpr int kBK = 16;
+constexpr int kBlockM = 32;
+constexpr int kBlockN = 32;
+constexpr int kBlockK = 16;
 
 #define DEFINE_SGEMM_CONFIG(NAME, TM_VALUE, TN_VALUE)                                           \
   __global__ void NAME(const float* a, const float* b, float* c, int m, int n, int k) {          \
-    constexpr int kTM = TM_VALUE;                                                               \
-    constexpr int kTN = TN_VALUE;                                                               \
-    constexpr int kThreads = (kBM / kTM) * (kBN / kTN);                                         \
-    __shared__ float sA[kBM][kBK];                                                              \
-    __shared__ float sB[kBK][kBN];                                                              \
-    int threadCol = threadIdx.x % (kBN / kTN);                                                  \
-    int threadRow = threadIdx.x / (kBN / kTN);                                                  \
-    int blockRow = blockIdx.y * kBM;                                                            \
-    int blockCol = blockIdx.x * kBN;                                                            \
-    float acc[kTM][kTN] = {};                                                                   \
-    for (int t = 0; t < k; t += kBK) {                                                          \
-      for (int idx = threadIdx.x; idx < kBM * kBK; idx += kThreads) {                           \
-        int r = idx / kBK;                                                                      \
-        int col = idx % kBK;                                                                    \
-        int gr = blockRow + r;                                                                  \
+    constexpr int kThreadM = TM_VALUE;                                                               \
+    constexpr int kThreadN = TN_VALUE;                                                               \
+    constexpr int kThreads = (kBlockM / kThreadM) * (kBlockN / kThreadN);                                         \
+    __shared__ float s_a[kBlockM][kBlockK];                                                              \
+    __shared__ float s_b[kBlockK][kBlockN];                                                              \
+    int thread_col = threadIdx.x % (kBlockN / kThreadN);                                                  \
+    int thread_row = threadIdx.x / (kBlockN / kThreadN);                                                  \
+    int block_row = blockIdx.y * kBlockM;                                                            \
+    int block_col = blockIdx.x * kBlockN;                                                            \
+    float acc[kThreadM][kThreadN] = {};                                                                   \
+    for (int t = 0; t < k; t += kBlockK) {                                                          \
+      for (int idx = threadIdx.x; idx < kBlockM * kBlockK; idx += kThreads) {                           \
+        int r = idx / kBlockK;                                                                      \
+        int col = idx % kBlockK;                                                                    \
+        int gr = block_row + r;                                                                  \
         int gc = t + col;                                                                       \
-        sA[r][col] = (gr < m && gc < k) ? a[gr * k + gc] : 0.0f;                                \
+        s_a[r][col] = (gr < m && gc < k) ? a[gr * k + gc] : 0.0f;                                \
       }                                                                                         \
-      for (int idx = threadIdx.x; idx < kBK * kBN; idx += kThreads) {                           \
-        int r = idx / kBN;                                                                      \
-        int col = idx % kBN;                                                                    \
+      for (int idx = threadIdx.x; idx < kBlockK * kBlockN; idx += kThreads) {                           \
+        int r = idx / kBlockN;                                                                      \
+        int col = idx % kBlockN;                                                                    \
         int gr = t + r;                                                                         \
-        int gc = blockCol + col;                                                                \
-        sB[r][col] = (gr < k && gc < n) ? b[gr * n + gc] : 0.0f;                                \
+        int gc = block_col + col;                                                                \
+        s_b[r][col] = (gr < k && gc < n) ? b[gr * n + gc] : 0.0f;                                \
       }                                                                                         \
       __syncthreads();                                                                          \
-      for (int p = 0; p < kBK; ++p) {                                                           \
-        float regA[kTM];                                                                        \
-        float regB[kTN];                                                                        \
-        for (int i = 0; i < kTM; ++i) regA[i] = sA[threadRow * kTM + i][p];                     \
-        for (int j = 0; j < kTN; ++j) regB[j] = sB[p][threadCol * kTN + j];                     \
-        for (int i = 0; i < kTM; ++i)                                                           \
-          for (int j = 0; j < kTN; ++j) acc[i][j] += regA[i] * regB[j];                         \
+      for (int p = 0; p < kBlockK; ++p) {                                                           \
+        float reg_a[kThreadM];                                                                        \
+        float reg_b[kThreadN];                                                                        \
+        for (int i = 0; i < kThreadM; ++i) reg_a[i] = s_a[thread_row * kThreadM + i][p];                     \
+        for (int j = 0; j < kThreadN; ++j) reg_b[j] = s_b[p][thread_col * kThreadN + j];                     \
+        for (int i = 0; i < kThreadM; ++i)                                                           \
+          for (int j = 0; j < kThreadN; ++j) acc[i][j] += reg_a[i] * reg_b[j];                         \
       }                                                                                         \
       __syncthreads();                                                                          \
     }                                                                                           \
-    for (int i = 0; i < kTM; ++i) {                                                             \
-      for (int j = 0; j < kTN; ++j) {                                                           \
-        int row = blockRow + threadRow * kTM + i;                                               \
-        int col = blockCol + threadCol * kTN + j;                                               \
+    for (int i = 0; i < kThreadM; ++i) {                                                             \
+      for (int j = 0; j < kThreadN; ++j) {                                                           \
+        int row = block_row + thread_row * kThreadM + i;                                               \
+        int col = block_col + thread_col * kThreadN + j;                                               \
         if (row < m && col < n) c[row * n + col] = acc[i][j];                                   \
       }                                                                                         \
     }                                                                                           \
@@ -68,40 +68,40 @@ DEFINE_SGEMM_CONFIG(sgemmTm8Tn4, 8, 4)
 }  // namespace
 
 int main() {
-  constexpr int kM = 256;
-  constexpr int kN = 256;
-  constexpr int kK = 256;
-  dim3 grid((kN + kBN - 1) / kBN, (kM + kBM - 1) / kBM);
+  constexpr int kSizeM = 256;
+  constexpr int kSizeN = 256;
+  constexpr int kSizeK = 256;
+  dim3 grid((kSizeN + kBlockN - 1) / kBlockN, (kSizeM + kBlockM - 1) / kBlockM);
 
   int status = EXIT_SUCCESS;
 
   {
-    constexpr int kTM = 2;
-    constexpr int kTN = 2;
-    constexpr int threads = (kBM / kTM) * (kBN / kTN);
+    constexpr int kThreadM = 2;
+    constexpr int kThreadN = 2;
+    constexpr int threads = (kBlockM / kThreadM) * (kBlockN / kThreadN);
     dim3 block(threads);
-    status |= gklab::runGemm("autotune_tm2_tn2", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-      GPU_LAUNCH(sgemmTm2Tn2, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+    status |= gklab::runGemm("autotune_tm2_tn2", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+      GPU_LAUNCH(sgemmTm2Tn2, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
     });
   }
 
   {
-    constexpr int kTM = 4;
-    constexpr int kTN = 4;
-    constexpr int threads = (kBM / kTM) * (kBN / kTN);
+    constexpr int kThreadM = 4;
+    constexpr int kThreadN = 4;
+    constexpr int threads = (kBlockM / kThreadM) * (kBlockN / kThreadN);
     dim3 block(threads);
-    status |= gklab::runGemm("autotune_tm4_tn4", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-      GPU_LAUNCH(sgemmTm4Tn4, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+    status |= gklab::runGemm("autotune_tm4_tn4", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+      GPU_LAUNCH(sgemmTm4Tn4, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
     });
   }
 
   {
-    constexpr int kTM = 8;
-    constexpr int kTN = 4;
-    constexpr int threads = (kBM / kTM) * (kBN / kTN);
+    constexpr int kThreadM = 8;
+    constexpr int kThreadN = 4;
+    constexpr int threads = (kBlockM / kThreadM) * (kBlockN / kThreadN);
     dim3 block(threads);
-    status |= gklab::runGemm("autotune_tm8_tn4", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-      GPU_LAUNCH(sgemmTm8Tn4, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+    status |= gklab::runGemm("autotune_tm8_tn4", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+      GPU_LAUNCH(sgemmTm8Tn4, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
     });
   }
 

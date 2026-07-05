@@ -6,9 +6,9 @@ import type { ReactNode } from 'react';
 // A operand = blue, B operand = pink, C / accumulator = green, and the cyan
 // track accent for whatever a figure wants to draw the eye to.
 
-const kA = '#58a6ff'; // A operand
-const kB = '#f778ba'; // B operand
-const kC = '#39d353'; // C output / accumulator
+const kOperandA = '#58a6ff'; // A operand
+const kOperandB = '#f778ba'; // B operand
+const kAccumulatorC = '#39d353'; // C output / accumulator
 const kAccent = '#39c5cf'; // track accent / "the point"
 const kIdle = '#6e7681'; // idle / inactive
 
@@ -73,7 +73,7 @@ export function GemmReuseFigure() {
       title="為什麼 naive GEMM 卡在 bandwidth roof"
       caption={
         <>
-          Naive: 每個 thread 為一個 <span style={{ color: kC }}>C</span> 元素讀 2K 個值只做 2K 次 FLOP,
+          Naive: 每個 thread 為一個 <span style={{ color: kAccumulatorC }}>C</span> 元素讀 2K 個值只做 2K 次 FLOP,
           arithmetic intensity ≈ 0.25 FLOP/byte。 Tiled: 一個 BM×BN block 協力把 BK 寬的 tile 載入 shared memory,
           每筆 load 被 tile 內 O(BM) 或 O(BN) 個 thread 重複使用, intensity 隨 tile 尺寸線性上升 —
           點才會從 bandwidth roof 往 compute roof 爬。
@@ -84,11 +84,11 @@ export function GemmReuseFigure() {
         <div>
           <p className="mb-2 text-sm font-medium text-foreground">Naive — 無重複使用</p>
           <div className="flex items-center gap-3">
-            <Grid rows={8} cols={1} cell={13} fill={(r) => (r >= 0 ? kA : kA)} label="A 的一整列 (K 個元素)" />
+            <Grid rows={8} cols={1} cell={13} fill={(r) => (r >= 0 ? kOperandA : kOperandA)} label="A 的一整列 (K 個元素)" />
             <span className="text-lg text-muted-foreground" aria-hidden>×</span>
-            <Grid rows={1} cols={8} cell={13} fill={() => kB} label="B 的一整行 (K 個元素)" />
+            <Grid rows={1} cols={8} cell={13} fill={() => kOperandB} label="B 的一整行 (K 個元素)" />
             <span className="text-lg text-muted-foreground" aria-hidden>→</span>
-            <div className="h-[13px] w-[13px] rounded-[2px]" style={{ backgroundColor: kC }} aria-hidden />
+            <div className="h-[13px] w-[13px] rounded-[2px]" style={{ backgroundColor: kAccumulatorC }} aria-hidden />
           </div>
           <p className="mt-2 font-mono text-xs text-muted-foreground">
             reuse = <span style={{ color: '#ff7b72' }}>1×</span> · AI ≈ 0.25
@@ -98,11 +98,11 @@ export function GemmReuseFigure() {
         <div>
           <p className="mb-2 text-sm font-medium text-foreground">Tiled — 進 shared memory 反覆用</p>
           <div className="flex items-center gap-3">
-            <Grid rows={8} cols={2} cell={13} fill={() => kA} label="A 的 BM×BK tile" />
+            <Grid rows={8} cols={2} cell={13} fill={() => kOperandA} label="A 的 BM×BK tile" />
             <span className="text-lg text-muted-foreground" aria-hidden>×</span>
-            <Grid rows={2} cols={8} cell={13} fill={() => kB} label="B 的 BK×BN tile" />
+            <Grid rows={2} cols={8} cell={13} fill={() => kOperandB} label="B 的 BK×BN tile" />
             <span className="text-lg text-muted-foreground" aria-hidden>→</span>
-            <Grid rows={8} cols={8} cell={7} fill={() => kC} label="C 的 BM×BN block" />
+            <Grid rows={8} cols={8} cell={7} fill={() => kAccumulatorC} label="C 的 BM×BN block" />
           </div>
           <p className="mt-2 font-mono text-xs text-muted-foreground">
             reuse ≈ <span style={{ color: kAccent }}>BN× / BM×</span> · AI ↑ 隨 tile 尺寸
@@ -119,16 +119,16 @@ export function GemmReuseFigure() {
 
 export function HierarchicalTilingFigure() {
   // 12x12 C-block; a warp tile is a 6x6 quadrant; a thread tile is a 2x3 cell.
-  const warpRow = 0;
-  const warpCol = 0; // highlighted warp tile = top-left quadrant
-  const thRow = 0;
-  const thCol = 0; // highlighted thread tile inside that warp
+  const warp_row = 0;
+  const warp_col = 0; // highlighted warp tile = top-left quadrant
+  const thread_row = 0;
+  const thread_col = 0; // highlighted thread tile inside that warp
 
   function fill(row: number, col: number): string {
-    const inWarp = Math.floor(row / 6) === warpRow && Math.floor(col / 6) === warpCol;
-    const inThread = inWarp && Math.floor((row % 6) / 2) === thRow && Math.floor((col % 6) / 3) === thCol;
-    if (inThread) return kAccent;
-    if (inWarp) return kC;
+    const in_warp = Math.floor(row / 6) === warp_row && Math.floor(col / 6) === warp_col;
+    const in_thread = in_warp && Math.floor((row % 6) / 2) === thread_row && Math.floor((col % 6) / 3) === thread_col;
+    if (in_thread) return kAccent;
+    if (in_warp) return kAccumulatorC;
     return kIdle;
   }
 
@@ -137,9 +137,9 @@ export function HierarchicalTilingFigure() {
       title="Tiling 的三層階層 (在 C 上切)"
       caption={
         <>
-          同一塊 <span style={{ color: kC }}>output C</span> 被三層切分:{' '}
+          同一塊 <span style={{ color: kAccumulatorC }}>output C</span> 被三層切分:{' '}
           一個 <strong>threadblock</strong> 負責整塊 BM×BN;{' '}
-          塊內每個 <strong>warp</strong> 認領一個 warp tile (<span style={{ color: kC }}>綠色象限</span>);{' '}
+          塊內每個 <strong>warp</strong> 認領一個 warp tile (<span style={{ color: kAccumulatorC }}>綠色象限</span>);{' '}
           warp 內每個 <strong>thread</strong> 再算一個 register-resident 的 micro-tile (
           <span style={{ color: kAccent }}>青色格</span>)。 每往下一層, operand 就被搬進更靠近 ALU、更快的儲存
           (shared memory → register), reuse 再乘一次。
@@ -147,13 +147,13 @@ export function HierarchicalTilingFigure() {
       }
     >
       <div className="flex flex-wrap items-center gap-6">
-        <div className="rounded-md border-2 border-dashed p-1.5" style={{ borderColor: kA }}>
+        <div className="rounded-md border-2 border-dashed p-1.5" style={{ borderColor: kOperandA }}>
           <Grid rows={12} cols={12} cell={16} fill={fill} label="threadblock 的 C block, 分成 warp tile 與 thread tile" />
         </div>
         <div className="space-y-2">
-          <Chip color={kA}>threadblock tile (BM×BN)</Chip>
+          <Chip color={kOperandA}>threadblock tile (BM×BN)</Chip>
           <br />
-          <Chip color={kC}>warp tile</Chip>
+          <Chip color={kAccumulatorC}>warp tile</Chip>
           <br />
           <Chip color={kAccent}>thread tile (registers, TM×TN)</Chip>
           <br />
@@ -176,8 +176,8 @@ export function OuterProductFigure() {
       title="Register tiling = outer product 累加"
       caption={
         <>
-          主迴圈每前進一個 k, 每個 thread 從 shared memory 讀 <span style={{ color: kA }}>TM 個 a</span> 和{' '}
-          <span style={{ color: kB }}>TN 個 b</span> (共 TM+TN 筆), 做 <span style={{ color: kC }}>TM×TN 次 FMA</span>{' '}
+          主迴圈每前進一個 k, 每個 thread 從 shared memory 讀 <span style={{ color: kOperandA }}>TM 個 a</span> 和{' '}
+          <span style={{ color: kOperandB }}>TN 個 b</span> (共 TM+TN 筆), 做 <span style={{ color: kAccumulatorC }}>TM×TN 次 FMA</span>{' '}
           更新 register 裡的 accumulator。 讀 8 筆、算 16 次 — shared-memory 存取相對 FLOP 的比例又降一階,
           這通常是整條優化階梯上最大的單步跳躍。
         </>
@@ -186,18 +186,18 @@ export function OuterProductFigure() {
       <div className="flex items-center gap-4">
         {/* b vector (row) sits above C */}
         <div className="w-[64px]" />
-        <Grid rows={1} cols={TN} cell={22} fill={() => kB} label="b[TN] 從 shared memory 讀入 register" />
+        <Grid rows={1} cols={TN} cell={22} fill={() => kOperandB} label="b[TN] 從 shared memory 讀入 register" />
       </div>
       <div className="mt-1 flex items-center gap-4">
-        <Grid rows={TM} cols={1} cell={22} fill={() => kA} label="a[TM] 從 shared memory 讀入 register" />
+        <Grid rows={TM} cols={1} cell={22} fill={() => kOperandA} label="a[TM] 從 shared memory 讀入 register" />
         <span className="text-lg text-muted-foreground" aria-hidden>⊗</span>
-        <Grid rows={TM} cols={TN} cell={22} fill={() => kC} label="TM×TN accumulator, 全部在 register" />
+        <Grid rows={TM} cols={TN} cell={22} fill={() => kAccumulatorC} label="TM×TN accumulator, 全部在 register" />
         <span className="ml-2 font-mono text-xs text-muted-foreground">acc[i][j] += a[i] * b[j]</span>
       </div>
       <div className="mt-3 flex flex-wrap gap-4">
-        <Chip color={kA}>a[TM] (registers)</Chip>
-        <Chip color={kB}>b[TN] (registers)</Chip>
-        <Chip color={kC}>acc[TM][TN] (registers)</Chip>
+        <Chip color={kOperandA}>a[TM] (registers)</Chip>
+        <Chip color={kOperandB}>b[TN] (registers)</Chip>
+        <Chip color={kAccumulatorC}>acc[TM][TN] (registers)</Chip>
       </div>
     </Fig>
   );
@@ -224,8 +224,8 @@ function TimelineRow({ segments }: { segments: { label: string; color: string; s
 }
 
 export function DoubleBufferingFigure() {
-  const load = kA;
-  const compute = kC;
+  const load = kOperandA;
+  const compute = kAccumulatorC;
   const idle = 'transparent';
   return (
     <Fig
@@ -300,18 +300,18 @@ export function TensorCoreFragmentFigure() {
     >
       <div className="flex flex-wrap items-center gap-3">
         <div className="text-center">
-          <Grid rows={8} cols={8} cell={12} fill={() => kA} label="A fragment 16×16 fp16" />
-          <p className="mt-1 font-mono text-[10px]" style={{ color: kA }}>A frag 16×16</p>
+          <Grid rows={8} cols={8} cell={12} fill={() => kOperandA} label="A fragment 16×16 fp16" />
+          <p className="mt-1 font-mono text-[10px]" style={{ color: kOperandA }}>A frag 16×16</p>
         </div>
         <span className="text-lg text-muted-foreground" aria-hidden>×</span>
         <div className="text-center">
-          <Grid rows={8} cols={8} cell={12} fill={() => kB} label="B fragment 16×16 fp16" />
-          <p className="mt-1 font-mono text-[10px]" style={{ color: kB }}>B frag 16×16</p>
+          <Grid rows={8} cols={8} cell={12} fill={() => kOperandB} label="B fragment 16×16 fp16" />
+          <p className="mt-1 font-mono text-[10px]" style={{ color: kOperandB }}>B frag 16×16</p>
         </div>
         <span className="text-lg text-muted-foreground" aria-hidden>→</span>
         <div className="text-center">
-          <Grid rows={8} cols={8} cell={12} fill={() => kC} label="C accumulator fragment 16×16 fp32" />
-          <p className="mt-1 font-mono text-[10px]" style={{ color: kC }}>C acc 16×16 (fp32)</p>
+          <Grid rows={8} cols={8} cell={12} fill={() => kAccumulatorC} label="C accumulator fragment 16×16 fp32" />
+          <p className="mt-1 font-mono text-[10px]" style={{ color: kAccumulatorC }}>C acc 16×16 (fp32)</p>
         </div>
         <div className="ml-2 rounded-md border border-border bg-background px-3 py-2 text-center">
           <p className="font-mono text-sm" style={{ color: kAccent }}>1 條 mma_sync</p>
@@ -328,7 +328,7 @@ export function TensorCoreFragmentFigure() {
 /* ------------------------------------------------------------------ */
 
 export function SplitKFigure() {
-  const splits = [kA, kB, kC, kAccent];
+  const splits = [kOperandA, kOperandB, kAccumulatorC, kAccent];
   return (
     <Fig
       title="Split-K: 把 K 迴圈切給多個 CTA, 再 reduce"
@@ -360,9 +360,9 @@ export function SplitKFigure() {
         </div>
         <div className="text-center">
           <div className="relative">
-            <Grid rows={6} cols={6} cell={13} fill={() => kC} label="reduce 後的完整 C tile" />
+            <Grid rows={6} cols={6} cell={13} fill={() => kAccumulatorC} label="reduce 後的完整 C tile" />
           </div>
-          <p className="mt-1 font-mono text-[10px]" style={{ color: kC }}>
+          <p className="mt-1 font-mono text-[10px]" style={{ color: kAccumulatorC }}>
             C = Σ partials
           </p>
         </div>
@@ -379,8 +379,8 @@ export function StreamKFigure() {
   // Total MAC work laid out as one 1D stream, evenly divided among 3 fixed CTAs.
   const total = 18; // work units
   const ctas = 3;
-  const perCta = total / ctas;
-  const ctaColors = [kA, kB, kC];
+  const per_cta = total / ctas;
+  const cta_colors = [kOperandA, kOperandB, kAccumulatorC];
   return (
     <Fig
       title="Stream-K: 把所有 MAC 攤成一條 stream 均分"
@@ -397,27 +397,27 @@ export function StreamKFigure() {
         <p className="mb-1 text-xs text-muted-foreground">6 個 output tile 的 K-iterations 串成一條 stream</p>
         <div className="flex gap-px">
           {Array.from({ length: total }, (_, i) => {
-            const cta = Math.floor(i / perCta);
-            const tileIdx = Math.floor(i / 3);
-            const startOfTile = i % 3 === 0;
+            const cta = Math.floor(i / per_cta);
+            const tile_idx = Math.floor(i / 3);
+            const start_of_tile = i % 3 === 0;
             return (
               <div
                 key={i}
                 className="flex h-8 items-center justify-center border-l text-[9px] text-black/70"
                 style={{
-                  backgroundColor: ctaColors[cta],
+                  backgroundColor: cta_colors[cta],
                   flexGrow: 1,
-                  borderColor: startOfTile ? 'rgba(0,0,0,0.45)' : 'transparent',
+                  borderColor: start_of_tile ? 'rgba(0,0,0,0.45)' : 'transparent',
                 }}
-                title={`tile ${tileIdx}`}
+                title={`tile ${tile_idx}`}
               >
-                {startOfTile ? `t${tileIdx}` : ''}
+                {start_of_tile ? `t${tile_idx}` : ''}
               </div>
             );
           })}
         </div>
         <div className="mt-2 flex gap-4">
-          {ctaColors.map((c, i) => (
+          {cta_colors.map((c, i) => (
             <Chip key={i} color={c}>
               CTA{i} (等量工作)
             </Chip>
@@ -470,7 +470,7 @@ export function WaveQuantizationFigure() {
                     className="flex h-9 w-16 items-center justify-center rounded border text-[10px] font-mono"
                     style={
                       filled
-                        ? { backgroundColor: kC, borderColor: kC, color: 'rgba(0,0,0,0.75)' }
+                        ? { backgroundColor: kAccumulatorC, borderColor: kAccumulatorC, color: 'rgba(0,0,0,0.75)' }
                         : { borderColor: '#ff7b72', borderStyle: 'dashed', color: '#ff7b72' }
                     }
                   >
@@ -499,9 +499,9 @@ export function CtaSwizzleFigure() {
   }
   function swizzleOrder(row: number, col: number) {
     const band = 2;
-    const bandId = Math.floor(col / band);
-    const colInBand = col % band;
-    return bandId * (dim * band) + row * band + colInBand;
+    const band_id = Math.floor(col / band);
+    const col_in_band = col % band;
+    return band_id * (dim * band) + row * band + col_in_band;
   }
   function shade(order: number) {
     // map order 0..35 to a lightness ramp of the accent color
@@ -516,8 +516,8 @@ export function CtaSwizzleFigure() {
         <>
           CTA 的排程順序決定同時在跑的 tile 落在 C 的哪裡。 <strong>Row-major</strong> 順序讓同時活躍的 tile 攤在一整列,
           共用的 A row / B column 很快被擠出 L2; <strong>swizzle</strong> (rasterization) 把 launch 順序重排成一塊塊,
-          讓鄰近時間啟動的 tile 在空間上也相鄰, 於是它們共享的 <span style={{ color: kA }}>A</span> /{' '}
-          <span style={{ color: kB }}>B</span> 條帶留在 L2 被重複命中。 色深 = launch 先後。
+          讓鄰近時間啟動的 tile 在空間上也相鄰, 於是它們共享的 <span style={{ color: kOperandA }}>A</span> /{' '}
+          <span style={{ color: kOperandB }}>B</span> 條帶留在 L2 被重複命中。 色深 = launch 先後。
         </>
       }
     >
@@ -544,12 +544,12 @@ export function CtaSwizzleFigure() {
 
 export function EpilogueFigure() {
   const stages = [
-    { label: 'K-loop mainloop', sub: 'MMA 累加 → acc (register)', color: kC },
+    { label: 'K-loop mainloop', sub: 'MMA 累加 → acc (register)', color: kAccumulatorC },
     { label: 'α·acc', sub: 'scale', color: kAccent },
-    { label: '+ β·C', sub: 'bias / residual', color: kA },
-    { label: 'activation', sub: 'GELU / ReLU …', color: kB },
+    { label: '+ β·C', sub: 'bias / residual', color: kOperandA },
+    { label: 'activation', sub: 'GELU / ReLU …', color: kOperandB },
     { label: 'cast', sub: 'fp32 → fp16/fp8/int8', color: kIdle },
-    { label: 'store C', sub: 'global memory', color: kC },
+    { label: 'store C', sub: 'global memory', color: kAccumulatorC },
   ];
   return (
     <Fig

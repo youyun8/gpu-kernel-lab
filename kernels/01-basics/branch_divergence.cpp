@@ -15,7 +15,7 @@ namespace {
 
 constexpr int kBlockSize = 256;
 constexpr int kWarpSize = 32;
-constexpr int kN = 1 << 24;
+constexpr int kSizeN = 1 << 24;
 constexpr int kHeavyIters = 200;
 constexpr int kLightIters = 20;
 
@@ -49,9 +49,9 @@ __global__ void branchDivergent(const float* in, float* out, int n) {
 }  // namespace
 
 int main() {
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
-  std::vector<float> host(kN);
-  for (int i = 0; i < kN; ++i) host[i] = static_cast<float>(i % 7) * 0.1f;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
+  std::vector<float> host(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) host[i] = static_cast<float>(i % 7) * 0.1f;
 
   float* dev_in = nullptr;
   float* dev_out = nullptr;
@@ -60,11 +60,11 @@ int main() {
   GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
-  const int grid = (kN + kBlockSize - 1) / kBlockSize;
+  const int grid = (kSizeN + kBlockSize - 1) / kBlockSize;
   const size_t moved = 2 * bytes;
 
-  auto launch_uniform = [&]() { GPU_LAUNCH(branchUniform, grid, kBlockSize, 0, dev_in, dev_out, kN); };
-  auto launch_divergent = [&]() { GPU_LAUNCH(branchDivergent, grid, kBlockSize, 0, dev_in, dev_out, kN); };
+  auto launch_uniform = [&]() { GPU_LAUNCH(branchUniform, grid, kBlockSize, 0, dev_in, dev_out, kSizeN); };
+  auto launch_divergent = [&]() { GPU_LAUNCH(branchDivergent, grid, kBlockSize, 0, dev_in, dev_out, kSizeN); };
 
   std::printf("branch_divergence: same total work, warp-aligned vs lane-interleaved branch\n");
   gklab::report("uniform_by_warp", gklab::benchmarkKernel(launch_uniform, moved, 0.0), kPeakGbPerSec, 0.0);

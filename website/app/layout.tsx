@@ -4,12 +4,12 @@ import { ThemeProvider } from '@/components/ThemeProvider';
 import { SettingsProvider } from '@/components/SettingsProvider';
 import { SiteHeader } from '@/components/SiteHeader';
 import { SiteFooter } from '@/components/SiteFooter';
-import { siteConfig } from '@/lib/site';
+import { kSiteConfig } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: {
-    default: `${siteConfig.name} — ${siteConfig.tagline}`,
-    template: `%s | ${siteConfig.name}`,
+    default: `${kSiteConfig.name} — ${kSiteConfig.tagline}`,
+    template: `%s | ${kSiteConfig.name}`,
   },
   description:
     'GPU Kernel Lab 是一個以繁體中文撰寫的 CUDA/ROCm kernel 優化學習網站, 從入門到專家, 搭配可執行的 kernels、benchmark 與 profiling 範例。',

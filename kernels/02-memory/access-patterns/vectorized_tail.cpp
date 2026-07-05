@@ -44,15 +44,15 @@ __global__ void saxpyTail(const float* x, float* y, float a, int tail_start, int
 }  // namespace
 
 int main() {
-  constexpr int kN = (1 << 24) + 3;  // deliberately not divisible by 4
-  constexpr float kA = 2.0f;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = (1 << 24) + 3;  // deliberately not divisible by 4
+  constexpr float kScaleA = 2.0f;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
 
-  std::vector<float> host_x(kN), host_y(kN), expected(kN), result(kN);
-  for (int i = 0; i < kN; ++i) {
+  std::vector<float> host_x(kSizeN), host_y(kSizeN), expected(kSizeN), result(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
     host_x[i] = static_cast<float>(i % 101);
     host_y[i] = static_cast<float>(i % 53);
-    expected[i] = kA * host_x[i] + host_y[i];
+    expected[i] = kScaleA * host_x[i] + host_y[i];
   }
 
   float* dev_x = nullptr;
@@ -66,8 +66,8 @@ int main() {
 
   // Scalar baseline.
   GPU_CHECK(gpuMemcpyHostToDevice(dev_y, host_y.data(), bytes));
-  const int grid_scalar = (kN + kBlockSize - 1) / kBlockSize;
-  auto launch_scalar = [&]() { GPU_LAUNCH(saxpyScalar, grid_scalar, kBlockSize, 0, dev_x, dev_y, kA, kN); };
+  const int grid_scalar = (kSizeN + kBlockSize - 1) / kBlockSize;
+  auto launch_scalar = [&]() { GPU_LAUNCH(saxpyScalar, grid_scalar, kBlockSize, 0, dev_x, dev_y, kScaleA, kSizeN); };
   launch_scalar();
   GPU_CHECK(gpuDeviceSynchronize());
   GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_y, bytes));
@@ -78,13 +78,13 @@ int main() {
   gklab::report("saxpy_scalar", gklab::benchmarkKernel(launch_scalar, moved, 0.0), kPeakGbPerSec, 0.0);
 
   // Vectorized body + scalar tail.
-  const int n4 = kN / 4;           // 4,194,304 float4 elements
+  const int n4 = kSizeN / 4;           // 4,194,304 float4 elements
   const int tail_start = n4 * 4;   // 3 leftover floats
   const int grid_vec = (n4 + kBlockSize - 1) / kBlockSize;
   auto launch_vec = [&]() {
     GPU_LAUNCH(saxpyVec4Body, grid_vec, kBlockSize, 0, reinterpret_cast<const float4*>(dev_x),
-               reinterpret_cast<float4*>(dev_y), kA, n4);
-    GPU_LAUNCH(saxpyTail, 1, kBlockSize, 0, dev_x, dev_y, kA, tail_start, kN);
+               reinterpret_cast<float4*>(dev_y), kScaleA, n4);
+    GPU_LAUNCH(saxpyTail, 1, kBlockSize, 0, dev_x, dev_y, kScaleA, tail_start, kSizeN);
   };
   GPU_CHECK(gpuMemcpyHostToDevice(dev_y, host_y.data(), bytes));
   launch_vec();
@@ -95,7 +95,7 @@ int main() {
   GPU_CHECK(gpuMemcpyHostToDevice(dev_y, host_y.data(), bytes));
   gklab::report("saxpy_float4_tail", gklab::benchmarkKernel(launch_vec, moved, 0.0), kPeakGbPerSec, 0.0);
 
-  std::printf("n = %d (tail of %d scalars handled by cleanup kernel)\n", kN, kN - tail_start);
+  std::printf("n = %d (tail of %d scalars handled by cleanup kernel)\n", kSizeN, kSizeN - tail_start);
 
   GPU_CHECK(gpuFree(dev_x));
   GPU_CHECK(gpuFree(dev_y));

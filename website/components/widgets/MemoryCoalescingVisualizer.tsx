@@ -18,17 +18,17 @@ export function MemoryCoalescingVisualizer() {
 
   const { addresses, segments, efficiency } = useMemo(() => {
     const addrs = Array.from({ length: kWarpSize }, (_, lane) => (offset + lane * stride) * kBytesPerElement);
-    const touchedSegments = new Set(addrs.map((addr) => Math.floor(addr / kSegmentBytes)));
-    const usefulBytes = kWarpSize * kBytesPerElement;
-    const movedBytes = touchedSegments.size * kSegmentBytes;
+    const touched_segments = new Set(addrs.map((addr) => Math.floor(addr / kSegmentBytes)));
+    const useful_bytes = kWarpSize * kBytesPerElement;
+    const moved_bytes = touched_segments.size * kSegmentBytes;
     return {
       addresses: addrs,
-      segments: [...touchedSegments].sort((a, b) => a - b),
-      efficiency: usefulBytes / movedBytes,
+      segments: [...touched_segments].sort((a, b) => a - b),
+      efficiency: useful_bytes / moved_bytes,
     };
   }, [stride, offset]);
 
-  const segmentIndex = new Map(segments.map((seg, i) => [seg, i]));
+  const segment_index = new Map(segments.map((seg, i) => [seg, i]));
   const palette = ['#39d353', '#58a6ff', '#f778ba', '#ffa657', '#a371f7', '#f85149'];
 
   return (
@@ -67,7 +67,7 @@ export function MemoryCoalescingVisualizer() {
         <div className="grid grid-cols-8 gap-1" role="img" aria-label={`一個 warp 的 32 個 threads,目前使用 ${segments.length} 個 memory transactions`}>
           {addresses.map((addr, lane) => {
             const seg = Math.floor(addr / kSegmentBytes);
-            const color = palette[(segmentIndex.get(seg) ?? 0) % palette.length];
+            const color = palette[(segment_index.get(seg) ?? 0) % palette.length];
             return (
               <div
                 key={lane}

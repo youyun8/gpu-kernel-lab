@@ -7,99 +7,99 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+kRoot = Path(__file__).resolve().parents[1]
 
-TEXT_BEFORE_OPEN = re.compile(
+kTextBeforeOpen = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9_%\*`」』])([（(])"
 )
-TEXT_AFTER_CLOSE = re.compile(
+kTextAfterClose = re.compile(
     r"([）)])([\u4e00-\u9fffA-Za-z0-9_%\*`「『])"
 )
 
 # Normalize spacing inside inline code / <code> blocks (not prose typography).
-CODE_PAREN_SPACING = [
+kCodeParenSpacing = [
     (re.compile(r"(\w)\s+\("), r"\1("),
     (re.compile(r"\(\s+"), "("),
     (re.compile(r"\s+\)"), ")"),
 ]
 
 
-def normalize_code_parens(text: str) -> str:
-    for pattern, repl in CODE_PAREN_SPACING:
+def normalizeCodeParens(text: str) -> str:
+    for pattern, repl in kCodeParenSpacing:
         text = pattern.sub(repl, text)
     return text
 
 
-def fix_prose_parens(text: str) -> str:
+def fixProseParens(text: str) -> str:
     prev = None
     while prev != text:
         prev = text
-        text = TEXT_BEFORE_OPEN.sub(r"\1 \2", text)
-        text = TEXT_AFTER_CLOSE.sub(r"\1 \2", text)
+        text = kTextBeforeOpen.sub(r"\1 \2", text)
+        text = kTextAfterClose.sub(r"\1 \2", text)
     return text
 
 
 # Punctuation followed by text (CJK, Latin, digits, quotes, etc.).
-TEXT_AFTER_PUNCT = re.compile(
+kTextAfterPunct = re.compile(
     r"([,，;；!?！？。]|(?<!:)[：:])(?=[\u4e00-\u9fffA-Za-z0-9「『(（*])"
 )
 
 # URL scheme, C++ scope, known host:port patterns.
-SKIP_COLON = re.compile(r":(?=/|$)|::|(?:localhost|127\.0\.0\.1):\d{2,5}")
+kSkipColon = re.compile(r":(?=/|$)|::|(?:localhost|127\.0\.0\.1):\d{2,5}")
 
 # Thousands separator in numbers (e.g. 1,000).
-SKIP_COMMA = re.compile(r"(?<=\d),(?=\d)")
+kSkipComma = re.compile(r"(?<=\d),(?=\d)")
 
-URL = re.compile(r"https?://[^\s'\"<>)}]+")
+kUrl = re.compile(r"https?://[^\s'\"<>)}]+")
 
 
-def inside_url(text: str, pos: int) -> bool:
+def insideUrl(text: str, pos: int) -> bool:
     line_start = text.rfind("\n", 0, pos) + 1
     line_end = text.find("\n", pos)
     if line_end == -1:
         line_end = len(text)
     line = text[line_start:line_end]
     rel = pos - line_start
-    return any(match.start() <= rel < match.end() for match in URL.finditer(line))
+    return any(match.start() <= rel < match.end() for match in kUrl.finditer(line))
 
 
-def fix_bold_colon_spacing(text: str) -> str:
+def fixBoldColonSpacing(text: str) -> str:
     return re.sub(r"\*\*([^*\n]+?:)\s+\*\*", r"**\1**", text)
 
 
-def fix_prose_punctuation(text: str) -> str:
+def fixProsePunctuation(text: str) -> str:
     def repl(match: re.Match[str]) -> str:
         punct = match.group(1)
         pos = match.start()
-        if inside_url(text, pos):
+        if insideUrl(text, pos):
             return punct
-        if punct in ",，" and SKIP_COMMA.match(text, match.start()):
+        if punct in ",，" and kSkipComma.match(text, match.start()):
             return punct
         if punct in ":：":
             snippet = text[max(0, pos - 16) : min(len(text), pos + 6)]
-            if SKIP_COLON.search(snippet):
+            if kSkipColon.search(snippet):
                 return punct
         return f"{punct} "
 
     prev = None
     while prev != text:
         prev = text
-        text = TEXT_AFTER_PUNCT.sub(repl, text)
+        text = kTextAfterPunct.sub(repl, text)
     return text
 
 
-def _fence_at_line_start(content: str, index: int) -> bool:
+def fenceAtLineStart(content: str, index: int) -> bool:
     line_start = content.rfind("\n", 0, index) + 1
     return content[line_start:index].strip() == ""
 
 
-def split_fences(content: str) -> list[tuple[str, str]]:
+def splitFences(content: str) -> list[tuple[str, str]]:
     segments: list[tuple[str, str]] = []
     i = 0
     n = len(content)
 
     while i < n:
-        if content.startswith("```", i) and _fence_at_line_start(content, i):
+        if content.startswith("```", i) and fenceAtLineStart(content, i):
             end = content.find("```", i + 3)
             if end == -1:
                 segments.append(("fence", content[i:]))
@@ -112,7 +112,7 @@ def split_fences(content: str) -> list[tuple[str, str]]:
         next_fence = n
         pos = content.find("```", i)
         while pos != -1:
-            if _fence_at_line_start(content, pos):
+            if fenceAtLineStart(content, pos):
                 next_fence = pos
                 break
             pos = content.find("```", pos + 3)
@@ -123,7 +123,7 @@ def split_fences(content: str) -> list[tuple[str, str]]:
     return segments
 
 
-def split_inline_math(content: str) -> list[tuple[str, str]]:
+def splitInlineMath(content: str) -> list[tuple[str, str]]:
     segments: list[tuple[str, str]] = []
     i = 0
     n = len(content)
@@ -184,7 +184,7 @@ def split_inline_math(content: str) -> list[tuple[str, str]]:
     return segments
 
 
-def fix_backtick_adjacency(content: str) -> str:
+def fixBacktickAdjacency(content: str) -> str:
     """Add prose space between inline code and adjacent punctuation."""
     content = re.sub(
         r"([\u4e00-\u9fffA-Za-z0-9_%])`([（(])([^`]+)`([）)])([\u4e00-\u9fffA-Za-z0-9_%])",
@@ -204,23 +204,23 @@ def fix_backtick_adjacency(content: str) -> str:
     return content
 
 
-def process_text_chunk(content: str) -> str:
-    content = fix_backtick_adjacency(content)
-    content = fix_bold_colon_spacing(content)
+def processTextChunk(content: str) -> str:
+    content = fixBacktickAdjacency(content)
+    content = fixBoldColonSpacing(content)
     out: list[str] = []
-    for kind, chunk in split_inline_math(content):
+    for kind, chunk in splitInlineMath(content):
         if kind == "prose":
-            chunk = fix_prose_parens(chunk)
-            out.append(fix_prose_punctuation(chunk))
+            chunk = fixProseParens(chunk)
+            out.append(fixProsePunctuation(chunk))
         elif kind == "inline":
             if chunk.startswith("<code>") and chunk.endswith("</code>"):
                 out.append(
                     "<code>"
-                    + normalize_code_parens(chunk[6:-7])
+                    + normalizeCodeParens(chunk[6:-7])
                     + "</code>"
                 )
             elif chunk.startswith("`") and chunk.endswith("`"):
-                out.append("`" + normalize_code_parens(chunk[1:-1]) + "`")
+                out.append("`" + normalizeCodeParens(chunk[1:-1]) + "`")
             else:
                 out.append(chunk)
         else:
@@ -228,19 +228,19 @@ def process_text_chunk(content: str) -> str:
     return "".join(out)
 
 
-def process_content(content: str) -> str:
+def processContent(content: str) -> str:
     out: list[str] = []
-    for kind, chunk in split_fences(content):
+    for kind, chunk in splitFences(content):
         if kind == "fence":
             out.append(chunk)
         else:
-            out.append(process_text_chunk(chunk))
+            out.append(processTextChunk(chunk))
     return "".join(out)
 
 
-def process_file(path: Path) -> bool:
+def processFile(path: Path) -> bool:
     original = path.read_text(encoding="utf-8")
-    updated = process_content(original)
+    updated = processContent(original)
     if updated != original:
         path.write_text(updated, encoding="utf-8")
         return True
@@ -256,12 +256,12 @@ def main() -> int:
     ]
     changed: list[Path] = []
     for pattern in patterns:
-        for path in ROOT.glob(pattern):
-            if process_file(path):
+        for path in kRoot.glob(pattern):
+            if processFile(path):
                 changed.append(path)
 
     for path in sorted(changed):
-        print(path.relative_to(ROOT))
+        print(path.relative_to(kRoot))
     print(f"\nUpdated {len(changed)} file(s).")
     return 0
 

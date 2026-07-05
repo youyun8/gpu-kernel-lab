@@ -42,14 +42,14 @@ __global__ void reduceTreeWarp(const float* in, float* out, int n) {
   }
   smem[tid] = sum;
   __syncthreads();
-  for (int s = blockDim.x / 2; s > warpSize; s >>= 1) {
+  for (int s = blockDim.x / 2; s > warp_size; s >>= 1) {
     if (tid < s) smem[tid] += smem[tid + s];
     __syncthreads();
   }
-  if (tid < warpSize) {
+  if (tid < warp_size) {
     float v = smem[tid];
-    if (blockDim.x >= 2 * warpSize) v += smem[tid + warpSize];
-    for (int o = warpSize / 2; o > 0; o >>= 1) {
+    if (blockDim.x >= 2 * warp_size) v += smem[tid + warp_size];
+    for (int o = warp_size / 2; o > 0; o >>= 1) {
 #if defined(USE_CUDA)
       v += __shfl_down_sync(0xffffffffu, v, o);
 #else
@@ -63,23 +63,23 @@ __global__ void reduceTreeWarp(const float* in, float* out, int n) {
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 24;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = 1 << 24;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
   constexpr int kGrid = 1024;
 
-  std::vector<float> host(kN);
-  double refAcc = 0.0;
-  for (int i = 0; i < kN; ++i) {
+  std::vector<float> host(kSizeN);
+  double ref_acc = 0.0;
+  for (int i = 0; i < kSizeN; ++i) {
     host[i] = static_cast<float>((i % 19) - 9) * 0.01f;
-    refAcc += host[i];
+    ref_acc += host[i];
   }
-  const float reference = static_cast<float>(refAcc);
+  const float reference = static_cast<float>(ref_acc);
 
-  float* devIn = nullptr;
-  float* devPartial = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devPartial), kGrid * sizeof(float)));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_partial = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_partial), kGrid * sizeof(float)));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   std::vector<float> partial(kGrid);
   constexpr double kPeakGbPerSec = 1555.0;
@@ -87,7 +87,7 @@ int main() {
   auto check = [&](const char* name, const std::function<void()>& launch) -> bool {
     launch();
     GPU_CHECK(gpuDeviceSynchronize());
-    GPU_CHECK(gpuMemcpyDeviceToHost(partial.data(), devPartial, kGrid * sizeof(float)));
+    GPU_CHECK(gpuMemcpyDeviceToHost(partial.data(), dev_partial, kGrid * sizeof(float)));
     double total = 0.0;
     for (float v : partial) total += v;
     const float rel = std::fabs(static_cast<float>(total) - reference) /
@@ -97,16 +97,16 @@ int main() {
       return false;
     }
     std::printf("%s correctness OK (%.4f vs %.4f)\n", name, total, reference);
-    gklab::report(name, gklab::benchmarkKernel(launch, bytes, kN), kPeakGbPerSec, 0.0);
+    gklab::report(name, gklab::benchmarkKernel(launch, bytes, kSizeN), kPeakGbPerSec, 0.0);
     return true;
   };
 
-  if (!check("reduce_tree", [&]() { GPU_LAUNCH(reduceTree, kGrid, kBlockSize, 0, devIn, devPartial, kN); }))
+  if (!check("reduce_tree", [&]() { GPU_LAUNCH(reduceTree, kGrid, kBlockSize, 0, dev_in, dev_partial, kSizeN); }))
     return EXIT_FAILURE;
-  if (!check("reduce_tree_warp", [&]() { GPU_LAUNCH(reduceTreeWarp, kGrid, kBlockSize, 0, devIn, devPartial, kN); }))
+  if (!check("reduce_tree_warp", [&]() { GPU_LAUNCH(reduceTreeWarp, kGrid, kBlockSize, 0, dev_in, dev_partial, kSizeN); }))
     return EXIT_FAILURE;
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devPartial));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_partial));
   return EXIT_SUCCESS;
 }

@@ -36,35 +36,35 @@ struct GemmBuffers {
 // benchmark reporting GFLOP/s and % of an illustrative peak.
 inline int runGemm(const char* name, int m, int n, int k,
                    const std::function<void(const GemmBuffers&)>& launch) {
-  const size_t bytesA = static_cast<size_t>(m) * k * sizeof(float);
-  const size_t bytesB = static_cast<size_t>(k) * n * sizeof(float);
-  const size_t bytesC = static_cast<size_t>(m) * n * sizeof(float);
+  const size_t bytes_a = static_cast<size_t>(m) * k * sizeof(float);
+  const size_t bytes_b = static_cast<size_t>(k) * n * sizeof(float);
+  const size_t bytes_c = static_cast<size_t>(m) * n * sizeof(float);
 
-  std::vector<float> hostA(static_cast<size_t>(m) * k);
-  std::vector<float> hostB(static_cast<size_t>(k) * n);
-  std::vector<float> hostC(static_cast<size_t>(m) * n);
+  std::vector<float> host_a(static_cast<size_t>(m) * k);
+  std::vector<float> host_b(static_cast<size_t>(k) * n);
+  std::vector<float> host_c(static_cast<size_t>(m) * n);
   std::vector<float> reference(static_cast<size_t>(m) * n);
-  for (size_t i = 0; i < hostA.size(); ++i) hostA[i] = static_cast<float>((i % 13) - 6) * 0.1f;
-  for (size_t i = 0; i < hostB.size(); ++i) hostB[i] = static_cast<float>((i % 7) - 3) * 0.2f;
-  cpuGemm(hostA, hostB, reference, m, n, k);
+  for (size_t i = 0; i < host_a.size(); ++i) host_a[i] = static_cast<float>((i % 13) - 6) * 0.1f;
+  for (size_t i = 0; i < host_b.size(); ++i) host_b[i] = static_cast<float>((i % 7) - 3) * 0.2f;
+  cpuGemm(host_a, host_b, reference, m, n, k);
 
   GemmBuffers buf;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.a), bytesA));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.b), bytesB));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.c), bytesC));
-  GPU_CHECK(gpuMemcpyHostToDevice(buf.a, hostA.data(), bytesA));
-  GPU_CHECK(gpuMemcpyHostToDevice(buf.b, hostB.data(), bytesB));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.a), bytes_a));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.b), bytes_b));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&buf.c), bytes_c));
+  GPU_CHECK(gpuMemcpyHostToDevice(buf.a, host_a.data(), bytes_a));
+  GPU_CHECK(gpuMemcpyHostToDevice(buf.b, host_b.data(), bytes_b));
 
   launch(buf);
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(hostC.data(), buf.c, bytesC));
-  const bool ok = verifyClose(hostC, reference, 1.0e-2f);
+  GPU_CHECK(gpuMemcpyDeviceToHost(host_c.data(), buf.c, bytes_c));
+  const bool ok = verifyClose(host_c, reference, 1.0e-2f);
 
   const double flops = 2.0 * m * n * k;
-  const size_t bytesMoved = bytesA + bytesB + bytesC;
+  const size_t bytes_moved = bytes_a + bytes_b + bytes_c;
   constexpr double kPeakGbPerSec = 1555.0;
   constexpr double kPeakGflopPerSec = 19500.0;
-  report(name, benchmarkKernel([&]() { launch(buf); }, bytesMoved, flops), kPeakGbPerSec,
+  report(name, benchmarkKernel([&]() { launch(buf); }, bytes_moved, flops), kPeakGbPerSec,
          kPeakGflopPerSec);
 
   GPU_CHECK(gpuFree(buf.a));

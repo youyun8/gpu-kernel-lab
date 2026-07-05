@@ -4,7 +4,7 @@ export interface SearchDoc {
   url: string;
   title: string;
   section: string;
-  trackColor: string;
+  track_color: string;
   summary: string;
   headings: string[];
   text: string;
@@ -14,7 +14,7 @@ export interface SearchHit {
   doc: SearchDoc;
   score: number;
   /** Which field the preview snippet was pulled from. */
-  snippetSource: 'heading' | 'summary' | 'text' | null;
+  snippet_source: 'heading' | 'summary' | 'text' | null;
   snippet: string;
 }
 
@@ -39,35 +39,35 @@ function excerpt(field: string, query: string, radius = 70): string {
  * the same words scattered across a field. Pure string matching (no
  * tokenizer/stemmer) so CJK substrings match naturally without segmentation.
  */
-function scoreDoc(doc: SearchDoc, query: string, tokens: string[]): { score: number; snippetSource: SearchHit['snippetSource'] } {
+function scoreDoc(doc: SearchDoc, query: string, tokens: string[]): { score: number; snippet_source: SearchHit['snippet_source'] } {
   let score = 0;
-  let snippetSource: SearchHit['snippetSource'] = null;
+  let snippet_source: SearchHit['snippet_source'] = null;
 
   const title = doc.title.toLowerCase();
-  const headingsJoined = doc.headings.join(' • ');
-  const headingsLower = headingsJoined.toLowerCase();
+  const headings_joined = doc.headings.join(' • ');
+  const headings_lower = headings_joined.toLowerCase();
   const summary = doc.summary.toLowerCase();
   const text = doc.text.toLowerCase();
 
   if (title.includes(query)) {
     score += 100;
-    snippetSource = snippetSource ?? null; // title itself is shown as the result title already
+    snippet_source = snippet_source ?? null; // title itself is shown as the result title already
   }
   for (const token of tokens) {
     if (title.includes(token)) score += 30;
   }
 
-  if (headingsLower.includes(query)) {
+  if (headings_lower.includes(query)) {
     score += 45;
-    snippetSource = snippetSource ?? 'heading';
+    snippet_source = snippet_source ?? 'heading';
   }
   for (const token of tokens) {
-    if (headingsLower.includes(token)) score += 12;
+    if (headings_lower.includes(token)) score += 12;
   }
 
   if (summary.includes(query)) {
     score += 25;
-    snippetSource = snippetSource ?? 'summary';
+    snippet_source = snippet_source ?? 'summary';
   }
   for (const token of tokens) {
     if (summary.includes(token)) score += 6;
@@ -75,13 +75,13 @@ function scoreDoc(doc: SearchDoc, query: string, tokens: string[]): { score: num
 
   if (text.includes(query)) {
     score += 14;
-    snippetSource = snippetSource ?? 'text';
+    snippet_source = snippet_source ?? 'text';
   }
   for (const token of tokens) {
     if (text.includes(token)) score += 2;
   }
 
-  return { score, snippetSource };
+  return { score, snippet_source };
 }
 
 /** Rank `docs` against `query`, returning the top `limit` hits with a preview snippet. */
@@ -92,10 +92,10 @@ export function search(docs: SearchDoc[], query: string, limit = 8): SearchHit[]
 
   const hits: SearchHit[] = [];
   for (const doc of docs) {
-    const { score, snippetSource } = scoreDoc(doc, trimmed, tokens);
+    const { score, snippet_source } = scoreDoc(doc, trimmed, tokens);
     if (score <= 0) continue;
-    const field = snippetSource === 'heading' ? doc.headings.join(' • ') : snippetSource === 'summary' ? doc.summary : snippetSource === 'text' ? doc.text : doc.summary;
-    hits.push({ doc, score, snippetSource, snippet: excerpt(field, trimmed) || doc.summary });
+    const field = snippet_source === 'heading' ? doc.headings.join(' • ') : snippet_source === 'summary' ? doc.summary : snippet_source === 'text' ? doc.text : doc.summary;
+    hits.push({ doc, score, snippet_source, snippet: excerpt(field, trimmed) || doc.summary });
   }
 
   hits.sort((a, b) => b.score - a.score);

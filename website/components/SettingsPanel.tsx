@@ -5,19 +5,19 @@ import { useTheme } from 'next-themes';
 import { useSettings } from '@/components/SettingsProvider';
 import type { ContentWidth, TextSize } from '@/lib/settings';
 
-const themeOptions = [
+const kThemeOptions = [
   { value: 'system', label: '跟隨系統', description: '使用作業系統目前的外觀設定。' },
   { value: 'light', label: '淺色', description: '固定使用淺色介面。' },
   { value: 'dark', label: '深色', description: '固定使用深色介面。' },
 ] as const;
 
-const contentWidthOptions: { value: ContentWidth; label: string; description: string }[] = [
+const kContentWidthOptions: { value: ContentWidth; label: string; description: string }[] = [
   { value: 'standard', label: '標準', description: '維持較集中的閱讀寬度，適合逐章閱讀。' },
   { value: 'wide', label: '寬', description: '放寬內容寬度至約 1760px，適合表格與大螢幕。' },
   { value: 'full', label: '全幅', description: '內容填滿視窗寬度，消除兩側空白，適合超寬螢幕。' },
 ];
 
-const textSizeOptions: { value: TextSize; label: string; description: string }[] = [
+const kTextSizeOptions: { value: TextSize; label: string; description: string }[] = [
   { value: 'small', label: '小', description: '提高資訊密度，適合大螢幕快速掃讀。' },
   { value: 'standard', label: '標準', description: '使用預設文字大小。' },
   { value: 'large', label: '大', description: '放大文字，適合長時間閱讀。' },
@@ -74,9 +74,9 @@ function SettingsSection({
 
 export function SettingsPanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
-  const { mounted, contentWidth, textSize, codeWrap, setContentWidth, setTextSize, setCodeWrap } = useSettings();
+  const { mounted, content_width, text_size, code_wrap, setContentWidth, setTextSize, setCodeWrap } = useSettings();
 
-  const currentTheme = mounted ? theme ?? 'system' : 'system';
+  const current_theme = mounted ? theme ?? 'system' : 'system';
 
   return (
     <div className="grid gap-5 sm:grid-cols-2">
@@ -86,10 +86,10 @@ export function SettingsPanel() {
         description="選擇網站的色彩模式。系統模式會依照瀏覽器或作業系統偏好自動切換。"
       >
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
-          {themeOptions.map((option) => (
+          {kThemeOptions.map((option) => (
             <OptionCard
               key={option.value}
-              selected={currentTheme === option.value}
+              selected={current_theme === option.value}
               label={option.label}
               description={option.description}
               onClick={() => setTheme(option.value)}
@@ -107,10 +107,10 @@ export function SettingsPanel() {
         description="選擇主要內容區的最大寬度；寬版會讓大螢幕顯示更多內容。"
       >
         <div className="mt-5 grid gap-3">
-          {contentWidthOptions.map((option) => (
+          {kContentWidthOptions.map((option) => (
             <OptionCard
               key={option.value}
-              selected={contentWidth === option.value}
+              selected={content_width === option.value}
               label={option.label}
               description={option.description}
               onClick={() => setContentWidth(option.value)}
@@ -125,10 +125,10 @@ export function SettingsPanel() {
         description="調整整個網站的文字比例，包含導覽、側欄與章節內容。"
       >
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
-          {textSizeOptions.map((option) => (
+          {kTextSizeOptions.map((option) => (
             <OptionCard
               key={option.value}
-              selected={textSize === option.value}
+              selected={text_size === option.value}
               label={option.label}
               description={option.description}
               onClick={() => setTextSize(option.value)}
@@ -145,7 +145,7 @@ export function SettingsPanel() {
         <label className="mt-5 flex items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
-            checked={codeWrap}
+            checked={code_wrap}
             onChange={(event) => setCodeWrap(event.target.checked)}
             className="h-4 w-4 rounded border-border accent-primary"
           />

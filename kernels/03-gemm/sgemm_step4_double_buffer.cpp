@@ -7,34 +7,34 @@
 
 namespace {
 
-constexpr int kBM = 64;
-constexpr int kBN = 64;
-constexpr int kBK = 16;
-constexpr int kTM = 4;
-constexpr int kTN = 4;
+constexpr int kBlockM = 64;
+constexpr int kBlockN = 64;
+constexpr int kBlockK = 16;
+constexpr int kThreadM = 4;
+constexpr int kThreadN = 4;
 
 __global__ void sgemmDoubleBuffer(const float* a, const float* b, float* c, int m, int n, int k) {
-  __shared__ float sA[2][kBK][kBM];
-  __shared__ float sB[2][kBK][kBN];
+  __shared__ float s_a[2][kBlockK][kBlockM];
+  __shared__ float s_b[2][kBlockK][kBlockN];
 
-  const int threadCol = threadIdx.x % (kBN / kTN);
-  const int threadRow = threadIdx.x / (kBN / kTN);
-  const int blockRow = blockIdx.y * kBM;
-  const int blockCol = blockIdx.x * kBN;
-  const int threadsPerBlock = (kBM / kTM) * (kBN / kTN);
+  const int thread_col = threadIdx.x % (kBlockN / kThreadN);
+  const int thread_row = threadIdx.x / (kBlockN / kThreadN);
+  const int block_row = blockIdx.y * kBlockM;
+  const int block_col = blockIdx.x * kBlockN;
+  const int threads_per_block = (kBlockM / kThreadM) * (kBlockN / kThreadN);
 
-  float acc[kTM][kTN] = {};
+  float acc[kThreadM][kThreadN] = {};
 
   auto loadTile = [&](int t, int stage) {
-    for (int idx = threadIdx.x; idx < kBM * kBK; idx += threadsPerBlock) {
-      int r = idx / kBK;
-      int col = idx % kBK;
-      sA[stage][col][r] = a[(blockRow + r) * k + (t + col)];
+    for (int idx = threadIdx.x; idx < kBlockM * kBlockK; idx += threads_per_block) {
+      int r = idx / kBlockK;
+      int col = idx % kBlockK;
+      s_a[stage][col][r] = a[(block_row + r) * k + (t + col)];
     }
-    for (int idx = threadIdx.x; idx < kBK * kBN; idx += threadsPerBlock) {
-      int r = idx / kBN;
-      int col = idx % kBN;
-      sB[stage][r][col] = b[(t + r) * n + (blockCol + col)];
+    for (int idx = threadIdx.x; idx < kBlockK * kBlockN; idx += threads_per_block) {
+      int r = idx / kBlockN;
+      int col = idx % kBlockN;
+      s_b[stage][r][col] = b[(t + r) * n + (block_col + col)];
     }
   };
 
@@ -42,36 +42,36 @@ __global__ void sgemmDoubleBuffer(const float* a, const float* b, float* c, int 
   loadTile(0, stage);
   __syncthreads();
 
-  for (int t = 0; t < k; t += kBK) {
-    const int nextT = t + kBK;
-    const int nextStage = stage ^ 1;
-    if (nextT < k) {
-      loadTile(nextT, nextStage);  // prefetch next tile into the other buffer
+  for (int t = 0; t < k; t += kBlockK) {
+    const int next_t = t + kBlockK;
+    const int next_stage = stage ^ 1;
+    if (next_t < k) {
+      loadTile(next_t, next_stage);  // prefetch next tile into the other buffer
     }
 
 #pragma unroll
-    for (int p = 0; p < kBK; ++p) {
-      float regA[kTM];
-      float regB[kTN];
+    for (int p = 0; p < kBlockK; ++p) {
+      float reg_a[kThreadM];
+      float reg_b[kThreadN];
 #pragma unroll
-      for (int i = 0; i < kTM; ++i) regA[i] = sA[stage][p][threadRow * kTM + i];
+      for (int i = 0; i < kThreadM; ++i) reg_a[i] = s_a[stage][p][thread_row * kThreadM + i];
 #pragma unroll
-      for (int j = 0; j < kTN; ++j) regB[j] = sB[stage][p][threadCol * kTN + j];
+      for (int j = 0; j < kThreadN; ++j) reg_b[j] = s_b[stage][p][thread_col * kThreadN + j];
 #pragma unroll
-      for (int i = 0; i < kTM; ++i)
+      for (int i = 0; i < kThreadM; ++i)
 #pragma unroll
-        for (int j = 0; j < kTN; ++j) acc[i][j] += regA[i] * regB[j];
+        for (int j = 0; j < kThreadN; ++j) acc[i][j] += reg_a[i] * reg_b[j];
     }
     __syncthreads();
-    stage = nextStage;
+    stage = next_stage;
   }
 
 #pragma unroll
-  for (int i = 0; i < kTM; ++i)
+  for (int i = 0; i < kThreadM; ++i)
 #pragma unroll
-    for (int j = 0; j < kTN; ++j) {
-      int row = blockRow + threadRow * kTM + i;
-      int col = blockCol + threadCol * kTN + j;
+    for (int j = 0; j < kThreadN; ++j) {
+      int row = block_row + thread_row * kThreadM + i;
+      int col = block_col + thread_col * kThreadN + j;
       if (row < m && col < n) c[row * n + col] = acc[i][j];
     }
 }
@@ -79,13 +79,13 @@ __global__ void sgemmDoubleBuffer(const float* a, const float* b, float* c, int 
 }  // namespace
 
 int main() {
-  constexpr int kM = 1024;
-  constexpr int kN = 1024;
-  constexpr int kK = 1024;
-  const int threadsPerBlock = (kBM / kTM) * (kBN / kTN);
-  dim3 block(threadsPerBlock);
-  dim3 grid(kN / kBN, kM / kBM);
-  return gklab::runGemm("sgemm_step4_double_buffer", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-    GPU_LAUNCH(sgemmDoubleBuffer, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+  constexpr int kSizeM = 1024;
+  constexpr int kSizeN = 1024;
+  constexpr int kSizeK = 1024;
+  const int threads_per_block = (kBlockM / kThreadM) * (kBlockN / kThreadN);
+  dim3 block(threads_per_block);
+  dim3 grid(kSizeN / kBlockN, kSizeM / kBlockM);
+  return gklab::runGemm("sgemm_step4_double_buffer", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+    GPU_LAUNCH(sgemmDoubleBuffer, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
   });
 }

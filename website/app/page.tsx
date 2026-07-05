@@ -1,11 +1,11 @@
 import Link from 'next/link';
 import { LearningPathMap } from '@/components/LearningPathMap';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
-import { siteConfig } from '@/lib/site';
-import { flatChapters } from '@/lib/curriculum';
+import { kSiteConfig } from '@/lib/site';
+import { kFlatChapters } from '@/lib/curriculum';
 
 export default function HomePage() {
-  const totalChapters = flatChapters.length;
+  const total_chapters = kFlatChapters.length;
   return (
     <AppWidthContainer as="main" className="px-4">
       <section className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-card via-accent to-card px-6 py-16 sm:px-12">
@@ -14,7 +14,7 @@ export default function HomePage() {
           從第一個 kernel 到 library 級 GEMM, 一步步把 GPU 榨到極限
         </h1>
         <p className="mt-5 max-w-2xl text-lg text-muted-foreground">
-          {siteConfig.name} 是一套漸進式的 kernel 優化課程: {totalChapters} 章結構化內容, 搭配可執行的 kernels、benchmark harness、profiling 腳本與互動元件, 涵蓋 NVIDIA (CUDA) 與 AMD (ROCm/HIP) 兩個平台。
+          {kSiteConfig.name} 是一套漸進式的 kernel 優化課程: {total_chapters} 章結構化內容, 搭配可執行的 kernels、benchmark harness、profiling 腳本與互動元件, 涵蓋 NVIDIA (CUDA) 與 AMD (ROCm/HIP) 兩個平台。
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <Link href="/chapters/a1-what-is-a-gpu" className="rounded-lg bg-primary px-5 py-2.5 font-medium text-primary-foreground transition hover:bg-primary/90">
@@ -31,7 +31,7 @@ export default function HomePage() {
 
       <section className="mt-12 grid gap-4 sm:grid-cols-3">
         <InfoCard title="目標讀者" body="會寫 C/C++、對效能有好奇心的工程師與研究者。 不需要 GPU 背景, 但假設你能讀基本的 C++。 從 Track 3 開始, 或依 profiler 找到的瓶頸直接跳章。" />
-        <InfoCard title="環境需求" body={`${siteConfig.requirements}。 需要 CMake ≥ 3.24、Python ≥ 3.10 (PyTorch 章節)。 無 GPU 也能讀內容並做 syntax-level 編譯驗證。`} />
+        <InfoCard title="環境需求" body={`${kSiteConfig.requirements}。 需要 CMake ≥ 3.24、Python ≥ 3.10 (PyTorch 章節)。 無 GPU 也能讀內容並做 syntax-level 編譯驗證。`} />
         <InfoCard title="數據誠實" body="網站上的預設圖表為示意數據 (illustrative)。 用 scripts/bench_all.py 在你自己的硬體上跑出真實數字, 再替換 JSON。" />
       </section>
 
@@ -40,7 +40,7 @@ export default function HomePage() {
         <p className="mb-4 text-sm text-muted-foreground">把 repo 跑起來, 確認 toolchain 正常, 然後打開第一章。</p>
         <pre className="overflow-x-auto rounded-lg border border-border bg-muted p-4 text-[13px] leading-6 text-foreground">
 {`# 1. clone 並啟動網站
-git clone ${siteConfig.repo}.git
+git clone ${kSiteConfig.repo}.git
 cd gpu-kernel-lab/website && npm install && npm run dev
 # 打開 http://localhost:3000
 

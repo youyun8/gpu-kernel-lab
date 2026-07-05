@@ -9,7 +9,7 @@ import TrackD from './track-d.mdx';
 import TrackE from './track-e.mdx';
 import TrackSp from './track-sp.mdx';
 
-export const exerciseComponents: Record<string, ComponentType> = {
+export const kExerciseComponents: Record<string, ComponentType> = {
   'track-p': TrackP,
   'track-m': TrackM,
   'track-a': TrackA,

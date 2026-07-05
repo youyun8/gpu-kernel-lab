@@ -34,27 +34,27 @@ __device__ unsigned int runTask(int task, int iters) {
   return blockReduceSum(local);
 }
 
-__global__ void runTasksStatic(const int* costs, unsigned int* out, int numTasks) {
+__global__ void runTasksStatic(const int* costs, unsigned int* out, int num_tasks) {
   int task = blockIdx.x;
-  if (task >= numTasks) return;
+  if (task >= num_tasks) return;
   unsigned int total = runTask(task, costs[task]);
   if (threadIdx.x == 0) out[task] = total;
 }
 
-__global__ void runTasksPersistent(const int* costs, unsigned int* out, int* nextTask, int numTasks) {
+__global__ void runTasksPersistent(const int* costs, unsigned int* out, int* next_task, int num_tasks) {
   // The whole block must agree on which chunk it owns. Only thread 0 performs
   // the atomic dequeue; the result is broadcast through shared memory so every
   // thread takes the same control-flow path through the block-wide barriers in
   // runTask()/blockReduceSum(). Letting every thread call atomicAdd() would give
   // each thread a different `begin`, diverge them across the loop, and corrupt
   // the __syncthreads()-based reduction (and can hang the block).
-  __shared__ int beginShared;
+  __shared__ int begin_shared;
   while (true) {
-    if (threadIdx.x == 0) beginShared = atomicAdd(nextTask, kChunkSize);
+    if (threadIdx.x == 0) begin_shared = atomicAdd(next_task, kChunkSize);
     __syncthreads();
-    int begin = beginShared;
-    if (begin >= numTasks) break;
-    int end = min(begin + kChunkSize, numTasks);
+    int begin = begin_shared;
+    if (begin >= num_tasks) break;
+    int end = min(begin + kChunkSize, num_tasks);
     for (int task = begin; task < end; ++task) {
       unsigned int total = runTask(task, costs[task]);
       if (threadIdx.x == 0) out[task] = total;
@@ -97,45 +97,45 @@ int main() {
     reference[task] = cpuTask(task, cost);
   }
 
-  int smCount = 1;
-  GPU_CHECK(gpuGetMultiprocessorCount(&smCount));
-  const int persistentBlocks = std::max(1, smCount * 2);
+  int sm_count = 1;
+  GPU_CHECK(gpuGetMultiprocessorCount(&sm_count));
+  const int persistent_blocks = std::max(1, sm_count * 2);
 
-  int* devCosts = nullptr;
-  int* devNext = nullptr;
-  unsigned int* devOut = nullptr;
-  const size_t costBytes = costs.size() * sizeof(int);
-  const size_t outBytes = reference.size() * sizeof(unsigned int);
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devCosts), costBytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), outBytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devNext), sizeof(int)));
-  GPU_CHECK(gpuMemcpyHostToDevice(devCosts, costs.data(), costBytes));
+  int* dev_costs = nullptr;
+  int* dev_next = nullptr;
+  unsigned int* dev_out = nullptr;
+  const size_t cost_bytes = costs.size() * sizeof(int);
+  const size_t out_bytes = reference.size() * sizeof(unsigned int);
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_costs), cost_bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), out_bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_next), sizeof(int)));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_costs, costs.data(), cost_bytes));
 
-  const size_t bytesMoved = costBytes + outBytes;
+  const size_t bytes_moved = cost_bytes + out_bytes;
   constexpr double kPeakGbPerSec = 1555.0;
 
-  auto runStatic = [&]() { GPU_LAUNCH(runTasksStatic, kTasks, kBlockSize, 0, devCosts, devOut, kTasks); };
+  auto runStatic = [&]() { GPU_LAUNCH(runTasksStatic, kTasks, kBlockSize, 0, dev_costs, dev_out, kTasks); };
   runStatic();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, outBytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, out_bytes));
   if (!verifyTasks("tasks_static", result, reference)) return EXIT_FAILURE;
-  gklab::report("tasks_static", gklab::benchmarkKernel(runStatic, bytesMoved, 0.0), kPeakGbPerSec, 0.0);
+  gklab::report("tasks_static", gklab::benchmarkKernel(runStatic, bytes_moved, 0.0), kPeakGbPerSec, 0.0);
 
   auto runPersistent = [&]() {
-    GPU_CHECK(gpuMemset(devNext, 0, sizeof(int)));
-    GPU_LAUNCH(runTasksPersistent, persistentBlocks, kBlockSize, 0, devCosts, devOut, devNext, kTasks);
+    GPU_CHECK(gpuMemset(dev_next, 0, sizeof(int)));
+    GPU_LAUNCH(runTasksPersistent, persistent_blocks, kBlockSize, 0, dev_costs, dev_out, dev_next, kTasks);
   };
   runPersistent();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, outBytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, out_bytes));
   if (!verifyTasks("tasks_persistent", result, reference)) return EXIT_FAILURE;
-  gklab::report("tasks_persistent", gklab::benchmarkKernel(runPersistent, bytesMoved, 0.0), kPeakGbPerSec,
+  gklab::report("tasks_persistent", gklab::benchmarkKernel(runPersistent, bytes_moved, 0.0), kPeakGbPerSec,
                 0.0);
 
-  std::printf("persistent blocks: %d (SM/CU count %d x 2)\n", persistentBlocks, smCount);
+  std::printf("persistent blocks: %d (SM/CU count %d x 2)\n", persistent_blocks, sm_count);
 
-  GPU_CHECK(gpuFree(devCosts));
-  GPU_CHECK(gpuFree(devOut));
-  GPU_CHECK(gpuFree(devNext));
+  GPU_CHECK(gpuFree(dev_costs));
+  GPU_CHECK(gpuFree(dev_out));
+  GPU_CHECK(gpuFree(dev_next));
   return EXIT_SUCCESS;
 }

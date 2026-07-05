@@ -55,23 +55,23 @@ void cpuTranspose(const std::vector<float>& in, std::vector<float>& out, int n) 
 }  // namespace
 
 int main() {
-  constexpr int kN = 2048;  // divisible by kTile
-  const size_t bytes = static_cast<size_t>(kN) * kN * sizeof(float);
+  constexpr int kSizeN = 2048;  // divisible by kTile
+  const size_t bytes = static_cast<size_t>(kSizeN) * kSizeN * sizeof(float);
 
-  std::vector<float> host(static_cast<size_t>(kN) * kN);
-  std::vector<float> reference(static_cast<size_t>(kN) * kN);
-  std::vector<float> result(static_cast<size_t>(kN) * kN);
+  std::vector<float> host(static_cast<size_t>(kSizeN) * kSizeN);
+  std::vector<float> reference(static_cast<size_t>(kSizeN) * kSizeN);
+  std::vector<float> result(static_cast<size_t>(kSizeN) * kSizeN);
   for (size_t i = 0; i < host.size(); ++i) host[i] = static_cast<float>(i % 251) * 0.5f;
-  cpuTranspose(host, reference, kN);
+  cpuTranspose(host, reference, kSizeN);
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   dim3 block(kTile, kTile);
-  dim3 grid(kN / kTile, kN / kTile);
+  dim3 grid(kSizeN / kTile, kSizeN / kTile);
   constexpr double kPeakGbPerSec = 1555.0;
 
   struct Variant {
@@ -85,15 +85,15 @@ int main() {
   };
 
   for (const auto& v : variants) {
-    auto launch = [&]() { GPU_LAUNCH(v.kernel, grid, block, 0, devIn, devOut, kN); };
+    auto launch = [&]() { GPU_LAUNCH(v.kernel, grid, block, 0, dev_in, dev_out, kSizeN); };
     launch();
     GPU_CHECK(gpuDeviceSynchronize());
-    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
     if (!gklab::verifyClose(result, reference)) return EXIT_FAILURE;
     gklab::report(v.name, gklab::benchmarkKernel(launch, 2 * bytes, 0.0), kPeakGbPerSec, 0.0);
   }
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

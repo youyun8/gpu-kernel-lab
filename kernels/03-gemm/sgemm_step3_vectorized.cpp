@@ -7,64 +7,64 @@
 
 namespace {
 
-constexpr int kBM = 64;
-constexpr int kBN = 64;
-constexpr int kBK = 16;
-constexpr int kTM = 4;
-constexpr int kTN = 4;
+constexpr int kBlockM = 64;
+constexpr int kBlockN = 64;
+constexpr int kBlockK = 16;
+constexpr int kThreadM = 4;
+constexpr int kThreadN = 4;
 
 __global__ void sgemmVectorized(const float* a, const float* b, float* c, int m, int n, int k) {
-  __shared__ float sA[kBK][kBM];
-  __shared__ float sB[kBK][kBN];
+  __shared__ float s_a[kBlockK][kBlockM];
+  __shared__ float s_b[kBlockK][kBlockN];
 
-  const int threadCol = threadIdx.x % (kBN / kTN);
-  const int threadRow = threadIdx.x / (kBN / kTN);
-  const int blockRow = blockIdx.y * kBM;
-  const int blockCol = blockIdx.x * kBN;
-  const int threadsPerBlock = (kBM / kTM) * (kBN / kTN);
+  const int thread_col = threadIdx.x % (kBlockN / kThreadN);
+  const int thread_row = threadIdx.x / (kBlockN / kThreadN);
+  const int block_row = blockIdx.y * kBlockM;
+  const int block_col = blockIdx.x * kBlockN;
+  const int threads_per_block = (kBlockM / kThreadM) * (kBlockN / kThreadN);
 
-  float acc[kTM][kTN] = {};
+  float acc[kThreadM][kThreadN] = {};
 
-  for (int t = 0; t < k; t += kBK) {
-    for (int idx = threadIdx.x; idx < kBM * kBK; idx += threadsPerBlock) {
-      int r = idx / kBK;
-      int col = idx % kBK;
-      sA[col][r] = a[(blockRow + r) * k + (t + col)];
+  for (int t = 0; t < k; t += kBlockK) {
+    for (int idx = threadIdx.x; idx < kBlockM * kBlockK; idx += threads_per_block) {
+      int r = idx / kBlockK;
+      int col = idx % kBlockK;
+      s_a[col][r] = a[(block_row + r) * k + (t + col)];
     }
     // Vectorized load of B: each float4 covers 4 consecutive columns.
-    for (int idx = threadIdx.x; idx < (kBK * kBN) / 4; idx += threadsPerBlock) {
-      int r = idx / (kBN / 4);
-      int col4 = idx % (kBN / 4);
-      const float4 v = reinterpret_cast<const float4*>(b)[((t + r) * n + blockCol) / 4 + col4];
-      sB[r][col4 * 4 + 0] = v.x;
-      sB[r][col4 * 4 + 1] = v.y;
-      sB[r][col4 * 4 + 2] = v.z;
-      sB[r][col4 * 4 + 3] = v.w;
+    for (int idx = threadIdx.x; idx < (kBlockK * kBlockN) / 4; idx += threads_per_block) {
+      int r = idx / (kBlockN / 4);
+      int col4 = idx % (kBlockN / 4);
+      const float4 v = reinterpret_cast<const float4*>(b)[((t + r) * n + block_col) / 4 + col4];
+      s_b[r][col4 * 4 + 0] = v.x;
+      s_b[r][col4 * 4 + 1] = v.y;
+      s_b[r][col4 * 4 + 2] = v.z;
+      s_b[r][col4 * 4 + 3] = v.w;
     }
     __syncthreads();
 
 #pragma unroll
-    for (int p = 0; p < kBK; ++p) {
-      float regA[kTM];
-      float regB[kTN];
+    for (int p = 0; p < kBlockK; ++p) {
+      float reg_a[kThreadM];
+      float reg_b[kThreadN];
 #pragma unroll
-      for (int i = 0; i < kTM; ++i) regA[i] = sA[p][threadRow * kTM + i];
+      for (int i = 0; i < kThreadM; ++i) reg_a[i] = s_a[p][thread_row * kThreadM + i];
 #pragma unroll
-      for (int j = 0; j < kTN; ++j) regB[j] = sB[p][threadCol * kTN + j];
+      for (int j = 0; j < kThreadN; ++j) reg_b[j] = s_b[p][thread_col * kThreadN + j];
 #pragma unroll
-      for (int i = 0; i < kTM; ++i)
+      for (int i = 0; i < kThreadM; ++i)
 #pragma unroll
-        for (int j = 0; j < kTN; ++j) acc[i][j] += regA[i] * regB[j];
+        for (int j = 0; j < kThreadN; ++j) acc[i][j] += reg_a[i] * reg_b[j];
     }
     __syncthreads();
   }
 
 #pragma unroll
-  for (int i = 0; i < kTM; ++i)
+  for (int i = 0; i < kThreadM; ++i)
 #pragma unroll
-    for (int j = 0; j < kTN; ++j) {
-      int row = blockRow + threadRow * kTM + i;
-      int col = blockCol + threadCol * kTN + j;
+    for (int j = 0; j < kThreadN; ++j) {
+      int row = block_row + thread_row * kThreadM + i;
+      int col = block_col + thread_col * kThreadN + j;
       if (row < m && col < n) c[row * n + col] = acc[i][j];
     }
 }
@@ -72,13 +72,13 @@ __global__ void sgemmVectorized(const float* a, const float* b, float* c, int m,
 }  // namespace
 
 int main() {
-  constexpr int kM = 1024;
-  constexpr int kN = 1024;
-  constexpr int kK = 1024;
-  const int threadsPerBlock = (kBM / kTM) * (kBN / kTN);
-  dim3 block(threadsPerBlock);
-  dim3 grid(kN / kBN, kM / kBM);
-  return gklab::runGemm("sgemm_step3_vectorized", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-    GPU_LAUNCH(sgemmVectorized, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+  constexpr int kSizeM = 1024;
+  constexpr int kSizeN = 1024;
+  constexpr int kSizeK = 1024;
+  const int threads_per_block = (kBlockM / kThreadM) * (kBlockN / kThreadN);
+  dim3 block(threads_per_block);
+  dim3 grid(kSizeN / kBlockN, kSizeM / kBlockM);
+  return gklab::runGemm("sgemm_step3_vectorized", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+    GPU_LAUNCH(sgemmVectorized, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
   });
 }

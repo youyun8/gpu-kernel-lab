@@ -57,7 +57,7 @@ import SP5 from './sp5-pipeline-parallelism.mdx';
 import SP6 from './sp6-serving-overlap-sglang.mdx';
 import SP7 from './sp7-library-pipelines-cutlass-ck-aiter.mdx';
 
-export const chapterComponents: Record<string, ComponentType> = {
+export const kChapterComponents: Record<string, ComponentType> = {
   'p0-parallelization-design': P0,
   'p1-cpu-threading-primitives': P1,
   'p2-data-races-locks-and-atomics': P2,

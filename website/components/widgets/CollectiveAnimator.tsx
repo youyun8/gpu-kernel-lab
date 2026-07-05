@@ -86,19 +86,19 @@ function simulate(primitive: Primitive, n: number): Step[] {
  */
 export function CollectiveAnimator() {
   const [primitive, setPrimitive] = useState<Primitive>('all-reduce');
-  const [numGpus, setNumGpus] = useState(4);
+  const [num_gpus, setNumGpus] = useState(4);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
 
-  const steps = useMemo(() => simulate(primitive, numGpus), [primitive, numGpus]);
-  const lastStep = steps.length - 1;
-  const current = steps[Math.min(step, lastStep)];
+  const steps = useMemo(() => simulate(primitive, num_gpus), [primitive, num_gpus]);
+  const last_step = steps.length - 1;
+  const current = steps[Math.min(step, last_step)];
 
   useEffect(() => {
     if (!playing) return;
     const timer = window.setInterval(() => {
       setStep((s) => {
-        if (s >= lastStep) {
+        if (s >= last_step) {
           setPlaying(false);
           return s;
         }
@@ -106,7 +106,7 @@ export function CollectiveAnimator() {
       });
     }, kPlayIntervalMs);
     return () => window.clearInterval(timer);
-  }, [playing, lastStep]);
+  }, [playing, last_step]);
 
   const reset = (p: Primitive, n: number) => {
     setPrimitive(p);
@@ -115,10 +115,10 @@ export function CollectiveAnimator() {
     setPlaying(false);
   };
 
-  const n = numGpus;
-  const totalSteps = primitive === 'all-reduce' ? 2 * (n - 1) : n - 1;
+  const n = num_gpus;
+  const total_steps = primitive === 'all-reduce' ? 2 * (n - 1) : n - 1;
   // Per GPU, every step moves 1/n of the message size S in a ring.
-  const busbwFactor = primitive === 'all-reduce' ? `2(n−1)/n = ${((2 * (n - 1)) / n).toFixed(2)}` : `(n−1)/n = ${((n - 1) / n).toFixed(2)}`;
+  const busbw_factor = primitive === 'all-reduce' ? `2(n−1)/n = ${((2 * (n - 1)) / n).toFixed(2)}` : `(n−1)/n = ${((n - 1) / n).toFixed(2)}`;
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -132,7 +132,7 @@ export function CollectiveAnimator() {
               type="button"
               role="radio"
               aria-checked={primitive === p}
-              onClick={() => reset(p, numGpus)}
+              onClick={() => reset(p, num_gpus)}
               className={`px-3 py-1.5 text-sm font-medium transition ${
                 primitive === p ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground'
               }`}
@@ -144,7 +144,7 @@ export function CollectiveAnimator() {
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
           GPUs:
           <select
-            value={numGpus}
+            value={num_gpus}
             onChange={(e) => reset(primitive, Number(e.target.value))}
             aria-label="GPU 數量"
             className="rounded-md border border-border bg-background px-2 py-1 text-foreground"
@@ -225,7 +225,7 @@ export function CollectiveAnimator() {
               setPlaying(false);
               return;
             }
-            if (step >= lastStep) setStep(0);
+            if (step >= last_step) setStep(0);
             setPlaying(true);
           }}
           aria-label={playing ? '暫停' : '播放'}
@@ -237,7 +237,7 @@ export function CollectiveAnimator() {
           type="button"
           onClick={() => {
             setPlaying(false);
-            setStep((s) => Math.min(lastStep, s + 1));
+            setStep((s) => Math.min(last_step, s + 1));
           }}
           aria-label="下一步"
           className="rounded-md border border-border p-2 text-muted-foreground transition hover:border-primary hover:text-foreground"
@@ -246,7 +246,7 @@ export function CollectiveAnimator() {
         </button>
         <p className="ml-2 text-sm text-muted-foreground" role="status">
           <span className="font-mono text-foreground">
-            {step}/{lastStep}
+            {step}/{last_step}
           </span>{' '}
           — {current.description}
         </p>
@@ -255,7 +255,7 @@ export function CollectiveAnimator() {
       <dl className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
         <div className="rounded-md bg-background p-3">
           <dt className="text-xs text-muted-foreground">總步數</dt>
-          <dd className="font-mono text-lg text-foreground">{totalSteps}</dd>
+          <dd className="font-mono text-lg text-foreground">{total_steps}</dd>
         </div>
         <div className="rounded-md bg-background p-3">
           <dt className="text-xs text-muted-foreground">每步每 GPU 傳輸量</dt>
@@ -263,14 +263,14 @@ export function CollectiveAnimator() {
         </div>
         <div className="rounded-md bg-background p-3">
           <dt className="text-xs text-muted-foreground">busbw / algbw</dt>
-          <dd className="font-mono text-lg text-foreground">{busbwFactor}</dd>
+          <dd className="font-mono text-lg text-foreground">{busbw_factor}</dd>
         </div>
       </dl>
 
       <p className="mt-3 text-xs text-muted-foreground">
-        Ring {kPrimitiveLabels[primitive]} 共 {totalSteps} 步, 每步每個 GPU 同時送出並收到 S/{n} 的資料 (S = message size),
+        Ring {kPrimitiveLabels[primitive]} 共 {total_steps} 步, 每步每個 GPU 同時送出並收到 S/{n} 的資料 (S = message size),
         所以每個 GPU 實際搬運 {primitive === 'all-reduce' ? `2(n−1)·S/n` : `(n−1)·S/n`} 的資料量 — 這正是 bus bandwidth 校正係數{' '}
-        {busbwFactor} 的來源。 GPU 數量越多, 係數越接近 {primitive === 'all-reduce' ? 2 : 1}, ring 演算法的頻寬利用率也越接近最優。
+        {busbw_factor} 的來源。 GPU 數量越多, 係數越接近 {primitive === 'all-reduce' ? 2 : 1}, ring 演算法的頻寬利用率也越接近最優。
       </p>
     </div>
   );

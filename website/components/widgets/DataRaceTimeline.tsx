@@ -71,14 +71,14 @@ export function DataRaceTimeline() {
   const [playing, setPlaying] = useState(false);
 
   const script = kScripts[mode];
-  const numSlots = script[script.length - 1].t + 1;
-  const lastStep = numSlots;
+  const num_slots = script[script.length - 1].t + 1;
+  const last_step = num_slots;
 
   useEffect(() => {
     if (!playing) return;
     const timer = window.setInterval(() => {
       setStep((s) => {
-        if (s >= lastStep) {
+        if (s >= last_step) {
           setPlaying(false);
           return s;
         }
@@ -86,7 +86,7 @@ export function DataRaceTimeline() {
       });
     }, kPlayIntervalMs);
     return () => window.clearInterval(timer);
-  }, [playing, lastStep]);
+  }, [playing, last_step]);
 
   const selectMode = (m: Mode) => {
     setMode(m);
@@ -95,21 +95,21 @@ export function DataRaceTimeline() {
   };
 
   // x value at each revealed slot, for the shared-variable trace row.
-  const xTrace = useMemo(() => {
+  const x_trace = useMemo(() => {
     const trace: number[] = [];
     let x = 0;
-    for (let t = 0; t < numSlots; ++t) {
+    for (let t = 0; t < num_slots; ++t) {
       for (const ev of script) {
         if (ev.t === t) x = ev.xAfter;
       }
       trace.push(x);
     }
     return trace;
-  }, [script, numSlots]);
+  }, [script, num_slots]);
 
-  const finished = step >= lastStep;
-  const finalX = xTrace[numSlots - 1];
-  const correct = finalX === 2;
+  const finished = step >= last_step;
+  const final_x = x_trace[num_slots - 1];
+  const correct = final_x === 2;
 
   const eventAt = (thread: 0 | 1, t: number) => script.find((ev) => ev.thread === thread && ev.t === t);
 
@@ -143,8 +143,8 @@ export function DataRaceTimeline() {
           {([0, 1] as const).map((thread) => (
             <div key={thread} className="mb-2 flex items-center gap-2">
               <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">Thread {thread}</span>
-              <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${numSlots}, minmax(0, 1fr))` }}>
-                {Array.from({ length: numSlots }, (_, t) => {
+              <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${num_slots}, minmax(0, 1fr))` }}>
+                {Array.from({ length: num_slots }, (_, t) => {
                   const ev = eventAt(thread, t);
                   const revealed = t < step;
                   if (!ev) return <div key={t} className="h-9 rounded border border-dashed border-border/40" />;
@@ -173,8 +173,8 @@ export function DataRaceTimeline() {
           {/* Shared x trace */}
           <div className="flex items-center gap-2 border-t border-border pt-2">
             <span className="w-16 shrink-0 font-mono text-xs text-primary">shared x</span>
-            <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${numSlots}, minmax(0, 1fr))` }}>
-              {xTrace.map((x, t) => (
+            <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${num_slots}, minmax(0, 1fr))` }}>
+              {x_trace.map((x, t) => (
                 <div
                   key={t}
                   className={`flex h-7 items-center justify-center rounded font-mono text-xs ${
@@ -220,7 +220,7 @@ export function DataRaceTimeline() {
               setPlaying(false);
               return;
             }
-            if (step >= lastStep) setStep(0);
+            if (step >= last_step) setStep(0);
             setPlaying(true);
           }}
           aria-label={playing ? '暫停' : '播放'}
@@ -232,7 +232,7 @@ export function DataRaceTimeline() {
           type="button"
           onClick={() => {
             setPlaying(false);
-            setStep((s) => Math.min(lastStep, s + 1));
+            setStep((s) => Math.min(last_step, s + 1));
           }}
           aria-label="下一步"
           className="rounded-md border border-border p-2 text-muted-foreground transition hover:border-primary hover:text-foreground"
@@ -242,11 +242,11 @@ export function DataRaceTimeline() {
         <p className="ml-2 text-sm" role="status">
           {finished ? (
             <span className={correct ? 'text-primary' : 'text-[#ff7b72]'}>
-              {correct ? `✓ 最終 x = ${finalX}, 正確` : `✗ 最終 x = ${finalX}, 應為 2 — 一次 update 被覆蓋 (lost update)`}
+              {correct ? `✓ 最終 x = ${final_x}, 正確` : `✗ 最終 x = ${final_x}, 應為 2 — 一次 update 被覆蓋 (lost update)`}
             </span>
           ) : (
             <span className="text-muted-foreground">
-              step <span className="font-mono text-foreground">{step}</span>/{lastStep}
+              step <span className="font-mono text-foreground">{step}</span>/{last_step}
             </span>
           )}
         </p>

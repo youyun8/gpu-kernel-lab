@@ -32,9 +32,9 @@ export function Quiz({ questions }: { questions: QuizQuestion[] }) {
 
 function QuizItem({ index, question }: { index: number; question: QuizQuestion }) {
   const [selected, setSelected] = useState<number | null>(null);
-  const groupId = useId();
+  const group_id = useId();
   const answered = selected !== null;
-  const isCorrect = selected === question.answer;
+  const is_correct = selected === question.answer;
 
   return (
     <li className="list-none">
@@ -57,7 +57,7 @@ function QuizItem({ index, question }: { index: number; question: QuizQuestion }
               >
                 <input
                   type="radio"
-                  name={groupId}
+                  name={group_id}
                   className="accent-brand"
                   checked={selected === oi}
                   onChange={() => setSelected(oi)}
@@ -71,11 +71,11 @@ function QuizItem({ index, question }: { index: number; question: QuizQuestion }
       {answered && (
         <p
           className={`mt-2 rounded-md px-3 py-2 text-sm ${
-            isCorrect ? 'bg-primary/10 text-primary' : 'bg-[#f85149]/10 text-[#ff7b72]'
+            is_correct ? 'bg-primary/10 text-primary' : 'bg-[#f85149]/10 text-[#ff7b72]'
           }`}
           role="status"
         >
-          {isCorrect ? '答對了!' : '再想想。'} {question.explanation}
+          {is_correct ? '答對了!' : '再想想。'} {question.explanation}
         </p>
       )}
     </li>

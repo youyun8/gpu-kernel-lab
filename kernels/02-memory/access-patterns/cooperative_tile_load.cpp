@@ -17,7 +17,7 @@ namespace {
 
 constexpr int kBlockSize = 256;
 constexpr int kRadius = 8;
-constexpr int kN = 1 << 24;
+constexpr int kSizeN = 1 << 24;
 
 // BASELINE: every thread reads its full 17-element window from global memory.
 // Neighboring threads re-read mostly the same elements; L1/L2 absorb a lot of
@@ -66,15 +66,15 @@ __global__ void boxFilterShared(const float* in, float* out, int n) {
 }  // namespace
 
 int main() {
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
 
-  std::vector<float> host(kN), expected(kN), result(kN);
-  for (int i = 0; i < kN; ++i) host[i] = static_cast<float>((i * 37) % 1009);
-  for (int i = 0; i < kN; ++i) {
+  std::vector<float> host(kSizeN), expected(kSizeN), result(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) host[i] = static_cast<float>((i * 37) % 1009);
+  for (int i = 0; i < kSizeN; ++i) {
     float sum = 0.0f;
     for (int r = -kRadius; r <= kRadius; ++r) {
       int j = i + r;
-      if (j >= 0 && j < kN) sum += host[j];
+      if (j >= 0 && j < kSizeN) sum += host[j];
     }
     expected[i] = sum / (2 * kRadius + 1);
   }
@@ -86,18 +86,18 @@ int main() {
   GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
-  const int grid = (kN + kBlockSize - 1) / kBlockSize;
+  const int grid = (kSizeN + kBlockSize - 1) / kBlockSize;
   // Useful traffic: read each input once + write each output once.
   const size_t moved = 2 * bytes;
 
-  auto launch_naive = [&]() { GPU_LAUNCH(boxFilterNaive, grid, kBlockSize, 0, dev_in, dev_out, kN); };
+  auto launch_naive = [&]() { GPU_LAUNCH(boxFilterNaive, grid, kBlockSize, 0, dev_in, dev_out, kSizeN); };
   launch_naive();
   GPU_CHECK(gpuDeviceSynchronize());
   GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
   if (!gklab::verifyClose(result, expected)) return EXIT_FAILURE;
   gklab::report("box_naive_17loads", gklab::benchmarkKernel(launch_naive, moved, 0.0), kPeakGbPerSec, 0.0);
 
-  auto launch_shared = [&]() { GPU_LAUNCH(boxFilterShared, grid, kBlockSize, 0, dev_in, dev_out, kN); };
+  auto launch_shared = [&]() { GPU_LAUNCH(boxFilterShared, grid, kBlockSize, 0, dev_in, dev_out, kSizeN); };
   launch_shared();
   GPU_CHECK(gpuDeviceSynchronize());
   GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));

@@ -20,15 +20,15 @@ constexpr int kDefaultWarmup = 10;
 constexpr int kDefaultIters = 100;
 
 struct BenchResult {
-  float avgMs;
-  double gbPerSec;
-  double gflopPerSec;
+  float avg_ms;
+  double gb_per_sec;
+  double gflop_per_sec;
 };
 
 // Time a launch closure with warmup + steady-state GPU-event timing.
 // The closure should enqueue exactly one kernel launch per call.
-inline BenchResult benchmarkKernel(const std::function<void()>& launch, size_t bytesMoved,
-                                   double flopCount, int warmup = kDefaultWarmup,
+inline BenchResult benchmarkKernel(const std::function<void()>& launch, size_t bytes_moved,
+                                   double flop_count, int warmup = kDefaultWarmup,
                                    int iters = kDefaultIters) {
   for (int i = 0; i < warmup; ++i) launch();
   GPU_CHECK(gpuDeviceSynchronize());
@@ -43,17 +43,17 @@ inline BenchResult benchmarkKernel(const std::function<void()>& launch, size_t b
   GPU_CHECK(gpuEventRecord(stop));
   GPU_CHECK(gpuEventSynchronize(stop));
 
-  float totalMs = 0.0f;
-  GPU_CHECK(gpuEventElapsedTime(&totalMs, start, stop));
+  float total_ms = 0.0f;
+  GPU_CHECK(gpuEventElapsedTime(&total_ms, start, stop));
   GPU_CHECK(gpuEventDestroy(start));
   GPU_CHECK(gpuEventDestroy(stop));
 
-  const float avgMs = totalMs / static_cast<float>(iters);
-  const double seconds = static_cast<double>(avgMs) / 1.0e3;
+  const float avg_ms = total_ms / static_cast<float>(iters);
+  const double seconds = static_cast<double>(avg_ms) / 1.0e3;
   BenchResult result{};
-  result.avgMs = avgMs;
-  result.gbPerSec = static_cast<double>(bytesMoved) / seconds / 1.0e9;
-  result.gflopPerSec = flopCount / seconds / 1.0e9;
+  result.avg_ms = avg_ms;
+  result.gb_per_sec = static_cast<double>(bytes_moved) / seconds / 1.0e9;
+  result.gflop_per_sec = flop_count / seconds / 1.0e9;
   return result;
 }
 
@@ -64,27 +64,27 @@ inline bool verifyClose(const std::vector<float>& got, const std::vector<float>&
     std::fprintf(stderr, "size mismatch: got %zu want %zu\n", got.size(), want.size());
     return false;
   }
-  double maxRel = 0.0;
+  double max_rel = 0.0;
   for (size_t i = 0; i < got.size(); ++i) {
     const float denom = std::max(1.0e-6f, std::fabs(want[i]));
     const double rel = std::fabs(got[i] - want[i]) / denom;
-    maxRel = std::max(maxRel, rel);
+    max_rel = std::max(max_rel, rel);
   }
-  if (maxRel > tol) {
-    std::fprintf(stderr, "correctness FAILED: max relative error %.3e > tol %.3e\n", maxRel, tol);
+  if (max_rel > tol) {
+    std::fprintf(stderr, "correctness FAILED: max relative error %.3e > tol %.3e\n", max_rel, tol);
     return false;
   }
-  std::printf("correctness OK (max relative error %.3e)\n", maxRel);
+  std::printf("correctness OK (max relative error %.3e)\n", max_rel);
   return true;
 }
 
 // Print a one-line report including percentage of theoretical peak.
-inline void report(const char* name, const BenchResult& r, double peakGbPerSec,
-                   double peakGflopPerSec) {
-  const double bwPct = peakGbPerSec > 0.0 ? 100.0 * r.gbPerSec / peakGbPerSec : 0.0;
-  const double flopPct = peakGflopPerSec > 0.0 ? 100.0 * r.gflopPerSec / peakGflopPerSec : 0.0;
+inline void report(const char* name, const BenchResult& r, double peak_gb_per_sec,
+                   double peak_gflop_per_sec) {
+  const double bw_pct = peak_gb_per_sec > 0.0 ? 100.0 * r.gb_per_sec / peak_gb_per_sec : 0.0;
+  const double flop_pct = peak_gflop_per_sec > 0.0 ? 100.0 * r.gflop_per_sec / peak_gflop_per_sec : 0.0;
   std::printf("%-28s %8.3f ms | %8.1f GB/s (%.1f%% peak) | %9.1f GFLOP/s (%.1f%% peak)\n", name,
-              r.avgMs, r.gbPerSec, bwPct, r.gflopPerSec, flopPct);
+              r.avg_ms, r.gb_per_sec, bw_pct, r.gflop_per_sec, flop_pct);
 }
 
 }  // namespace gklab

@@ -7,7 +7,7 @@ import type { ReactNode } from 'react';
 const kStage = '#58a6ff'; // a generic active stage / forward pass
 const kBack = '#ffa657'; // backward pass
 const kCompute = '#39d353'; // compute
-const kD2H = '#a371f7'; // device->host copy
+const kDeviceToHost = '#a371f7'; // device->host copy
 const kAccent = '#39c5cf'; // "the point"
 const kIdleBg = 'rgba(110,118,129,0.18)'; // bubble / idle
 
@@ -37,27 +37,27 @@ function Chip({ color, dashed, children }: { color: string; dashed?: boolean; ch
 type Cell = { t: 'idle' } | { t: 'op'; label: string; color: string };
 
 /** A row-per-lane gantt. `rows` is [label, cells[]]. Fixed-width cells. */
-function Gantt({ rows, cell = 26, rowLabelW = 52 }: { rows: { label: string; cells: Cell[] }[]; cell?: number; rowLabelW?: number }) {
+function Gantt({ rows, cell = 26, row_label_w = 52 }: { rows: { label: string; cells: Cell[] }[]; cell?: number; row_label_w?: number }) {
   const cols = Math.max(...rows.map((r) => r.cells.length));
   return (
-    <div className="inline-block min-w-full" style={{ display: 'grid', gridTemplateColumns: `${rowLabelW}px repeat(${cols}, ${cell}px)`, gap: 2 }}>
+    <div className="inline-block min-w-full" style={{ display: 'grid', gridTemplateColumns: `${row_label_w}px repeat(${cols}, ${cell}px)`, gap: 2 }}>
       {rows.map((row) => (
         <div key={row.label} style={{ display: 'contents' }}>
           <div className="flex items-center pr-2 font-mono text-[11px] text-muted-foreground" style={{ height: cell }}>
             {row.label}
           </div>
           {Array.from({ length: cols }, (_, c) => {
-            const cellData = row.cells[c];
-            if (!cellData || cellData.t === 'idle') {
+            const cell_data = row.cells[c];
+            if (!cell_data || cell_data.t === 'idle') {
               return <div key={c} className="rounded-[2px]" style={{ height: cell, backgroundColor: kIdleBg }} />;
             }
             return (
               <div
                 key={c}
                 className="flex items-center justify-center rounded-[2px] text-[10px] font-semibold"
-                style={{ height: cell, backgroundColor: cellData.color, color: 'rgba(0,0,0,0.78)' }}
+                style={{ height: cell, backgroundColor: cell_data.color, color: 'rgba(0,0,0,0.78)' }}
               >
-                {cellData.label}
+                {cell_data.label}
               </div>
             );
           })}
@@ -115,13 +115,13 @@ export function PipelineConceptFigure() {
 
 export function StreamOverlapFigure() {
   const chunks = 4;
-  const serialRows = [
+  const serial_rows = [
     {
       label: 'GPU',
       cells: Array.from({ length: chunks * 3 }, (_, t): Cell => {
         const phase = t % 3;
         const j = Math.floor(t / 3);
-        const c = phase === 0 ? kStage : phase === 1 ? kCompute : kD2H;
+        const c = phase === 0 ? kStage : phase === 1 ? kCompute : kDeviceToHost;
         const lbl = phase === 0 ? `H2D${j}` : phase === 1 ? `C${j}` : `D2H${j}`;
         return { t: 'op', label: lbl, color: c };
       }),
@@ -141,7 +141,7 @@ export function StreamOverlapFigure() {
       caption={
         <>
           把輸入切成 chunk, 用三條 stream 分別跑 <span style={{ color: kStage }}>H2D copy</span>、
-          <span style={{ color: kCompute }}> compute</span>、<span style={{ color: kD2H }}>D2H copy</span>。
+          <span style={{ color: kCompute }}> compute</span>、<span style={{ color: kDeviceToHost }}>D2H copy</span>。
           單 stream 串行要 <span className="font-mono">3·chunks</span> 步; 三 stream pipeline 後只要
           <span className="font-mono"> chunks + 2</span> 步 — copy 引擎 (DMA) 與 compute 引擎同時工作。
           前提: pinned memory + <span className="font-mono">non_blocking=True</span>, 否則 copy 會退回同步。
@@ -149,13 +149,13 @@ export function StreamOverlapFigure() {
       }
     >
       <p className="mb-1 text-xs text-muted-foreground">單 stream — 串行</p>
-      <Gantt rows={serialRows} rowLabelW={40} />
+      <Gantt rows={serial_rows} row_label_w={40} />
       <p className="mb-1 mt-4 text-xs text-muted-foreground">三 stream — 疊起來</p>
-      <Gantt rows={[mk(kStage, 'H2D', 0), mk(kCompute, 'C', 1), mk(kD2H, 'D2H', 2)]} rowLabelW={40} />
+      <Gantt rows={[mk(kStage, 'H2D', 0), mk(kCompute, 'C', 1), mk(kDeviceToHost, 'D2H', 2)]} row_label_w={40} />
       <div className="mt-3 flex flex-wrap gap-4">
         <Chip color={kStage}>H2D copy (DMA)</Chip>
         <Chip color={kCompute}>compute (SM)</Chip>
-        <Chip color={kD2H}>D2H copy (DMA)</Chip>
+        <Chip color={kDeviceToHost}>D2H copy (DMA)</Chip>
       </div>
     </Fig>
   );
@@ -171,28 +171,28 @@ type Op = { type: 'F' | 'B'; j: number };
 // schedule. F(d,j) needs F(d-1,j); B(d,j) needs B(d+1,j). Each op takes one
 // step. This reproduces the canonical GPipe and 1F1B gantts (and their bubbles)
 // rather than hand-drawing them, so the diagram stays honest.
-function simulate(p: number, opsPerDevice: Op[][]): { grid: Cell[][]; steps: number } {
+function simulate(p: number, ops_per_device: Op[][]): { grid: Cell[][]; steps: number } {
   const done = new Map<string, number>(); // key d,type,j -> finish step
   const key = (d: number, t: string, j: number) => `${d},${t},${j}`;
   const ptr = new Array(p).fill(0);
-  const busyUntil = new Array(p).fill(-1); // last step index the device was busy
+  const busy_until = new Array(p).fill(-1); // last step index the device was busy
   const grid: Cell[][] = Array.from({ length: p }, () => []);
-  const maxSteps = 400;
+  const max_steps = 400;
   let step = 0;
-  const remaining = () => opsPerDevice.reduce((s, ops, d) => s + (ops.length - ptr[d]), 0);
-  while (remaining() > 0 && step < maxSteps) {
+  const remaining = () => ops_per_device.reduce((s, ops, d) => s + (ops.length - ptr[d]), 0);
+  while (remaining() > 0 && step < max_steps) {
     for (let d = 0; d < p; d++) {
-      const ops = opsPerDevice[d];
+      const ops = ops_per_device[d];
       let placed = false;
-      if (ptr[d] < ops.length && busyUntil[d] < step) {
+      if (ptr[d] < ops.length && busy_until[d] < step) {
         const op = ops[ptr[d]];
-        let depOk = true;
-        if (op.type === 'F' && d > 0) depOk = (done.get(key(d - 1, 'F', op.j)) ?? Infinity) < step;
-        if (op.type === 'B' && d < p - 1) depOk = (done.get(key(d + 1, 'B', op.j)) ?? Infinity) < step;
-        if (depOk) {
+        let dep_ok = true;
+        if (op.type === 'F' && d > 0) dep_ok = (done.get(key(d - 1, 'F', op.j)) ?? Infinity) < step;
+        if (op.type === 'B' && d < p - 1) dep_ok = (done.get(key(d + 1, 'B', op.j)) ?? Infinity) < step;
+        if (dep_ok) {
           grid[d][step] = { t: 'op', label: `${op.type}${op.j}`, color: op.type === 'F' ? kStage : kBack };
           done.set(key(d, op.type, op.j), step);
-          busyUntil[d] = step;
+          busy_until[d] = step;
           ptr[d]++;
           placed = true;
         }
@@ -275,20 +275,20 @@ export function PipelineParallelFigure() {
 export function OverlapSchedulerFigure() {
   const n = 4;
   // Naive: CPU schedules batch j, THEN GPU runs it; each waits for the other.
-  const naiveCpu: Cell[] = [];
-  const naiveGpu: Cell[] = [];
+  const naive_cpu: Cell[] = [];
+  const naive_gpu: Cell[] = [];
   for (let j = 0; j < n; j++) {
-    naiveCpu.push({ t: 'op', label: `S${j}`, color: kAccent });
-    naiveCpu.push({ t: 'idle' });
-    naiveGpu.push({ t: 'idle' });
-    naiveGpu.push({ t: 'op', label: `R${j}`, color: kCompute });
+    naive_cpu.push({ t: 'op', label: `S${j}`, color: kAccent });
+    naive_cpu.push({ t: 'idle' });
+    naive_gpu.push({ t: 'idle' });
+    naive_gpu.push({ t: 'op', label: `R${j}`, color: kCompute });
   }
   // Overlap: CPU schedules batch j+1 while GPU runs batch j (one batch ahead).
-  const ovCpu: Cell[] = [{ t: 'op', label: 'S0', color: kAccent }];
-  const ovGpu: Cell[] = [{ t: 'idle' }];
+  const overlap_cpu: Cell[] = [{ t: 'op', label: 'S0', color: kAccent }];
+  const overlap_gpu: Cell[] = [{ t: 'idle' }];
   for (let j = 0; j < n; j++) {
-    ovCpu.push(j + 1 < n ? { t: 'op', label: `S${j + 1}`, color: kAccent } : { t: 'idle' });
-    ovGpu.push({ t: 'op', label: `R${j}`, color: kCompute });
+    overlap_cpu.push(j + 1 < n ? { t: 'op', label: `S${j + 1}`, color: kAccent } : { t: 'idle' });
+    overlap_gpu.push({ t: 'op', label: `R${j}`, color: kCompute });
   }
   return (
     <Fig
@@ -305,9 +305,9 @@ export function OverlapSchedulerFigure() {
       }
     >
       <p className="mb-1 text-xs text-muted-foreground">樸素 — CPU 與 GPU 輪流等待</p>
-      <Gantt rows={[{ label: 'CPU', cells: naiveCpu }, { label: 'GPU', cells: naiveGpu }]} rowLabelW={40} />
+      <Gantt rows={[{ label: 'CPU', cells: naive_cpu }, { label: 'GPU', cells: naive_gpu }]} row_label_w={40} />
       <p className="mb-1 mt-4 text-xs text-muted-foreground">overlap — scheduler 領先一個 batch</p>
-      <Gantt rows={[{ label: 'CPU', cells: ovCpu }, { label: 'GPU', cells: ovGpu }]} rowLabelW={40} />
+      <Gantt rows={[{ label: 'CPU', cells: overlap_cpu }, { label: 'GPU', cells: overlap_gpu }]} row_label_w={40} />
       <div className="mt-3 flex flex-wrap gap-4">
         <Chip color={kAccent}>CPU: schedule / cache / sampling (S)</Chip>
         <Chip color={kCompute}>GPU: model forward (R)</Chip>
@@ -373,7 +373,7 @@ export function WarpSpecializationFigure() {
 /* 6. NVIDIA vs AMD library pipeline stack                             */
 /* ------------------------------------------------------------------ */
 
-const kNv = '#76b900'; // NVIDIA green
+const kNvidia = '#76b900'; // NVIDIA green
 const kAmd = '#ed1c24'; // AMD red
 
 export function VendorPipelineFigure() {
@@ -393,7 +393,7 @@ export function VendorPipelineFigure() {
       caption={
         <>
           由下 (最靠硬體) 到上 (serving): 兩家用不同名字實作<em>同一套</em> software-pipeline 機制。
-          NVIDIA 走 <span style={{ color: kNv }}>cp.async/TMA + cutlass::Pipeline + warp specialization</span>;
+          NVIDIA 走 <span style={{ color: kNvidia }}>cp.async/TMA + cutlass::Pipeline + warp specialization</span>;
           AMD 走 <span style={{ color: kAmd }}>local prefetch + CK BlockwiseGemmPipeline + intra/interwave 排程</span>。
           最上層的 <strong>AITER</strong> 把這些 CK/Triton/assembly kernel 打包成算子庫, 當 vLLM/SGLang 在 MI300X 上的
           預設 backend — 對應 NVIDIA 側的 CUTLASS/FlashInfer。
@@ -402,7 +402,7 @@ export function VendorPipelineFigure() {
     >
       <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 6, minWidth: 560 }}>
         <div />
-        <div className="rounded-md px-2 py-1.5 text-center text-sm font-semibold" style={{ backgroundColor: `${kNv}22`, color: kNv }}>
+        <div className="rounded-md px-2 py-1.5 text-center text-sm font-semibold" style={{ backgroundColor: `${kNvidia}22`, color: kNvidia }}>
           NVIDIA (CUDA)
         </div>
         <div className="rounded-md px-2 py-1.5 text-center text-sm font-semibold" style={{ backgroundColor: `${kAmd}22`, color: kAmd }}>
@@ -411,7 +411,7 @@ export function VendorPipelineFigure() {
         {layers.map((l) => (
           <div key={l.role} style={{ display: 'contents' }}>
             <div className="flex items-center justify-end pr-1 text-right text-[11px] font-medium text-muted-foreground">{l.role}</div>
-            <div className="rounded-md border px-2 py-2 text-center text-[11px] text-foreground" style={{ borderColor: kNv }}>
+            <div className="rounded-md border px-2 py-2 text-center text-[11px] text-foreground" style={{ borderColor: kNvidia }}>
               <span className="font-mono">{l.nv}</span>
             </div>
             <div className="rounded-md border px-2 py-2 text-center text-[11px] text-foreground" style={{ borderColor: kAmd }}>

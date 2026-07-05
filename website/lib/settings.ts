@@ -2,15 +2,15 @@ export type ContentWidth = 'standard' | 'wide' | 'full';
 export type TextSize = 'small' | 'standard' | 'large';
 
 export interface SettingsState {
-  contentWidth: ContentWidth;
-  textSize: TextSize;
-  codeWrap: boolean;
+  content_width: ContentWidth;
+  text_size: TextSize;
+  code_wrap: boolean;
 }
 
-export const defaultSettings: SettingsState = {
-  contentWidth: 'standard',
-  textSize: 'standard',
-  codeWrap: true,
+export const kDefaultSettings: SettingsState = {
+  content_width: 'standard',
+  text_size: 'standard',
+  code_wrap: true,
 };
 
-export const SETTINGS_STORAGE_KEY = 'gklab-settings';
+export const kSettingsStorageKey = 'gklab-settings';

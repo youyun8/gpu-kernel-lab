@@ -10,13 +10,13 @@ import os
 import torch
 from torch.utils.cpp_extension import load
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+kHere = os.path.dirname(os.path.abspath(__file__))
 
 
-def load_extension():
+def loadExtension():
     return load(
         name="gelu_ext_jit",
-        sources=[os.path.join(_HERE, "gelu.cpp"), os.path.join(_HERE, "gelu_kernel.cu")],
+        sources=[os.path.join(kHere, "gelu.cpp"), os.path.join(kHere, "gelu_kernel.cu")],
         extra_cuda_cflags=["-O3"],
         verbose=True,
     )
@@ -41,7 +41,7 @@ def main() -> None:
         print("No CUDA/ROCm device available; skipping GELU extension test.")
         return
 
-    GeluFn.ext = load_extension()
+    GeluFn.ext = loadExtension()
     device = torch.device("cuda")
 
     # Forward correctness against the reference implementation.

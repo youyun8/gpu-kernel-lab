@@ -3,31 +3,31 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ChapterSidebar } from '@/components/ChapterSidebar';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
-import { chapterComponents } from '@/content/chapters/registry';
-import { flatChapters, getChapterNav } from '@/lib/curriculum';
+import { kChapterComponents } from '@/content/chapters/registry';
+import { kFlatChapters, getChapterNav } from '@/lib/curriculum';
 
 export function generateStaticParams() {
-  return flatChapters.map((chapter) => ({ slug: chapter.slug }));
+  return kFlatChapters.map((chapter) => ({ slug: chapter.slug }));
 }
 
 export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
-  const chapter = flatChapters.find((c) => c.slug === params.slug);
+  const chapter = kFlatChapters.find((c) => c.slug === params.slug);
   if (!chapter) return {};
   return { title: chapter.title, description: chapter.summary };
 }
 
 export default function ChapterPage({ params }: { params: { slug: string } }) {
-  const MDX = chapterComponents[params.slug];
+  const MDX = kChapterComponents[params.slug];
   const { current, prev, next } = getChapterNav(params.slug);
   if (!MDX || !current) notFound();
 
   return (
     <AppWidthContainer className="px-4 py-8 lg:flex lg:items-start lg:gap-10">
-      <ChapterSidebar activeSlug={params.slug} />
+      <ChapterSidebar active_slug={params.slug} />
 
       <main className="min-w-0 lg:flex-1">
-        <p className="mb-2 text-sm font-medium" style={{ color: current.trackColor }}>
-          {current.trackLabel} · Chapter {current.num}
+        <p className="mb-2 text-sm font-medium" style={{ color: current.track_color }}>
+          {current.track_label} · Chapter {current.num}
         </p>
         <article className="prose-doc">
           <MDX />

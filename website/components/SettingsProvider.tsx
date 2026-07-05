@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import {
-  defaultSettings,
-  SETTINGS_STORAGE_KEY,
+  kDefaultSettings,
+  kSettingsStorageKey,
   type ContentWidth,
   type SettingsState,
   type TextSize,
@@ -17,15 +17,15 @@ interface SettingsContextValue extends SettingsState {
   setCodeWrap: (value: boolean) => void;
 }
 
-const SettingsContext = createContext<SettingsContextValue | null>(null);
+const kSettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<SettingsState>(defaultSettings);
+  const [state, setState] = useState<SettingsState>(kDefaultSettings);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      const raw = localStorage.getItem(kSettingsStorageKey);
       if (raw) setState((current) => ({ ...current, ...JSON.parse(raw) }));
     } catch {
       // Storage unavailable (private mode, etc.) — fall back to defaults.
@@ -35,38 +35,38 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!mounted) return;
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(kSettingsStorageKey, JSON.stringify(state));
   }, [state, mounted]);
 
   useEffect(() => {
     const root = document.documentElement;
-    if (state.textSize === 'standard') delete root.dataset.textSize;
-    else root.dataset.textSize = state.textSize;
-  }, [state.textSize]);
+    if (state.text_size === 'standard') delete root.dataset.textSize;
+    else root.dataset.textSize = state.text_size;
+  }, [state.text_size]);
 
   useEffect(() => {
     const root = document.documentElement;
-    if (state.codeWrap) delete root.dataset.codeWrap;
+    if (state.code_wrap) delete root.dataset.codeWrap;
     else root.dataset.codeWrap = 'off';
-  }, [state.codeWrap]);
+  }, [state.code_wrap]);
 
   return (
-    <SettingsContext.Provider
+    <kSettingsContext.Provider
       value={{
         ...state,
         mounted,
-        setContentWidth: (contentWidth) => setState((s) => ({ ...s, contentWidth })),
-        setTextSize: (textSize) => setState((s) => ({ ...s, textSize })),
-        setCodeWrap: (codeWrap) => setState((s) => ({ ...s, codeWrap })),
+        setContentWidth: (content_width) => setState((s) => ({ ...s, content_width })),
+        setTextSize: (text_size) => setState((s) => ({ ...s, text_size })),
+        setCodeWrap: (code_wrap) => setState((s) => ({ ...s, code_wrap })),
       }}
     >
       {children}
-    </SettingsContext.Provider>
+    </kSettingsContext.Provider>
   );
 }
 
 export function useSettings(): SettingsContextValue {
-  const ctx = useContext(SettingsContext);
+  const ctx = useContext(kSettingsContext);
   if (!ctx) throw new Error('useSettings must be used within SettingsProvider');
   return ctx;
 }

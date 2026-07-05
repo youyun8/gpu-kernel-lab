@@ -11,8 +11,8 @@ import os
 
 import torch
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BASELINE_PATH = os.path.join(_HERE, "baseline.json")
+kHere = os.path.dirname(os.path.abspath(__file__))
+kBaselinePath = os.path.join(kHere, "baseline.json")
 
 
 @torch.library.custom_op("gklab::gelu", mutates_args=())
@@ -22,27 +22,27 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
 
 
 @gelu.register_fake
-def _(x: torch.Tensor) -> torch.Tensor:
+def fakeGelu(x: torch.Tensor) -> torch.Tensor:
     # Shape/dtype propagation without running the kernel (needed by torch.compile).
     return torch.empty_like(x)
 
 
-def _setup_context(ctx, inputs, output):
+def setupContext(ctx, inputs, output):
     (x,) = inputs
     ctx.save_for_backward(x)
 
 
-def _backward(ctx, grad):
+def backwardFn(ctx, grad):
     (x,) = ctx.saved_tensors
     cdf = 0.5 * (1.0 + torch.erf(x * 0.7071067811865476))
     pdf = 0.3989422804014327 * torch.exp(-0.5 * x * x)
     return grad * (cdf + x * pdf)
 
 
-gelu.register_autograd(_backward, setup_context=_setup_context)
+gelu.register_autograd(backwardFn, setup_context=setupContext)
 
 
-def benchmark_ms(fn, iters: int = 100, warmup: int = 20) -> float:
+def benchmarkMs(fn, iters: int = 100, warmup: int = 20) -> float:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -79,17 +79,17 @@ def main() -> None:
     print("torch.compile integration OK")
 
     # Performance regression check against a recorded, hardware-specific budget.
-    t = benchmark_ms(lambda: gelu(x))
-    if os.path.exists(_BASELINE_PATH):
-        with open(_BASELINE_PATH, "r", encoding="utf-8") as fh:
+    t = benchmarkMs(lambda: gelu(x))
+    if os.path.exists(kBaselinePath):
+        with open(kBaselinePath, "r", encoding="utf-8") as fh:
             baseline = json.load(fh).get("gelu_ms")
         if baseline is not None:
             assert t <= baseline * 1.10, f"perf regression: {t:.3f} ms > {baseline * 1.10:.3f} ms"
             print(f"perf OK: {t:.3f} ms (budget {baseline * 1.10:.3f} ms)")
     else:
-        with open(_BASELINE_PATH, "w", encoding="utf-8") as fh:
+        with open(kBaselinePath, "w", encoding="utf-8") as fh:
             json.dump({"gelu_ms": t}, fh)
-        print(f"recorded baseline: {t:.3f} ms -> {_BASELINE_PATH}")
+        print(f"recorded baseline: {t:.3f} ms -> {kBaselinePath}")
 
 
 if __name__ == "__main__":

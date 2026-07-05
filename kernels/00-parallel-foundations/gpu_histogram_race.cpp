@@ -56,7 +56,7 @@ int main() {
   const int grid = (kNumItems + kBlockSize - 1) / kBlockSize;
   std::vector<int> bins(kNumBins);
 
-  auto runAndCheck = [&](bool racy, int trial) {
+  auto run_and_check = [&](bool racy, int trial) {
     GPU_CHECK(gpuMemset(dev_bins, 0, kNumBins * sizeof(int)));
     if (racy) {
       GPU_LAUNCH(histogramRacy, grid, kBlockSize, 0, dev_items, dev_bins, kNumItems);
@@ -79,8 +79,8 @@ int main() {
 
   std::printf("gpu_histogram_race: %d items into %d bins, expected total %d\n",
               kNumItems, kNumBins, kNumItems);
-  for (int trial = 0; trial < kTrials; ++trial) runAndCheck(/*racy=*/true, trial);
-  for (int trial = 0; trial < kTrials; ++trial) runAndCheck(/*racy=*/false, trial);
+  for (int trial = 0; trial < kTrials; ++trial) run_and_check(/*racy=*/true, trial);
+  for (int trial = 0; trial < kTrials; ++trial) run_and_check(/*racy=*/false, trial);
 
   GPU_CHECK(gpuFree(dev_items));
   GPU_CHECK(gpuFree(dev_bins));

@@ -23,36 +23,36 @@ __global__ void softmaxThreePass(const float* in, float* out, int rows, int cols
   const float* x = in + static_cast<size_t>(row) * cols;
   float* y = out + static_cast<size_t>(row) * cols;
 
-  float localMax = -INFINITY;
-  for (int c = tid; c < cols; c += blockDim.x) localMax = fmaxf(localMax, x[c]);
-  reduce[tid] = localMax;
+  float local_max = -INFINITY;
+  for (int c = tid; c < cols; c += blockDim.x) local_max = fmaxf(local_max, x[c]);
+  reduce[tid] = local_max;
   __syncthreads();
   for (int s = blockDim.x / 2; s > 0; s >>= 1) {
     if (tid < s) reduce[tid] = fmaxf(reduce[tid], reduce[tid + s]);
     __syncthreads();
   }
-  const float rowMax = reduce[0];
+  const float row_max = reduce[0];
   __syncthreads();
 
-  float localSum = 0.0f;
-  for (int c = tid; c < cols; c += blockDim.x) localSum += expf(x[c] - rowMax);
-  reduce[tid] = localSum;
+  float local_sum = 0.0f;
+  for (int c = tid; c < cols; c += blockDim.x) local_sum += expf(x[c] - row_max);
+  reduce[tid] = local_sum;
   __syncthreads();
   for (int s = blockDim.x / 2; s > 0; s >>= 1) {
     if (tid < s) reduce[tid] += reduce[tid + s];
     __syncthreads();
   }
-  const float rowSum = reduce[0];
+  const float row_sum = reduce[0];
   __syncthreads();
 
-  for (int c = tid; c < cols; c += blockDim.x) y[c] = expf(x[c] - rowMax) / rowSum;
+  for (int c = tid; c < cols; c += blockDim.x) y[c] = expf(x[c] - row_max) / row_sum;
 }
 
 // Online softmax: one pass maintaining running max and running denominator with
 // rescale, then a normalization pass. One block per row.
 __global__ void softmaxOnline(const float* in, float* out, int rows, int cols) {
-  __shared__ float maxReduce[kBlockSize];
-  __shared__ float sumReduce[kBlockSize];
+  __shared__ float max_reduce[kBlockSize];
+  __shared__ float sum_reduce[kBlockSize];
   int row = blockIdx.x;
   int tid = threadIdx.x;
   if (row >= rows) return;
@@ -63,32 +63,32 @@ __global__ void softmaxOnline(const float* in, float* out, int rows, int cols) {
   float d = 0.0f;       // running denominator
   for (int c = tid; c < cols; c += blockDim.x) {
     const float v = x[c];
-    const float mNew = fmaxf(m, v);
-    d = d * expf(m - mNew) + expf(v - mNew);
-    m = mNew;
+    const float m_new = fmaxf(m, v);
+    d = d * expf(m - m_new) + expf(v - m_new);
+    m = m_new;
   }
-  maxReduce[tid] = m;
-  sumReduce[tid] = d;
+  max_reduce[tid] = m;
+  sum_reduce[tid] = d;
   __syncthreads();
 
   // Combine per-thread (m, d) pairs pairwise in shared memory.
   for (int s = blockDim.x / 2; s > 0; s >>= 1) {
     if (tid < s) {
-      const float m1 = maxReduce[tid];
-      const float d1 = sumReduce[tid];
-      const float m2 = maxReduce[tid + s];
-      const float d2 = sumReduce[tid + s];
-      const float mNew = fmaxf(m1, m2);
-      maxReduce[tid] = mNew;
-      sumReduce[tid] = d1 * expf(m1 - mNew) + d2 * expf(m2 - mNew);
+      const float m1 = max_reduce[tid];
+      const float d1 = sum_reduce[tid];
+      const float m2 = max_reduce[tid + s];
+      const float d2 = sum_reduce[tid + s];
+      const float m_new = fmaxf(m1, m2);
+      max_reduce[tid] = m_new;
+      sum_reduce[tid] = d1 * expf(m1 - m_new) + d2 * expf(m2 - m_new);
     }
     __syncthreads();
   }
-  const float rowMax = maxReduce[0];
-  const float rowSum = sumReduce[0];
+  const float row_max = max_reduce[0];
+  const float row_sum = sum_reduce[0];
   __syncthreads();
 
-  for (int c = tid; c < cols; c += blockDim.x) y[c] = expf(x[c] - rowMax) / rowSum;
+  for (int c = tid; c < cols; c += blockDim.x) y[c] = expf(x[c] - row_max) / row_sum;
 }
 
 void cpuSoftmax(const std::vector<float>& in, std::vector<float>& out, int rows, int cols) {
@@ -120,33 +120,33 @@ int main() {
   cpuSoftmax(host, reference, kRows, kCols);
   std::vector<float> result(count);
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
-  const size_t bytesMoved = 2 * bytes;
+  const size_t bytes_moved = 2 * bytes;
 
   auto check = [&](const char* name, const std::function<void()>& launch) -> bool {
     launch();
     GPU_CHECK(gpuDeviceSynchronize());
-    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
     if (!gklab::verifyClose(result, reference, 1.0e-3f)) {
       std::fprintf(stderr, "%s FAILED\n", name);
       return false;
     }
-    gklab::report(name, gklab::benchmarkKernel(launch, bytesMoved, 0.0), kPeakGbPerSec, 0.0);
+    gklab::report(name, gklab::benchmarkKernel(launch, bytes_moved, 0.0), kPeakGbPerSec, 0.0);
     return true;
   };
 
-  if (!check("softmax_three_pass", [&]() { GPU_LAUNCH(softmaxThreePass, kRows, kBlockSize, 0, devIn, devOut, kRows, kCols); }))
+  if (!check("softmax_three_pass", [&]() { GPU_LAUNCH(softmaxThreePass, kRows, kBlockSize, 0, dev_in, dev_out, kRows, kCols); }))
     return EXIT_FAILURE;
-  if (!check("softmax_online", [&]() { GPU_LAUNCH(softmaxOnline, kRows, kBlockSize, 0, devIn, devOut, kRows, kCols); }))
+  if (!check("softmax_online", [&]() { GPU_LAUNCH(softmaxOnline, kRows, kBlockSize, 0, dev_in, dev_out, kRows, kCols); }))
     return EXIT_FAILURE;
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

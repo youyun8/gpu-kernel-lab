@@ -17,12 +17,12 @@ const kDefaultGatherIdx = [14, 2, 9, 2, 7, 11, 0, 5];
 const kDefaultScatterIdx = [3, 6, 3, 1, 6, 3, 4, 6];
 
 interface PanelGeometry {
-  cellH: number;
-  arrayTop: number;
+  cell_h: number;
+  array_top: number;
   laneTop: number;
 }
 
-const kGeom: PanelGeometry = { cellH: 22, arrayTop: 28, laneTop: 60 };
+const kGeom: PanelGeometry = { cell_h: 22, array_top: 28, laneTop: 60 };
 
 function segmentsTouched(indices: number[]): number {
   return new Set(indices.map((i) => Math.floor(i / kCellsPerSegment))).size;
@@ -35,21 +35,21 @@ function segmentsTouched(indices: number[]): number {
  * number of atomic operations a scatter needs.
  */
 export function GatherScatterVisualizer() {
-  const [gatherIdx, setGatherIdx] = useState<number[]>(kDefaultGatherIdx);
-  const [scatterIdx, setScatterIdx] = useState<number[]>(kDefaultScatterIdx);
+  const [gather_idx, setGatherIdx] = useState<number[]>(kDefaultGatherIdx);
+  const [scatter_idx, setScatterIdx] = useState<number[]>(kDefaultScatterIdx);
   const [aggregate, setAggregate] = useState(false);
 
-  const gatherReadSegments = useMemo(() => segmentsTouched(gatherIdx), [gatherIdx]);
-  const gatherWriteSegments = kNumLanes / kCellsPerSegment; // contiguous output
-  const distinctBins = useMemo(() => new Set(scatterIdx).size, [scatterIdx]);
-  const atomicOps = aggregate ? distinctBins : kNumLanes;
+  const gather_read_segments = useMemo(() => segmentsTouched(gather_idx), [gather_idx]);
+  const gather_write_segments = kNumLanes / kCellsPerSegment; // contiguous output
+  const distinct_bins = useMemo(() => new Set(scatter_idx).size, [scatter_idx]);
+  const atomic_ops = aggregate ? distinct_bins : kNumLanes;
 
   const shuffle = () => {
     setGatherIdx(randomIndices(kNumLanes, kGatherInputSize));
     setScatterIdx(randomIndices(kNumLanes, kNumBins));
   };
 
-  const laneY = (lane: number) => kGeom.laneTop + lane * (kGeom.cellH + 4);
+  const laneY = (lane: number) => kGeom.laneTop + lane * (kGeom.cell_h + 4);
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -86,7 +86,7 @@ export function GatherScatterVisualizer() {
             viewBox="0 0 300 260"
             className="w-full"
             role="img"
-            aria-label={`gather: 8 個 lanes 從分散位置讀取, 觸及 ${gatherReadSegments} 個 read segment, 寫出連續, 只需 ${gatherWriteSegments} 個 write segment`}
+            aria-label={`gather: 8 個 lanes 從分散位置讀取, 觸及 ${gather_read_segments} 個 read segment, 寫出連續, 只需 ${gather_write_segments} 個 write segment`}
           >
             {/* input array (scattered reads) */}
             <text x="8" y="18" fontSize="10" fill="hsl(var(--muted-foreground))">
@@ -94,7 +94,7 @@ export function GatherScatterVisualizer() {
             </text>
             {Array.from({ length: kGatherInputSize }, (_, i) => {
               const y = 26 + i * 14;
-              const lane = gatherIdx.indexOf(i);
+              const lane = gather_idx.indexOf(i);
               return (
                 <g key={i}>
                   <rect x="8" y={y} width="36" height="12" rx="2" fill={lane >= 0 ? kLaneColors[lane] : 'hsl(var(--muted))'} opacity={lane >= 0 ? 0.9 : 0.5} />
@@ -110,16 +110,16 @@ export function GatherScatterVisualizer() {
             </text>
             {Array.from({ length: kNumLanes }, (_, lane) => {
               const y = laneY(lane);
-              const srcY = 26 + gatherIdx[lane] * 14 + 6;
-              const dstY = 26 + lane * 22 + 8;
+              const src_y = 26 + gather_idx[lane] * 14 + 6;
+              const dst_y = 26 + lane * 22 + 8;
               return (
                 <g key={lane}>
-                  <line x1="44" y1={srcY} x2="128" y2={y + 10} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
+                  <line x1="44" y1={src_y} x2="128" y2={y + 10} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
                   <rect x="128" y={y} width="40" height="20" rx="3" fill={kLaneColors[lane]} opacity="0.9" />
                   <text x="148" y={y + 13} fontSize="9" textAnchor="middle" fill="#000">
                     L{lane}
                   </text>
-                  <line x1="168" y1={y + 10} x2="252" y2={dstY} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
+                  <line x1="168" y1={y + 10} x2="252" y2={dst_y} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
                 </g>
               );
             })}
@@ -140,8 +140,8 @@ export function GatherScatterVisualizer() {
             })}
           </svg>
           <p className="mt-1 text-xs text-muted-foreground">
-            read segments: <span className="font-mono text-[#ffa657]">{gatherReadSegments}</span> · write segments:{' '}
-            <span className="font-mono text-primary">{gatherWriteSegments}</span> · 不需要 atomic
+            read segments: <span className="font-mono text-[#ffa657]">{gather_read_segments}</span> · write segments:{' '}
+            <span className="font-mono text-primary">{gather_write_segments}</span> · 不需要 atomic
           </p>
         </div>
 
@@ -154,7 +154,7 @@ export function GatherScatterVisualizer() {
             viewBox="0 0 300 260"
             className="w-full"
             role="img"
-            aria-label={`scatter: 8 個 lanes 寫到 ${distinctBins} 個不同 bin, ${aggregate ? '先做 warp aggregation 後' : '未做 aggregation 時'}需要 ${atomicOps} 次 atomic`}
+            aria-label={`scatter: 8 個 lanes 寫到 ${distinct_bins} 個不同 bin, ${aggregate ? '先做 warp aggregation 後' : '未做 aggregation 時'}需要 ${atomic_ops} 次 atomic`}
           >
             {/* input (contiguous reads) */}
             <text x="8" y="18" fontSize="10" fill="hsl(var(--muted-foreground))">
@@ -177,14 +177,14 @@ export function GatherScatterVisualizer() {
             </text>
             {Array.from({ length: kNumLanes }, (_, lane) => {
               const y = laneY(lane);
-              const srcY = 26 + lane * 22 + 8;
-              const dstY = 26 + scatterIdx[lane] * 26 + 10;
+              const src_y = 26 + lane * 22 + 8;
+              const dst_y = 26 + scatter_idx[lane] * 26 + 10;
               // With aggregation only the first lane hitting a bin issues the atomic.
-              const isLeader = scatterIdx.indexOf(scatterIdx[lane]) === lane;
-              const dimmed = aggregate && !isLeader;
+              const is_leader = scatter_idx.indexOf(scatter_idx[lane]) === lane;
+              const dimmed = aggregate && !is_leader;
               return (
                 <g key={lane}>
-                  <line x1="44" y1={srcY} x2="128" y2={y + 10} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
+                  <line x1="44" y1={src_y} x2="128" y2={y + 10} stroke={kLaneColors[lane]} strokeWidth="1.5" opacity="0.75" />
                   <rect x="128" y={y} width="40" height="20" rx="3" fill={kLaneColors[lane]} opacity="0.9" />
                   <text x="148" y={y + 13} fontSize="9" textAnchor="middle" fill="#000">
                     L{lane}
@@ -193,7 +193,7 @@ export function GatherScatterVisualizer() {
                     x1="168"
                     y1={y + 10}
                     x2="252"
-                    y2={dstY}
+                    y2={dst_y}
                     stroke={kLaneColors[lane]}
                     strokeWidth={dimmed ? 1 : 1.5}
                     strokeDasharray={dimmed ? '3 3' : undefined}
@@ -208,7 +208,7 @@ export function GatherScatterVisualizer() {
             </text>
             {Array.from({ length: kNumBins }, (_, bin) => {
               const y = 26 + bin * 26;
-              const writers = scatterIdx.filter((t) => t === bin).length;
+              const writers = scatter_idx.filter((t) => t === bin).length;
               return (
                 <g key={bin}>
                   <rect
@@ -229,8 +229,8 @@ export function GatherScatterVisualizer() {
             })}
           </svg>
           <p className="mt-1 text-xs text-muted-foreground">
-            atomic ops: <span className={`font-mono ${aggregate ? 'text-primary' : 'text-[#ff7b72]'}`}>{atomicOps}</span>
-            {aggregate ? ' (warp 內同 bin 先合併, 每個 bin 只發 1 次 atomic)' : ` (每 lane 各發 1 次; 紅色 bin 表示 ${kNumLanes - distinctBins} 次衝突競爭)`}
+            atomic ops: <span className={`font-mono ${aggregate ? 'text-primary' : 'text-[#ff7b72]'}`}>{atomic_ops}</span>
+            {aggregate ? ' (warp 內同 bin 先合併, 每個 bin 只發 1 次 atomic)' : ` (每 lane 各發 1 次; 紅色 bin 表示 ${kNumLanes - distinct_bins} 次衝突競爭)`}
           </p>
         </div>
       </div>

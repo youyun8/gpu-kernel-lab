@@ -31,11 +31,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
       if (event.key === 'Escape') onClose();
     }
     document.addEventListener('keydown', onKey);
-    const previousOverflow = document.body.style.overflow;
+    const previous_overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = previousOverflow;
+      document.body.style.overflow = previous_overflow;
     };
   }, [open, onClose]);
 

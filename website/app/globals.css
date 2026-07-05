@@ -96,7 +96,7 @@ body {
   background: transparent;
 }
 
-/* Code block word-wrap, controlled by the "程式碼自動換行" setting (default on). */
+/* Code block word-wrap, controlled by the "auto-wrap code" setting (default on). */
 html:not([data-code-wrap='off']) pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

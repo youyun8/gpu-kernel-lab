@@ -34,12 +34,12 @@ using BlasHandle = cublasHandle_t;
 
 namespace {
 
-constexpr int kDim = 2048;  // C = A * B, all kDim x kDim, column-major for BLAS
+constexpr int kDimension = 2048;  // C = A * B, all kDimension x kDimension, column-major for BLAS
 
 }  // namespace
 
 int main() {
-  const size_t elems = static_cast<size_t>(kDim) * kDim;
+  const size_t elems = static_cast<size_t>(kDimension) * kDimension;
   const size_t bytes = elems * sizeof(float);
 
   std::vector<float> host_a(elems), host_b(elems);
@@ -62,14 +62,14 @@ int main() {
 #if defined(USE_HIP)
   BLAS_CHECK(hipblasCreate(&handle));
   auto launch = [&]() {
-    BLAS_CHECK(hipblasSgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N, kDim, kDim, kDim,
-                            &alpha, dev_a, kDim, dev_b, kDim, &beta, dev_c, kDim));
+    BLAS_CHECK(hipblasSgemm(handle, HIPBLAS_OP_N, HIPBLAS_OP_N, kDimension, kDimension, kDimension,
+                            &alpha, dev_a, kDimension, dev_b, kDimension, &beta, dev_c, kDimension));
   };
 #else
   BLAS_CHECK(cublasCreate(&handle));
   auto launch = [&]() {
-    BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, kDim, kDim, kDim,
-                           &alpha, dev_a, kDim, dev_b, kDim, &beta, dev_c, kDim));
+    BLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, kDimension, kDimension, kDimension,
+                           &alpha, dev_a, kDimension, dev_b, kDimension, &beta, dev_c, kDimension));
   };
 #endif
 
@@ -78,7 +78,7 @@ int main() {
 
   constexpr double kPeakGbPerSec = 1555.0;
   constexpr double kPeakGflopPerSec = 19500.0;
-  const double flops = 2.0 * static_cast<double>(kDim) * kDim * kDim;
+  const double flops = 2.0 * static_cast<double>(kDimension) * kDimension * kDimension;
   const size_t moved = 3 * bytes;  // A + B read, C written (ignoring reuse)
   gklab::report("blas_sgemm_2048", gklab::benchmarkKernel(launch, moved, flops),
                 kPeakGbPerSec, kPeakGflopPerSec);

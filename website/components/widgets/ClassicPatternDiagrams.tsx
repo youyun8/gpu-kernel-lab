@@ -8,14 +8,14 @@ const kPlayIntervalMs = 1400;
 /** Shared transport controls (reset / step / play-pause) used by all three diagrams below. */
 function PlaybackControls({
   step,
-  lastStep,
+  last_step,
   playing,
   onStep,
   onPlaying,
   note,
 }: {
   step: number;
-  lastStep: number;
+  last_step: number;
   playing: boolean;
   onStep: (step: number) => void;
   onPlaying: (playing: boolean) => void;
@@ -52,7 +52,7 @@ function PlaybackControls({
             onPlaying(false);
             return;
           }
-          if (step >= lastStep) onStep(0);
+          if (step >= last_step) onStep(0);
           onPlaying(true);
         }}
         aria-label={playing ? '暫停' : '播放'}
@@ -64,7 +64,7 @@ function PlaybackControls({
         type="button"
         onClick={() => {
           onPlaying(false);
-          onStep(Math.min(lastStep, step + 1));
+          onStep(Math.min(last_step, step + 1));
         }}
         aria-label="下一步"
         className="rounded-md border border-border p-2 text-muted-foreground transition hover:border-primary hover:text-foreground"
@@ -73,7 +73,7 @@ function PlaybackControls({
       </button>
       <p className="ml-2 text-sm text-muted-foreground" role="status">
         <span className="font-mono text-foreground">
-          {step}/{lastStep}
+          {step}/{last_step}
         </span>{' '}
         — {note}
       </p>
@@ -81,8 +81,8 @@ function PlaybackControls({
   );
 }
 
-/** Advances `step` by one every `kPlayIntervalMs` while `playing`, stopping at `lastStep`. */
-function usePlayback(lastStep: number) {
+/** Advances `step` by one every `kPlayIntervalMs` while `playing`, stopping at `last_step`. */
+function usePlayback(last_step: number) {
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
 
@@ -90,7 +90,7 @@ function usePlayback(lastStep: number) {
     if (!playing) return;
     const timer = window.setInterval(() => {
       setStep((s) => {
-        if (s >= lastStep) {
+        if (s >= last_step) {
           setPlaying(false);
           return s;
         }
@@ -98,7 +98,7 @@ function usePlayback(lastStep: number) {
       });
     }, kPlayIntervalMs);
     return () => window.clearInterval(timer);
-  }, [playing, lastStep]);
+  }, [playing, last_step]);
 
   return { step, setStep, playing, setPlaying };
 }
@@ -148,11 +148,11 @@ const kPcSteps: PcStep[] = [
  * a full buffer stalls the producer, an empty buffer stalls the consumer.
  */
 export function ProducerConsumerDiagram() {
-  const lastStep = kPcSteps.length - 1;
-  const { step, setStep, playing, setPlaying } = usePlayback(lastStep);
+  const last_step = kPcSteps.length - 1;
+  const { step, setStep, playing, setPlaying } = usePlayback(last_step);
   const current = kPcSteps[step];
-  const emptySlots = kCapacity - current.queue.length;
-  const fullSlots = current.queue.length;
+  const empty_slots = kCapacity - current.queue.length;
+  const full_slots = current.queue.length;
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -176,7 +176,7 @@ export function ProducerConsumerDiagram() {
           →
         </span>
 
-        <div className="flex shrink-0 gap-1" role="img" aria-label={`buffer 中有 ${fullSlots}/${kCapacity} 筆資料`}>
+        <div className="flex shrink-0 gap-1" role="img" aria-label={`buffer 中有 ${full_slots}/${kCapacity} 筆資料`}>
           {Array.from({ length: kCapacity }, (_, i) => {
             const value = current.queue[i];
             const filled = value !== undefined;
@@ -210,15 +210,15 @@ export function ProducerConsumerDiagram() {
       <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <div className="rounded-md bg-background p-3 text-center">
           <dt className="text-xs text-muted-foreground">empty_slots</dt>
-          <dd className="font-mono text-lg text-foreground">{emptySlots}</dd>
+          <dd className="font-mono text-lg text-foreground">{empty_slots}</dd>
         </div>
         <div className="rounded-md bg-background p-3 text-center">
           <dt className="text-xs text-muted-foreground">full_slots</dt>
-          <dd className="font-mono text-lg text-foreground">{fullSlots}</dd>
+          <dd className="font-mono text-lg text-foreground">{full_slots}</dd>
         </div>
       </dl>
 
-      <PlaybackControls step={step} lastStep={lastStep} playing={playing} onStep={setStep} onPlaying={setPlaying} note={current.note} />
+      <PlaybackControls step={step} last_step={last_step} playing={playing} onStep={setStep} onPlaying={setPlaying} note={current.note} />
     </div>
   );
 }
@@ -259,12 +259,12 @@ const kRwNotes = [
  * and a writer-preference queueing rule keeps writers from starving.
  */
 export function ReadersWritersDiagram() {
-  const numSlots = kRwThreads[0].kinds.length;
-  const lastStep = numSlots;
-  const { step, setStep, playing, setPlaying } = usePlayback(lastStep);
-  const note = kRwNotes[Math.min(step, numSlots - 1)];
+  const num_slots = kRwThreads[0].kinds.length;
+  const last_step = num_slots;
+  const { step, setStep, playing, setPlaying } = usePlayback(last_step);
+  const note = kRwNotes[Math.min(step, num_slots - 1)];
 
-  const activeReaders = (t: number) => kRwThreads.filter((th, i) => i !== 2 && th.kinds[t] === 'reading').length;
+  const active_readers = (t: number) => kRwThreads.filter((th, i) => i !== 2 && th.kinds[t] === 'reading').length;
   const writerHolds = (t: number) => kRwThreads[2].kinds[t] === 'writing';
 
   return (
@@ -280,7 +280,7 @@ export function ReadersWritersDiagram() {
           {kRwThreads.map((th) => (
             <div key={th.label} className="mb-2 flex items-center gap-2">
               <span className="w-20 shrink-0 font-mono text-xs text-muted-foreground">{th.label}</span>
-              <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${numSlots}, minmax(0, 1fr))` }}>
+              <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${num_slots}, minmax(0, 1fr))` }}>
                 {th.kinds.map((kind, t) => {
                   const revealed = t < step;
                   const style = kRwKindStyle[kind];
@@ -307,15 +307,15 @@ export function ReadersWritersDiagram() {
 
           <div className="flex items-center gap-2 border-t border-border pt-2">
             <span className="w-20 shrink-0 font-mono text-xs text-primary">active readers</span>
-            <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${numSlots}, minmax(0, 1fr))` }}>
-              {Array.from({ length: numSlots }, (_, t) => (
+            <div className="grid flex-1 gap-1" style={{ gridTemplateColumns: `repeat(${num_slots}, minmax(0, 1fr))` }}>
+              {Array.from({ length: num_slots }, (_, t) => (
                 <div
                   key={t}
                   className={`flex h-6 items-center justify-center rounded font-mono text-xs ${
                     t < step ? (writerHolds(t) ? 'bg-[#ff7b72]/20 text-[#ff7b72]' : 'bg-primary/15 text-primary') : 'bg-background text-transparent'
                   }`}
                 >
-                  {t < step ? (writerHolds(t) ? 'W' : activeReaders(t)) : '·'}
+                  {t < step ? (writerHolds(t) ? 'W' : active_readers(t)) : '·'}
                 </div>
               ))}
             </div>
@@ -323,7 +323,7 @@ export function ReadersWritersDiagram() {
         </div>
       </div>
 
-      <PlaybackControls step={step} lastStep={lastStep} playing={playing} onStep={setStep} onPlaying={setPlaying} note={note} />
+      <PlaybackControls step={step} last_step={last_step} playing={playing} onStep={setStep} onPlaying={setPlaying} note={note} />
     </div>
   );
 }
@@ -389,8 +389,8 @@ const kDpScripts: Record<DpMode, DpStep[]> = {
   ],
 };
 
-function polarPoint(cx: number, cy: number, r: number, angleDeg: number) {
-  const rad = (angleDeg * Math.PI) / 180;
+function polarPoint(cx: number, cy: number, r: number, angle_deg: number) {
+  const rad = (angle_deg * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
 
@@ -403,9 +403,9 @@ function polarPoint(cx: number, cy: number, r: number, angleDeg: number) {
 export function DiningPhilosophersDiagram() {
   const [mode, setMode] = useState<DpMode>('naive');
   const script = kDpScripts[mode];
-  const lastStep = script.length - 1;
-  const { step, setStep, playing, setPlaying } = usePlayback(lastStep);
-  const current = script[Math.min(step, lastStep)];
+  const last_step = script.length - 1;
+  const { step, setStep, playing, setPlaying } = usePlayback(last_step);
+  const current = script[Math.min(step, last_step)];
 
   const selectMode = (m: DpMode) => {
     setMode(m);
@@ -415,12 +415,12 @@ export function DiningPhilosophersDiagram() {
 
   const cx = 130;
   const cy = 120;
-  const philR = 90;
-  const forkR = 58;
+  const phil_r = 90;
+  const fork_r = 58;
 
-  const philPoints = Array.from({ length: kNumPhilosophers }, (_, i) => polarPoint(cx, cy, philR, -90 + i * (360 / kNumPhilosophers)));
-  const forkPoints = Array.from({ length: kNumPhilosophers }, (_, i) =>
-    polarPoint(cx, cy, forkR, -90 + i * (360 / kNumPhilosophers) + 360 / kNumPhilosophers / 2),
+  const phil_points = Array.from({ length: kNumPhilosophers }, (_, i) => polarPoint(cx, cy, phil_r, -90 + i * (360 / kNumPhilosophers)));
+  const fork_points = Array.from({ length: kNumPhilosophers }, (_, i) =>
+    polarPoint(cx, cy, fork_r, -90 + i * (360 / kNumPhilosophers) + 360 / kNumPhilosophers / 2),
   );
 
   return (
@@ -456,15 +456,15 @@ export function DiningPhilosophersDiagram() {
       <div className="mt-4 flex justify-center">
         <svg viewBox="0 0 260 240" className="h-64 w-64" role="img" aria-label="五位哲學家與五支叉子的座位圖">
           {/* fork possession lines */}
-          {forkPoints.map((f, i) => {
+          {fork_points.map((f, i) => {
             const owner = current.forks[i];
             if (owner === null) return null;
-            const p = philPoints[owner];
+            const p = phil_points[owner];
             return <line key={`edge-${i}`} x1={f.x} y1={f.y} x2={p.x} y2={p.y} stroke={kPhilColors[owner]} strokeWidth={2} opacity={0.6} />;
           })}
 
           {/* forks */}
-          {forkPoints.map((f, i) => {
+          {fork_points.map((f, i) => {
             const owner = current.forks[i];
             const held = owner !== null;
             return (
@@ -476,7 +476,7 @@ export function DiningPhilosophersDiagram() {
           })}
 
           {/* philosophers */}
-          {philPoints.map((p, i) => (
+          {phil_points.map((p, i) => (
             <g key={`phil-${i}`}>
               <circle
                 cx={p.x}
@@ -508,7 +508,7 @@ export function DiningPhilosophersDiagram() {
         ))}
       </div>
 
-      <PlaybackControls step={step} lastStep={lastStep} playing={playing} onStep={setStep} onPlaying={setPlaying} note={current.note} />
+      <PlaybackControls step={step} last_step={last_step} playing={playing} onStep={setStep} onPlaying={setPlaying} note={current.note} />
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
 import path from 'node:path';
-import { flatChapters, exerciseSets } from '@/lib/curriculum';
+import { kFlatChapters, kExerciseSets } from '@/lib/curriculum';
 
 // Static export: this route has no request-dependent behavior, so Next emits
 // it as a plain `search-index.json` file at build time (same as any other
@@ -14,7 +14,7 @@ export interface SearchDoc {
   url: string;
   title: string;
   section: string;
-  trackColor: string;
+  track_color: string;
   summary: string;
   headings: string[];
   text: string;
@@ -55,35 +55,35 @@ function readSource(dir: string, slug: string): string {
 }
 
 export function GET() {
-  const chaptersDir = path.join(process.cwd(), 'content', 'chapters');
-  const exercisesDir = path.join(process.cwd(), 'content', 'exercises');
+  const chapters_dir = path.join(process.cwd(), 'content', 'chapters');
+  const exercises_dir = path.join(process.cwd(), 'content', 'exercises');
 
   const docs: SearchDoc[] = [];
 
-  for (const chapter of flatChapters) {
-    const raw = readSource(chaptersDir, chapter.slug);
+  for (const chapter of kFlatChapters) {
+    const raw = readSource(chapters_dir, chapter.slug);
     docs.push({
       id: `chapter:${chapter.slug}`,
       kind: 'chapter',
       url: `/chapters/${chapter.slug}`,
       title: chapter.title,
-      section: `${chapter.trackLabel} · Chapter ${chapter.num}`,
-      trackColor: chapter.trackColor,
+      section: `${chapter.track_label} · Chapter ${chapter.num}`,
+      track_color: chapter.track_color,
       summary: chapter.summary,
       headings: extractHeadings(raw).slice(0, 40),
       text: stripMdx(raw).slice(0, 6000),
     });
   }
 
-  for (const set of exerciseSets) {
-    const raw = readSource(exercisesDir, set.slug);
+  for (const set of kExerciseSets) {
+    const raw = readSource(exercises_dir, set.slug);
     docs.push({
       id: `exercise:${set.slug}`,
       kind: 'exercise',
       url: `/exercises/${set.slug}`,
       title: set.title,
-      section: set.trackLabel,
-      trackColor: set.trackColor,
+      section: set.track_label,
+      track_color: set.track_color,
       summary: set.summary,
       headings: extractHeadings(raw).slice(0, 40),
       text: stripMdx(raw).slice(0, 6000),

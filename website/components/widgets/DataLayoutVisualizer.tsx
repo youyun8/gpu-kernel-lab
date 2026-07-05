@@ -46,26 +46,26 @@ export function DataLayoutVisualizer() {
   const [layout, setLayout] = useState<Layout>('aos');
   const [field, setField] = useState<Field>(0);
 
-  const { fieldOfCell, touched, segmentsTouched, efficiency } = useMemo(() => {
+  const { field_of_cell, touched, segmentsTouched, efficiency } = useMemo(() => {
     // Map every float slot in the window back to the field stored there.
-    const cellField = new Array<Field>(kTotalFloats).fill(0);
+    const cell_field = new Array<Field>(kTotalFloats).fill(0);
     for (let i = 0; i < kNumParticles; ++i) {
       for (let f = 0; f < kNumFields; ++f) {
-        cellField[elementIndex(layout, i, f as Field)] = f as Field;
+        cell_field[elementIndex(layout, i, f as Field)] = f as Field;
       }
     }
     // One warp: lanes 0..31 read `field` of particles 0..31 in the same cycle.
-    const touchedCells = new Set<number>();
+    const touched_cells = new Set<number>();
     for (let lane = 0; lane < kWarpSize; ++lane) {
-      touchedCells.add(elementIndex(layout, lane, field));
+      touched_cells.add(elementIndex(layout, lane, field));
     }
-    const segments = new Set([...touchedCells].map((c) => Math.floor(c / kFloatsPerSegment)));
-    const usefulBytes = kWarpSize * kBytesPerElement;
+    const segments = new Set([...touched_cells].map((c) => Math.floor(c / kFloatsPerSegment)));
+    const useful_bytes = kWarpSize * kBytesPerElement;
     return {
-      fieldOfCell: cellField,
-      touched: touchedCells,
+      field_of_cell: cell_field,
+      touched: touched_cells,
       segmentsTouched: segments.size,
-      efficiency: usefulBytes / (segments.size * kSegmentBytes),
+      efficiency: useful_bytes / (segments.size * kSegmentBytes),
     };
   }, [layout, field]);
 
@@ -123,26 +123,26 @@ export function DataLayoutVisualizer() {
           className="min-w-[560px] space-y-1"
         >
           {rows.map((row) => {
-            const rowTouched = Array.from({ length: kFloatsPerSegment }, (_, c) => touched.has(row * kFloatsPerSegment + c)).some(Boolean);
+            const row_touched = Array.from({ length: kFloatsPerSegment }, (_, c) => touched.has(row * kFloatsPerSegment + c)).some(Boolean);
             return (
               <div key={row} className="flex items-center gap-2">
-                <span className={`w-14 shrink-0 text-right font-mono text-[10px] ${rowTouched ? 'text-primary' : 'text-muted-foreground'}`}>
+                <span className={`w-14 shrink-0 text-right font-mono text-[10px] ${row_touched ? 'text-primary' : 'text-muted-foreground'}`}>
                   {row * kSegmentBytes}B
                 </span>
-                <div className={`grid flex-1 grid-cols-[repeat(32,minmax(0,1fr))] gap-px rounded p-0.5 ${rowTouched ? 'bg-primary/20' : 'bg-background'}`}>
+                <div className={`grid flex-1 grid-cols-[repeat(32,minmax(0,1fr))] gap-px rounded p-0.5 ${row_touched ? 'bg-primary/20' : 'bg-background'}`}>
                   {Array.from({ length: kFloatsPerSegment }, (_, col) => {
                     const cell = row * kFloatsPerSegment + col;
-                    const isTouched = touched.has(cell);
+                    const is_touched = touched.has(cell);
                     return (
                       <div
                         key={col}
                         className="h-4 rounded-[2px]"
                         style={{
-                          backgroundColor: kFieldColors[fieldOfCell[cell]],
-                          opacity: isTouched ? 1 : 0.22,
-                          outline: isTouched ? '1px solid hsl(var(--foreground))' : undefined,
+                          backgroundColor: kFieldColors[field_of_cell[cell]],
+                          opacity: is_touched ? 1 : 0.22,
+                          outline: is_touched ? '1px solid hsl(var(--foreground))' : undefined,
                         }}
-                        title={`float #${cell} = 欄位 ${kFieldNames[fieldOfCell[cell]]}${isTouched ? ' (本 cycle 被 warp 讀取)' : ''}`}
+                        title={`float #${cell} = 欄位 ${kFieldNames[field_of_cell[cell]]}${is_touched ? ' (本 cycle 被 warp 讀取)' : ''}`}
                       />
                     );
                   })}

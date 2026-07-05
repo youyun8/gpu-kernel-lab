@@ -29,7 +29,7 @@ export function RooflineChart() {
   const [achieved, setAchieved] = useState(1500);
 
   const cfg = benchmarks.rooflinePoints[platform];
-  const ridgePoint = cfg.peakGflops / cfg.peakBandwidthGBs;
+  const ridge_point = cfg.peakGflops / cfg.peakBandwidthGBs;
 
   const roofline = useMemo(() => {
     const pts: { intensity: number; roof: number }[] = [];
@@ -41,9 +41,9 @@ export function RooflineChart() {
     return pts;
   }, [cfg]);
 
-  const builtinPoints = cfg.kernels.map((k) => ({ x: k.intensity, y: k.gflops, name: k.name }));
-  const userIntensity = bytes > 0 ? flops / bytes : 0;
-  const userPoint = [{ x: userIntensity, y: achieved, name: '你的 kernel' }];
+  const builtin_points = cfg.kernels.map((k) => ({ x: k.intensity, y: k.gflops, name: k.name }));
+  const user_intensity = bytes > 0 ? flops / bytes : 0;
+  const user_point = [{ x: user_intensity, y: achieved, name: '你的 kernel' }];
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -58,7 +58,7 @@ export function RooflineChart() {
         </div>
       </div>
       <p className="mb-4 text-xs text-muted-foreground">
-        peak {(cfg.peakGflops / 1000).toFixed(1)} TFLOP/s · BW {cfg.peakBandwidthGBs} GB/s · ridge point AI ≈ {ridgePoint.toFixed(1)} FLOP/byte · <span className="text-[#ffa657]">示意數據</span>
+        peak {(cfg.peakGflops / 1000).toFixed(1)} TFLOP/s · BW {cfg.peakBandwidthGBs} GB/s · ridge point AI ≈ {ridge_point.toFixed(1)} FLOP/byte · <span className="text-[#ffa657]">示意數據</span>
       </p>
 
       <div className="h-80" aria-hidden>
@@ -71,8 +71,8 @@ export function RooflineChart() {
             <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', color: '#fff' }} formatter={(v: number, n) => [typeof v === 'number' ? v.toFixed(1) : v, n]} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <Line data={roofline} dataKey="roof" name="roofline" type="monotone" dot={false} stroke="#39d353" strokeWidth={2} isAnimationActive={false} xAxisId={0} />
-            <Scatter data={builtinPoints} name="內建 kernels" fill="#58a6ff" />
-            <Scatter data={userPoint} name="你的 kernel" fill="#f778ba" />
+            <Scatter data={builtin_points} name="內建 kernels" fill="#58a6ff" />
+            <Scatter data={user_point} name="你的 kernel" fill="#f778ba" />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -92,7 +92,7 @@ export function RooflineChart() {
         </label>
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
-        你的 kernel arithmetic intensity = FLOPs / bytes = <span className="font-mono text-primary">{userIntensity.toFixed(2)}</span> FLOP/byte。若這個點落在斜線 (bandwidth roof) 上,代表 bandwidth-bound;落在水平線 (compute roof) 上則是 compute-bound。點與屋頂的垂直距離就是還能榨出的效能空間。
+        你的 kernel arithmetic intensity = FLOPs / bytes = <span className="font-mono text-primary">{user_intensity.toFixed(2)}</span> FLOP/byte。若這個點落在斜線 (bandwidth roof) 上,代表 bandwidth-bound;落在水平線 (compute roof) 上則是 compute-bound。點與屋頂的垂直距離就是還能榨出的效能空間。
       </p>
     </div>
   );

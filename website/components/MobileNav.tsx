@@ -14,23 +14,23 @@ interface NavItem {
 /**
  * Compact header navigation for small screens. The desktop header lays every
  * link out in a single row, which overflows a phone viewport, so below `md`
- * we collapse the links, GitHub and 設定 into a slide-down panel behind a
+ * we collapse the links, GitHub, and settings into a slide-down panel behind a
  * hamburger while keeping the theme toggle always reachable.
  */
-export function MobileNav({ navItems, repo }: { navItems: NavItem[]; repo: string }) {
+export function MobileNav({ nav_items, repo }: { nav_items: NavItem[]; repo: string }) {
   const [open, setOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings_open, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    const previousOverflow = document.body.style.overflow;
+    const previous_overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape') setOpen(false);
     }
     document.addEventListener('keydown', onKey);
     return () => {
-      document.body.style.overflow = previousOverflow;
+      document.body.style.overflow = previous_overflow;
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
@@ -60,7 +60,7 @@ export function MobileNav({ navItems, repo }: { navItems: NavItem[]; repo: strin
             className="fixed inset-x-0 top-14 z-40 border-b border-border bg-background/95 px-4 py-3 shadow-lg backdrop-blur"
           >
             <ul className="flex flex-col gap-0.5">
-              {navItems.map((item) => (
+              {nav_items.map((item) => (
                 <li key={item.href}>
                   <Link
                     href={item.href}
@@ -99,7 +99,7 @@ export function MobileNav({ navItems, repo }: { navItems: NavItem[]; repo: strin
         </>
       )}
 
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsDialog open={settings_open} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

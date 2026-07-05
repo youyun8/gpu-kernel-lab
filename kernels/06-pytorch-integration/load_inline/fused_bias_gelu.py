@@ -10,7 +10,7 @@ All are checked for correctness and timed end-to-end with CUDA events + warmup.
 import torch
 from torch.utils.cpp_extension import load_inline
 
-_CUDA_SRC = r"""
+kCudaSrc = r"""
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
@@ -18,8 +18,8 @@ constexpr int kBlockSize = 256;
 constexpr float kSqrt2Inv = 0.7071067811865476f;
 
 // One block per row: load once, apply bias + gelu in registers, block-reduce.
-__global__ void fusedBiasGeluRowsum(const float* x, const float* bias, float* out,
-                                    int rows, int cols) {
+__global__ void fusedBiasGeluRowSumKernel(const float* x, const float* bias, float* out,
+                                          int rows, int cols) {
   __shared__ float smem[kBlockSize];
   int row = blockIdx.x;
   int tid = threadIdx.x;
@@ -38,7 +38,7 @@ __global__ void fusedBiasGeluRowsum(const float* x, const float* bias, float* ou
   if (tid == 0) out[row] = smem[0];
 }
 
-torch::Tensor fused_bias_gelu_rowsum(torch::Tensor x, torch::Tensor bias) {
+torch::Tensor fusedBiasGeluRowSum(torch::Tensor x, torch::Tensor bias) {
   TORCH_CHECK(x.is_cuda() && bias.is_cuda(), "inputs must be on device");
   x = x.contiguous();
   bias = bias.contiguous();
@@ -47,13 +47,13 @@ torch::Tensor fused_bias_gelu_rowsum(torch::Tensor x, torch::Tensor bias) {
   const int cols = x.size(1);
   auto out = torch::empty({rows}, x.options());
   auto stream = at::cuda::getCurrentCUDAStream();
-  fusedBiasGeluRowsum<<<rows, kBlockSize, 0, stream>>>(
+  fusedBiasGeluRowSumKernel<<<rows, kBlockSize, 0, stream>>>(
       x.data_ptr<float>(), bias.data_ptr<float>(), out.data_ptr<float>(), rows, cols);
   return out;
 }
 """
 
-_CPP_SRC = "torch::Tensor fused_bias_gelu_rowsum(torch::Tensor x, torch::Tensor bias);"
+kCppSrc = "torch::Tensor fusedBiasGeluRowSum(torch::Tensor x, torch::Tensor bias);"
 
 
 def baseline(x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
@@ -62,7 +62,7 @@ def baseline(x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     return h.sum(dim=-1)
 
 
-def benchmark_ms(fn, iters: int = 100, warmup: int = 20) -> float:
+def benchmarkMs(fn, iters: int = 100, warmup: int = 20) -> float:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -83,9 +83,9 @@ def main() -> None:
 
     module = load_inline(
         name="fused_bias_gelu",
-        cpp_sources=_CPP_SRC,
-        cuda_sources=_CUDA_SRC,
-        functions=["fused_bias_gelu_rowsum"],
+        cpp_sources=kCppSrc,
+        cuda_sources=kCudaSrc,
+        functions=["fusedBiasGeluRowSum"],
         verbose=True,
     )
 
@@ -94,7 +94,7 @@ def main() -> None:
     bias = torch.randn(4096, device=device, dtype=torch.float32)
 
     ref = baseline(x, bias)
-    fused = module.fused_bias_gelu_rowsum(x, bias)
+    fused = module.fusedBiasGeluRowSum(x, bias)
     max_err = (ref - fused).abs().max().item()
     assert max_err < 1e-2, f"fused mismatch: {max_err}"
     print(f"fused correctness OK (max abs error {max_err:.3e})")
@@ -102,9 +102,9 @@ def main() -> None:
     compiled = torch.compile(baseline)
     compiled(x, bias)  # warmup / compile
 
-    t_base = benchmark_ms(lambda: baseline(x, bias))
-    t_comp = benchmark_ms(lambda: compiled(x, bias))
-    t_fused = benchmark_ms(lambda: module.fused_bias_gelu_rowsum(x, bias))
+    t_base = benchmarkMs(lambda: baseline(x, bias))
+    t_comp = benchmarkMs(lambda: compiled(x, bias))
+    t_fused = benchmarkMs(lambda: module.fusedBiasGeluRowSum(x, bias))
     print(f"baseline       : {t_base:.3f} ms")
     print(f"torch.compile  : {t_comp:.3f} ms  ({t_base / t_comp:.2f}x vs baseline)")
     print(f"fused kernel   : {t_fused:.3f} ms  ({t_base / t_fused:.2f}x vs baseline)")

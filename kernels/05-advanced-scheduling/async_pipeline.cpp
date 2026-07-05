@@ -25,13 +25,13 @@ __global__ void copySync(const float* in, float* out, int n) {
 
 // Pipelined: each block streams its chunk through two shared-memory buffers,
 // prefetching the next tile while scaling the current one.
-__global__ void copyPipelined(const float* in, float* out, int n, int tilesPerBlock) {
+__global__ void copyPipelined(const float* in, float* out, int n, int tiles_per_block) {
   __shared__ float buf[2][kTile];
   int tid = threadIdx.x;
-  int blockStart = blockIdx.x * tilesPerBlock * kTile;
+  int block_start = blockIdx.x * tiles_per_block * kTile;
 
-  auto load = [&](int tileIdx, int stage) {
-    int g = blockStart + tileIdx * kTile + tid;
+  auto load = [&](int tile_idx, int stage) {
+    int g = block_start + tile_idx * kTile + tid;
     buf[stage][tid] = (g < n) ? in[g] : 0.0f;
   };
 
@@ -39,58 +39,58 @@ __global__ void copyPipelined(const float* in, float* out, int n, int tilesPerBl
   load(0, stage);
   __syncthreads();
 
-  for (int t = 0; t < tilesPerBlock; ++t) {
-    int nextStage = stage ^ 1;
-    if (t + 1 < tilesPerBlock) load(t + 1, nextStage);  // prefetch
-    int g = blockStart + t * kTile + tid;
+  for (int t = 0; t < tiles_per_block; ++t) {
+    int next_stage = stage ^ 1;
+    if (t + 1 < tiles_per_block) load(t + 1, next_stage);  // prefetch
+    int g = block_start + t * kTile + tid;
     if (g < n) out[g] = buf[stage][tid] * kScale;
     __syncthreads();
-    stage = nextStage;
+    stage = next_stage;
   }
 }
 
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 24;
-  const size_t bytes = static_cast<size_t>(kN) * sizeof(float);
+  constexpr int kSizeN = 1 << 24;
+  const size_t bytes = static_cast<size_t>(kSizeN) * sizeof(float);
   constexpr int kTilesPerBlock = 8;
 
-  std::vector<float> host(kN);
-  std::vector<float> reference(kN);
-  for (int i = 0; i < kN; ++i) {
+  std::vector<float> host(kSizeN);
+  std::vector<float> reference(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
     host[i] = static_cast<float>(i % 251) * 0.3f;
     reference[i] = host[i] * kScale;
   }
-  std::vector<float> result(kN);
+  std::vector<float> result(kSizeN);
 
-  float* devIn = nullptr;
-  float* devOut = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devIn), bytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devOut), bytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devIn, host.data(), bytes));
+  float* dev_in = nullptr;
+  float* dev_out = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_in), bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_out), bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_in, host.data(), bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
-  const size_t bytesMoved = 2 * bytes;
+  const size_t bytes_moved = 2 * bytes;
 
-  const int gridSync = (kN + kBlockSize - 1) / kBlockSize;
-  auto launchSync = [&]() { GPU_LAUNCH(copySync, gridSync, kBlockSize, 0, devIn, devOut, kN); };
-  launchSync();
+  const int grid_sync = (kSizeN + kBlockSize - 1) / kBlockSize;
+  auto launch_sync = [&]() { GPU_LAUNCH(copySync, grid_sync, kBlockSize, 0, dev_in, dev_out, kSizeN); };
+  launch_sync();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
   if (!gklab::verifyClose(result, reference)) return EXIT_FAILURE;
-  gklab::report("copy_sync", gklab::benchmarkKernel(launchSync, bytesMoved, 0.0), kPeakGbPerSec, 0.0);
+  gklab::report("copy_sync", gklab::benchmarkKernel(launch_sync, bytes_moved, 0.0), kPeakGbPerSec, 0.0);
 
-  const int elementsPerBlock = kTilesPerBlock * kTile;
-  const int gridPipe = (kN + elementsPerBlock - 1) / elementsPerBlock;
-  auto launchPipe = [&]() { GPU_LAUNCH(copyPipelined, gridPipe, kBlockSize, 0, devIn, devOut, kN, kTilesPerBlock); };
-  launchPipe();
+  const int elements_per_block = kTilesPerBlock * kTile;
+  const int grid_pipe = (kSizeN + elements_per_block - 1) / elements_per_block;
+  auto launch_pipe = [&]() { GPU_LAUNCH(copyPipelined, grid_pipe, kBlockSize, 0, dev_in, dev_out, kSizeN, kTilesPerBlock); };
+  launch_pipe();
   GPU_CHECK(gpuDeviceSynchronize());
-  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devOut, bytes));
+  GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_out, bytes));
   if (!gklab::verifyClose(result, reference)) return EXIT_FAILURE;
-  gklab::report("copy_pipelined", gklab::benchmarkKernel(launchPipe, bytesMoved, 0.0), kPeakGbPerSec, 0.0);
+  gklab::report("copy_pipelined", gklab::benchmarkKernel(launch_pipe, bytes_moved, 0.0), kPeakGbPerSec, 0.0);
 
-  GPU_CHECK(gpuFree(devIn));
-  GPU_CHECK(gpuFree(devOut));
+  GPU_CHECK(gpuFree(dev_in));
+  GPU_CHECK(gpuFree(dev_out));
   return EXIT_SUCCESS;
 }

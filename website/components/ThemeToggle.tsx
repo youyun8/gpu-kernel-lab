@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useTheme } from 'next-themes';
 import { Monitor, Moon, Sun } from 'lucide-react';
 
-const baseClass =
+const kBaseClass =
   'inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-sm text-muted-foreground transition hover:border-primary hover:text-foreground';
 
 /**
@@ -19,7 +19,7 @@ export function ThemeToggle() {
 
   if (!mounted) {
     return (
-      <button type="button" className={baseClass} aria-label="切換色彩模式">
+      <button type="button" className={kBaseClass} aria-label="切換色彩模式">
         <Monitor className="h-4 w-4" aria-hidden />
       </button>
     );
@@ -33,7 +33,7 @@ export function ThemeToggle() {
   return (
     <button
       type="button"
-      className={baseClass}
+      className={kBaseClass}
       aria-label={`色彩模式：${label}（點擊切換）`}
       title={`色彩模式：${label}`}
       onClick={() => setTheme(next)}

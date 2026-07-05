@@ -1,12 +1,12 @@
 import Link from 'next/link';
-import { siteConfig } from '@/lib/site';
+import { kSiteConfig } from '@/lib/site';
 import { AppWidthContainer } from '@/components/AppWidthContainer';
 import { SettingsNavButton } from '@/components/SettingsModal';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { MobileNav } from '@/components/MobileNav';
 import { SiteSearch } from '@/components/SiteSearch';
 
-const navItems = [
+const kNavItems = [
   { href: '/', label: '首頁' },
   { href: '/roadmap', label: '學習路線圖' },
   { href: '/exercises', label: '練習與解答' },
@@ -18,11 +18,11 @@ export function SiteHeader() {
       <AppWidthContainer className="flex h-14 items-center gap-2 px-4 sm:gap-4">
         <Link href="/" className="flex shrink-0 items-center gap-2 font-semibold text-foreground">
           <span aria-hidden className="text-primary">▍</span>
-          <span className="hidden sm:inline">{siteConfig.name}</span>
+          <span className="hidden sm:inline">{kSiteConfig.name}</span>
         </Link>
         <SiteSearch />
         <nav aria-label="主要導覽" className="ml-auto hidden items-center gap-1 text-sm md:flex">
-          {navItems.map((item) => (
+          {kNavItems.map((item) => (
             <Link
               key={item.href}
               href={item.href}
@@ -32,7 +32,7 @@ export function SiteHeader() {
             </Link>
           ))}
           <a
-            href={siteConfig.repo}
+            href={kSiteConfig.repo}
             className="ml-1 rounded border border-border px-3 py-1.5 text-muted-foreground transition hover:border-primary hover:text-foreground"
             target="_blank"
             rel="noreferrer"
@@ -43,7 +43,7 @@ export function SiteHeader() {
           <SettingsNavButton />
           <ThemeToggle />
         </nav>
-        <MobileNav navItems={navItems} repo={siteConfig.repo} />
+        <MobileNav nav_items={kNavItems} repo={kSiteConfig.repo} />
       </AppWidthContainer>
     </header>
   );

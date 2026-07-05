@@ -77,13 +77,13 @@ bool verifyHistogram(const char* name, const std::vector<unsigned int>& got,
 }  // namespace
 
 int main() {
-  constexpr int kN = 1 << 24;
+  constexpr int kSizeN = 1 << 24;
   constexpr int kGrid = 1024;
-  const size_t inputBytes = static_cast<size_t>(kN) * sizeof(unsigned char);
-  const size_t binBytes = kBins * sizeof(unsigned int);
+  const size_t input_bytes = static_cast<size_t>(kSizeN) * sizeof(unsigned char);
+  const size_t bin_bytes = kBins * sizeof(unsigned int);
 
-  std::vector<unsigned char> input(kN);
-  for (int i = 0; i < kN; ++i) {
+  std::vector<unsigned char> input(kSizeN);
+  for (int i = 0; i < kSizeN; ++i) {
     // Skewed distribution: half the values hit bin 7, most of the rest hit a
     // small hot set, and a tail covers all bins.
     if ((i & 1) == 0) {
@@ -99,44 +99,44 @@ int main() {
   std::vector<unsigned int> result(kBins);
   cpuHistogram(input, reference);
 
-  unsigned char* devInput = nullptr;
-  unsigned int* devBins = nullptr;
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devInput), inputBytes));
-  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&devBins), binBytes));
-  GPU_CHECK(gpuMemcpyHostToDevice(devInput, input.data(), inputBytes));
+  unsigned char* dev_input = nullptr;
+  unsigned int* dev_bins = nullptr;
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_input), input_bytes));
+  GPU_CHECK(gpuMalloc(reinterpret_cast<void**>(&dev_bins), bin_bytes));
+  GPU_CHECK(gpuMemcpyHostToDevice(dev_input, input.data(), input_bytes));
 
   constexpr double kPeakGbPerSec = 1555.0;
-  const size_t bytesMoved = inputBytes + binBytes;
+  const size_t bytes_moved = input_bytes + bin_bytes;
 
-  auto run = [&](const char* name, const std::function<void()>& kernelLaunch) -> bool {
+  auto run = [&](const char* name, const std::function<void()>& kernel_launch) -> bool {
     auto launch = [&]() {
-      GPU_CHECK(gpuMemset(devBins, 0, binBytes));
-      kernelLaunch();
+      GPU_CHECK(gpuMemset(dev_bins, 0, bin_bytes));
+      kernel_launch();
     };
     launch();
     GPU_CHECK(gpuDeviceSynchronize());
-    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), devBins, binBytes));
+    GPU_CHECK(gpuMemcpyDeviceToHost(result.data(), dev_bins, bin_bytes));
     if (!verifyHistogram(name, result, reference)) return false;
-    gklab::report(name, gklab::benchmarkKernel(launch, bytesMoved, 0.0), kPeakGbPerSec, 0.0);
+    gklab::report(name, gklab::benchmarkKernel(launch, bytes_moved, 0.0), kPeakGbPerSec, 0.0);
     return true;
   };
 
   if (!run("hist_global_atomic", [&]() {
-        GPU_LAUNCH(histogramGlobalAtomic, kGrid, kBlockSize, 0, devInput, devBins, kN);
+        GPU_LAUNCH(histogramGlobalAtomic, kGrid, kBlockSize, 0, dev_input, dev_bins, kSizeN);
       }))
     return EXIT_FAILURE;
 
   if (!run("hist_warp_aggregated", [&]() {
-        GPU_LAUNCH(histogramWarpAggregated, kGrid, kBlockSize, 0, devInput, devBins, kN);
+        GPU_LAUNCH(histogramWarpAggregated, kGrid, kBlockSize, 0, dev_input, dev_bins, kSizeN);
       }))
     return EXIT_FAILURE;
 
   if (!run("hist_block_private", [&]() {
-        GPU_LAUNCH(histogramBlockPrivate, kGrid, kBlockSize, 0, devInput, devBins, kN);
+        GPU_LAUNCH(histogramBlockPrivate, kGrid, kBlockSize, 0, dev_input, dev_bins, kSizeN);
       }))
     return EXIT_FAILURE;
 
-  GPU_CHECK(gpuFree(devInput));
-  GPU_CHECK(gpuFree(devBins));
+  GPU_CHECK(gpuFree(dev_input));
+  GPU_CHECK(gpuFree(dev_bins));
   return EXIT_SUCCESS;
 }

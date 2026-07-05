@@ -6,7 +6,7 @@
 
 namespace {
 
-constexpr int kBlockDim = 16;
+constexpr int kBlockDimension = 16;
 
 __global__ void sgemmNaive(const float* a, const float* b, float* c, int m, int n, int k) {
   int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -21,12 +21,12 @@ __global__ void sgemmNaive(const float* a, const float* b, float* c, int m, int 
 }  // namespace
 
 int main() {
-  constexpr int kM = 1024;
-  constexpr int kN = 1024;
-  constexpr int kK = 1024;
-  dim3 block(kBlockDim, kBlockDim);
-  dim3 grid((kN + kBlockDim - 1) / kBlockDim, (kM + kBlockDim - 1) / kBlockDim);
-  return gklab::runGemm("sgemm_step0_naive", kM, kN, kK, [&](const gklab::GemmBuffers& buf) {
-    GPU_LAUNCH(sgemmNaive, grid, block, 0, buf.a, buf.b, buf.c, kM, kN, kK);
+  constexpr int kSizeM = 1024;
+  constexpr int kSizeN = 1024;
+  constexpr int kSizeK = 1024;
+  dim3 block(kBlockDimension, kBlockDimension);
+  dim3 grid((kSizeN + kBlockDimension - 1) / kBlockDimension, (kSizeM + kBlockDimension - 1) / kBlockDimension);
+  return gklab::runGemm("sgemm_step0_naive", kSizeM, kSizeN, kSizeK, [&](const gklab::GemmBuffers& buf) {
+    GPU_LAUNCH(sgemmNaive, grid, block, 0, buf.a, buf.b, buf.c, kSizeM, kSizeN, kSizeK);
   });
 }

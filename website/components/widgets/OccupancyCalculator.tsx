@@ -19,7 +19,7 @@ interface Arch {
   maxWarpsPerSM: number;
   maxBlocksPerSM: number;
   regsPerSM: number;
-  smemPerBlockBytes: number;
+  smem_per_block_bytes: number;
   regAllocUnit: number; // registers rounded per warp allocation
 }
 
@@ -32,7 +32,7 @@ const kArchs: Record<string, Arch> = {
     maxWarpsPerSM: 64,
     maxBlocksPerSM: 32,
     regsPerSM: 65536,
-    smemPerBlockBytes: 163 * 1024,
+    smem_per_block_bytes: 163 * 1024,
     regAllocUnit: 256,
   },
   H100: {
@@ -42,7 +42,7 @@ const kArchs: Record<string, Arch> = {
     maxWarpsPerSM: 64,
     maxBlocksPerSM: 32,
     regsPerSM: 65536,
-    smemPerBlockBytes: 227 * 1024,
+    smem_per_block_bytes: 227 * 1024,
     regAllocUnit: 256,
   },
   MI250: {
@@ -52,7 +52,7 @@ const kArchs: Record<string, Arch> = {
     maxWarpsPerSM: 32,
     maxBlocksPerSM: 32,
     regsPerSM: 65536,
-    smemPerBlockBytes: 64 * 1024,
+    smem_per_block_bytes: 64 * 1024,
     regAllocUnit: 512,
   },
   MI300: {
@@ -62,70 +62,70 @@ const kArchs: Record<string, Arch> = {
     maxWarpsPerSM: 32,
     maxBlocksPerSM: 32,
     regsPerSM: 65536,
-    smemPerBlockBytes: 64 * 1024,
+    smem_per_block_bytes: 64 * 1024,
     regAllocUnit: 512,
   },
 };
 
 interface OccResult {
   occupancy: number;
-  activeWarps: number;
+  active_warps: number;
   limiter: string;
-  blocksByWarp: number;
-  blocksByReg: number;
-  blocksBySmem: number;
-  blocksByHw: number;
+  blocks_by_warp: number;
+  blocks_by_reg: number;
+  blocks_by_smem: number;
+  blocks_by_hw: number;
 }
 
-function computeOccupancy(arch: Arch, regsPerThread: number, smemPerBlock: number, blockSize: number): OccResult {
-  const warpsPerBlock = Math.ceil(blockSize / arch.laneCount);
+function computeOccupancy(arch: Arch, regsPerThread: number, smem_per_block: number, block_size: number): OccResult {
+  const warps_per_block = Math.ceil(block_size / arch.laneCount);
 
   // Register limit: registers are allocated per warp, rounded to an allocation unit.
   const regsPerWarp = Math.ceil((regsPerThread * arch.laneCount) / arch.regAllocUnit) * arch.regAllocUnit;
-  const warpsByReg = regsPerWarp > 0 ? Math.floor(arch.regsPerSM / regsPerWarp) : arch.maxWarpsPerSM;
-  const blocksByReg = Math.floor(warpsByReg / warpsPerBlock);
+  const warps_by_reg = regsPerWarp > 0 ? Math.floor(arch.regsPerSM / regsPerWarp) : arch.maxWarpsPerSM;
+  const blocks_by_reg = Math.floor(warps_by_reg / warps_per_block);
 
   // Shared memory limit.
-  const blocksBySmem = smemPerBlock > 0 ? Math.floor(arch.smemPerBlockBytes / smemPerBlock) : arch.maxBlocksPerSM;
+  const blocks_by_smem = smem_per_block > 0 ? Math.floor(arch.smem_per_block_bytes / smem_per_block) : arch.maxBlocksPerSM;
 
   // Warp-count limit.
-  const blocksByWarp = Math.floor(arch.maxWarpsPerSM / warpsPerBlock);
+  const blocks_by_warp = Math.floor(arch.maxWarpsPerSM / warps_per_block);
 
   // Hardware block limit.
-  const blocksByHw = arch.maxBlocksPerSM;
+  const blocks_by_hw = arch.maxBlocksPerSM;
 
-  const activeBlocks = Math.max(0, Math.min(blocksByReg, blocksBySmem, blocksByWarp, blocksByHw));
-  const activeWarps = Math.min(activeBlocks * warpsPerBlock, arch.maxWarpsPerSM);
-  const occupancy = activeWarps / arch.maxWarpsPerSM;
+  const active_blocks = Math.max(0, Math.min(blocks_by_reg, blocks_by_smem, blocks_by_warp, blocks_by_hw));
+  const active_warps = Math.min(active_blocks * warps_per_block, arch.maxWarpsPerSM);
+  const occupancy = active_warps / arch.maxWarpsPerSM;
 
   const limits: { name: string; value: number }[] = [
-    { name: 'registers', value: blocksByReg },
-    { name: 'shared memory', value: blocksBySmem },
-    { name: 'warps per SM', value: blocksByWarp },
-    { name: 'blocks per SM', value: blocksByHw },
+    { name: 'registers', value: blocks_by_reg },
+    { name: 'shared memory', value: blocks_by_smem },
+    { name: 'warps per SM', value: blocks_by_warp },
+    { name: 'blocks per SM', value: blocks_by_hw },
   ];
-  const minValue = Math.min(...limits.map((l) => l.value));
-  const limiter = limits.filter((l) => l.value === minValue).map((l) => l.name).join(' + ');
+  const min_value = Math.min(...limits.map((l) => l.value));
+  const limiter = limits.filter((l) => l.value === min_value).map((l) => l.name).join(' + ');
 
-  return { occupancy, activeWarps, limiter, blocksByReg, blocksBySmem, blocksByWarp, blocksByHw };
+  return { occupancy, active_warps, limiter, blocks_by_reg, blocks_by_smem, blocks_by_warp, blocks_by_hw };
 }
 
 export function OccupancyCalculator() {
-  const [archKey, setArchKey] = useState<keyof typeof kArchs>('A100');
+  const [arch_key, setArchKey] = useState<keyof typeof kArchs>('A100');
   const [regs, setRegs] = useState(32);
   const [smem, setSmem] = useState(8192);
-  const [blockSize, setBlockSize] = useState(256);
+  const [block_size, setBlockSize] = useState(256);
 
-  const arch = kArchs[archKey];
-  const result = useMemo(() => computeOccupancy(arch, regs, smem, blockSize), [arch, regs, smem, blockSize]);
+  const arch = kArchs[arch_key];
+  const result = useMemo(() => computeOccupancy(arch, regs, smem, block_size), [arch, regs, smem, block_size]);
 
   const curve = useMemo(() => {
     const points: { regs: number; occupancy: number }[] = [];
     for (let r = 16; r <= 128; r += 4) {
-      points.push({ regs: r, occupancy: computeOccupancy(arch, r, smem, blockSize).occupancy * 100 });
+      points.push({ regs: r, occupancy: computeOccupancy(arch, r, smem, block_size).occupancy * 100 });
     }
     return points;
-  }, [arch, smem, blockSize]);
+  }, [arch, smem, block_size]);
 
   return (
     <div className="my-6 rounded-lg border border-border bg-card/40 p-5">
@@ -135,7 +135,7 @@ export function OccupancyCalculator() {
         <label className="text-sm text-muted-foreground">
           GPU 架構
           <select
-            value={archKey}
+            value={arch_key}
             onChange={(e) => setArchKey(e.target.value as keyof typeof kArchs)}
             className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-foreground"
           >
@@ -147,8 +147,8 @@ export function OccupancyCalculator() {
           </select>
         </label>
         <label className="text-sm text-muted-foreground">
-          Block size (threads):<span className="ml-2 font-mono text-primary">{blockSize}</span>
-          <input type="range" min={32} max={1024} step={32} value={blockSize} onChange={(e) => setBlockSize(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="block size" />
+          Block size (threads):<span className="ml-2 font-mono text-primary">{block_size}</span>
+          <input type="range" min={32} max={1024} step={32} value={block_size} onChange={(e) => setBlockSize(Number(e.target.value))} className="mt-1 w-full accent-brand" aria-label="block size" />
         </label>
         <label className="text-sm text-muted-foreground">
           Registers / thread:<span className="ml-2 font-mono text-primary">{regs}</span>
@@ -168,7 +168,7 @@ export function OccupancyCalculator() {
         <div className="rounded-md bg-background p-3">
           <dt className="text-xs text-muted-foreground">Active warps / SM</dt>
           <dd className="font-mono text-lg text-foreground">
-            {result.activeWarps} / {arch.maxWarpsPerSM}
+            {result.active_warps} / {arch.maxWarpsPerSM}
           </dd>
         </div>
         <div className="rounded-md bg-background p-3">
